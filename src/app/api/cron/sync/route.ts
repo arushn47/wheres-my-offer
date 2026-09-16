@@ -28,6 +28,8 @@ async function executeBackgroundSync(userIds: string[]) {
       // Check if any placement rounds (tests/PPT/interviews) are commencing now and notify
       const { checkAndNotifyLiveEvents } = await import('@/lib/notifications/service');
       await checkAndNotifyLiveEvents(userId);
+      const { checkAndNotifyRegistrationDeadlines } = await import('@/lib/notifications/service');
+      await checkAndNotifyRegistrationDeadlines(userId);
     } catch (err: any) {
       console.error(`[Cron Sync] Failed for user ${userId}:`, err);
     }

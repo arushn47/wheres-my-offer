@@ -90,13 +90,21 @@ const FILTERS = [
   { id: 'all', label: 'All' },
 ];
 
-const matchFilter = (status: string, filter: string) => {
+const hasFutureRegistrationDeadline = (company: CompanyWithDetails) =>
+  (company.events || []).some(
+    (event) =>
+      event.event_type === 'registration_deadline' &&
+      Boolean(event.start_time) &&
+      new Date(event.start_time!).getTime() > Date.now()
+  );
+
+const matchFilter = (status: string, filter: string, company?: CompanyWithDetails) => {
   const s = status.toLowerCase();
   if (filter === 'all') return true;
   if (filter === 'active') {
     // Active = everything currently in progress (applied, scheduled, completed, shortlisted, offers)
     // Terminal rejections across ANY stage, non-registrations, and withdrawals are excluded
-    return !isInactiveStatus(s);
+    return !isInactiveStatus(s) || (s === 'not_applied' && Boolean(company && hasFutureRegistrationDeadline(company)));
   }
   if (filter === 'shortlisted') {
     // Only active shortlists for upcoming rounds, selections, or offers (NOT completed rounds awaiting results, and NOT eliminated)
@@ -241,7 +249,7 @@ export default function CompaniesClient({
       .filter((c) => {
         const rawStatus = c.application?.status || 'applied';
         const { effectiveStatus } = getEffectiveStage(rawStatus, c.latestEvent, c.events);
-        return matchFilter(effectiveStatus, filter);
+        return matchFilter(effectiveStatus, filter, c);
       })
       .filter((c) => {
         if (!q.trim()) return true;
@@ -345,7 +353,7 @@ export default function CompaniesClient({
       const rawStatus = c.application?.status || 'applied';
       const eff = getEffectiveStage(rawStatus, c.latestEvent, c.events);
       const st = eff.effectiveStatus;
-      if (matchFilter(st, 'active')) counts.active++;
+      if (matchFilter(st, 'active', c)) counts.active++;
       if (matchFilter(st, 'shortlisted')) counts.shortlisted++;
       if (matchFilter(st, 'scheduled')) counts.scheduled++;
       if (matchFilter(st, 'not_shortlisted')) counts.not_shortlisted++;

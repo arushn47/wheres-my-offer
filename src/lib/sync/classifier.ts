@@ -303,7 +303,9 @@ export function classifyEmail(
     }
   }
 
-  const isTrustedSender = /vitlions2027|vitbhopal|vitstudent|cdc|placementoffice|noreply\.cdc/i.test(sender);
+  const isTrustedSender =
+    sender === 'noreply.cdcinfo@vitstudent.ac.in' ||
+    sender === 'vitlions2027@vitbhopal.ac.in';
   return {
     classification: isTrustedSender ? 'unclassified_placement_notice' : 'unclassified',
     confidence: isTrustedSender ? 'medium' : 'low',

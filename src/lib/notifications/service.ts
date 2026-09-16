@@ -275,6 +275,52 @@ export async function notifyEventScheduled(params: {
   });
 }
 
+export async function checkAndNotifyRegistrationDeadlines(userId: string) {
+  try {
+    const prefs = await getNotificationPreferences(userId);
+    if (!prefs.notifyReminders || !prefs.reminderEventTypes.includes('registration_deadline')) return;
+
+    const supabase = createAdminClient();
+    const now = Date.now();
+    const { data: deadlines } = await supabase
+      .from('events')
+      .select('id, company_id, start_time, companies(name), applications!inner(status)')
+      .eq('user_id', userId)
+      .eq('event_type', 'registration_deadline')
+      .gt('start_time', new Date(now).toISOString());
+
+    for (const event of deadlines || []) {
+      const application = Array.isArray(event.applications) ? event.applications[0] : event.applications;
+      if (application?.status && application.status !== 'not_applied') continue;
+
+      const deadlineTime = new Date(event.start_time).getTime();
+      const company = Array.isArray(event.companies) ? event.companies[0] : event.companies;
+      const companyName = company?.name || 'Placement Drive';
+
+      for (const leadMinutes of prefs.reminderLeadTimeMins) {
+        const deltaMinutes = (deadlineTime - now) / 60000;
+        if (deltaMinutes > leadMinutes || deltaMinutes < leadMinutes - 15) continue;
+
+        const dateStr = new Date(event.start_time).toLocaleString('en-IN', {
+          month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true,
+        });
+        await sendNotification({
+          userId,
+          type: 'deadline_approaching',
+          title: `${companyName} — Registration Deadline Approaching`,
+          body: `Registration closes ${dateStr}. Apply on NeoPAT before the deadline.`,
+          companyId: event.company_id,
+          eventId: event.id,
+          link: `/companies/${event.company_id}`,
+          dedupeKey: `deadline:${userId}:${event.company_id}:${event.start_time}:${leadMinutes}`,
+        });
+      }
+    }
+  } catch (err: any) {
+    console.warn('[Notification Service] checkAndNotifyRegistrationDeadlines error:', err.message);
+  }
+}
+
 /**
  * Notifies user when a connected Gmail account is disconnected or its token expires.
  */
