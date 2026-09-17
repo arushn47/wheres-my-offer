@@ -3,27 +3,29 @@
 import {
   RefreshCw,
   LogOut,
-  CheckCircle,
-  AlertCircle,
-  X,
   Settings,
   MessageSquare,
 } from 'lucide-react';
 import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { cn, timeAgo } from '@/lib/utils';
+import { timeAgo } from '@/lib/utils';
 import NotificationBell from '@/components/notifications/notification-bell';
 import { AppLogoMark } from '@/components/brand/logo';
 import { useSync } from '@/context/sync-context';
 
-interface TopbarProps {
+export interface MobileHeaderProps {
   userName: string | null;
   userAvatar: string | null;
   lastSyncAt?: string | null;
 }
 
-export default function Topbar({ userName, userAvatar }: TopbarProps) {
+/**
+ * MobileHeader
+ * Rendered on mobile & tablet viewports (< 1024px).
+ * On desktop (>= 1024px), navigation and sync telemetry live in the sidebar.
+ */
+export default function MobileHeader({ userName, userAvatar }: MobileHeaderProps) {
   const router = useRouter();
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [mounted, setMounted] = useState(false);
@@ -35,8 +37,6 @@ export default function Topbar({ userName, userAvatar }: TopbarProps) {
     progressPercent,
     lastSyncAt: currentLastSyncAt,
     startSync,
-    syncResult,
-    dismissResult,
   } = useSync();
 
   useEffect(() => {
@@ -89,8 +89,8 @@ export default function Topbar({ userName, userAvatar }: TopbarProps) {
 
   return (
     <>
-      <header className="relative lg:hidden flex items-center justify-between h-12 px-3.5 sm:px-6 md:px-12 bg-[#09090b]/90 backdrop-blur-xl border-b border-zinc-800/80 sticky top-0 z-40 w-full min-w-0 max-w-full">
-        {/* Left: Mobile logo (hidden on desktop) */}
+      <header className="relative lg:hidden flex items-center justify-between h-12 px-3.5 sm:px-6 md:px-12 bg-[#09090b]/90 backdrop-blur-xl border-b border-zinc-800/80 sticky top-0 z-50 w-full min-w-0 max-w-full">
+        {/* Left: Mobile logo */}
         <div className="flex items-center gap-2 lg:hidden min-w-0 shrink-0">
           <Link href="/" className="flex items-center gap-2 min-w-0 group" title="Where's My Offer?">
             <AppLogoMark size={26} className="shrink-0 transition-transform group-hover:scale-105" />
@@ -104,10 +104,12 @@ export default function Topbar({ userName, userAvatar }: TopbarProps) {
         <div className="flex items-center gap-2 sm:gap-3 shrink-0 ml-auto">
           {/* Minimal Live Sync Pill */}
           {isSyncing ? (
-            <div className="flex items-center gap-1.5 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 text-xs select-none">
+            <div className="flex items-center gap-1.5 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-2 sm:px-2.5 py-1 text-xs select-none">
               <RefreshCw className="h-3 w-3 text-emerald-400 animate-spin shrink-0" />
               <span className="font-mono text-[11px] text-emerald-300 font-medium">
-                {syncProgress?.totalMessages
+                {syncProgress?.totalPagesCount && syncProgress.totalPagesCount > 1
+                  ? `P${(syncProgress.currentPageIndex ?? 0) + 1}/${syncProgress.totalPagesCount} · ${syncProgress.processedMessages}/${syncProgress.totalMessages}`
+                  : syncProgress?.totalMessages
                   ? `${syncProgress.processedMessages}/${syncProgress.totalMessages}`
                   : 'Syncing…'}
               </span>
@@ -132,7 +134,7 @@ export default function Topbar({ userName, userAvatar }: TopbarProps) {
             </button>
           )}
 
-          {/* Real Notification Bell Component */}
+          {/* Mobile Notification Bell */}
           <NotificationBell />
 
           {/* User avatar & dropdown */}
@@ -228,7 +230,7 @@ export default function Topbar({ userName, userAvatar }: TopbarProps) {
           </div>
         </div>
 
-        {/* Ambient 2px Progress Line at Header Bottom Edge */}
+        {/* Ambient Progress Line */}
         {syncProgress && (
           <div className="absolute bottom-0 left-0 right-0 h-[2px] bg-zinc-800/60 overflow-hidden pointer-events-none">
             <div

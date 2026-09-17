@@ -18,8 +18,9 @@ import {
   ShieldAlert,
 } from 'lucide-react';
 import { StatusChip, CategoryBadge } from '@/components/ui/status-chip';
+import { DriveModeBadge } from '@/components/ui/drive-mode-badge';
 import { InstallPwaBanner } from '@/components/notifications/install-pwa-banner';
-import { formatStipend, cn } from '@/lib/utils';
+import { formatStipend, cn, getDriveMode } from '@/lib/utils';
 import { cleanLocationString } from '@/lib/sync/locations';
 import { isInactiveStatus } from '@/lib/stages';
 import type { DashboardStats } from '@/types';
@@ -30,12 +31,15 @@ export interface ActiveApplicationItem {
   companyName: string;
   companyLogo: string | null;
   status: string;
+  statusSubtitle?: string | null;
   role: string | null;
   ctc: string | null;
   stipend: string | null;
   lastUpdated: string | null;
   location?: string | null;
   category?: string | null;
+  notes?: string | null;
+  driveMode?: string | null;
 }
 
 interface DashboardClientProps {
@@ -205,7 +209,7 @@ export default function DashboardClient({
     <div data-testid="dashboard-page" className="mx-auto max-w-7xl space-y-5 sm:space-y-6 w-full min-w-0">
       {/* Onboarding Alert Banner if missing requirements */}
       {(!hasCollegeAccount || !hasNeoId) && (
-        <div className="rounded-2xl border border-amber-500/30 bg-amber-500/[0.05] p-3.5 sm:p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 sm:gap-4">
+        <div className="rounded-2xl border border-amber-500/30 bg-amber-500/5 p-3.5 sm:p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 sm:gap-4">
           <div className="flex items-start gap-3">
             <ShieldAlert className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
             <div>
@@ -281,7 +285,7 @@ export default function DashboardClient({
           initial={{ opacity: 0, y: 14 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.5, delay: 0.3 }}
-          className="flex items-center gap-2.5 sm:gap-3 overflow-x-auto rounded-xl border border-amber-500/20 bg-amber-500/[0.05] px-3 sm:px-4 py-2.5 sm:py-3 scrollbar-none max-w-full min-w-0"
+          className="flex items-center gap-2.5 sm:gap-3 overflow-x-auto rounded-xl border border-amber-500/20 bg-amber-500/5 px-3 sm:px-4 py-2.5 sm:py-3 scrollbar-none max-w-full min-w-0"
           data-testid="upcoming-strip"
         >
           <CalendarClock className="h-4 w-4 shrink-0 text-amber-400" />
@@ -292,7 +296,7 @@ export default function DashboardClient({
               className="flex shrink-0 items-center gap-2 rounded-full border border-zinc-800 bg-zinc-900/70 px-2.5 sm:px-3 py-1 text-[10px] sm:text-[11px] text-zinc-300"
             >
               <span className="h-1.5 w-1.5 rounded-full bg-amber-400 pulse-dot shrink-0" />
-              <span className="truncate max-w-[150px] sm:max-w-none">{e.companyName || 'Company'} — {e.title || e.event_type.replace(/_/g, ' ')}</span>
+              <span className="truncate max-w-37.5 sm:max-w-none">{e.companyName || 'Company'} — {e.title || e.event_type.replace(/_/g, ' ')}</span>
               <span className="font-tabular font-mono text-amber-300 shrink-0">{formatEventTime(e.start_time)}</span>
             </span>
           ))}
@@ -317,9 +321,9 @@ export default function DashboardClient({
         </div>
 
         {upcomingEvents.length === 0 ? (
-          <div className="relative overflow-hidden rounded-2xl border border-zinc-800/80 bg-gradient-to-b from-[#121218] to-[#0a0a0e] p-6 sm:p-8 text-center shadow-lg">
+          <div className="relative overflow-hidden rounded-2xl border border-zinc-800/80 bg-linear-to-b from-[#121218] to-[#0a0a0e] p-6 sm:p-8 text-center shadow-lg">
             {/* Ambient subtle glow background */}
-            <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-emerald-500/10 via-transparent to-transparent pointer-events-none" />
+            <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top,var(--tw-gradient-stops))] from-emerald-500/10 via-transparent to-transparent pointer-events-none" />
 
             {/* Layered Icon Badge with Radar / Calendar aura */}
             <div className="relative mx-auto mb-3.5 flex h-14 w-14 items-center justify-center rounded-2xl border border-emerald-500/25 bg-emerald-500/10 shadow-[0_0_24px_rgba(16,185,129,0.15)]">
@@ -360,7 +364,7 @@ export default function DashboardClient({
               <Link
                 key={ev.id}
                 href={`/companies/${ev.company_id}`}
-                className="group flex flex-col justify-between rounded-xl border border-zinc-800 bg-[#101014] p-4 transition-all duration-200 hover:border-zinc-600 hover:shadow-lg"
+                className="group flex flex-col justify-between rounded-xl border border-zinc-800 bg-bg-surface p-4 transition-all duration-200 hover:border-zinc-600 hover:shadow-lg"
               >
                 <div>
                   <div className="flex items-center justify-between gap-2">
@@ -412,7 +416,7 @@ export default function DashboardClient({
         </div>
 
         {spotlightDrives.length === 0 ? (
-          <div className="relative overflow-hidden rounded-2xl border border-zinc-800/80 bg-gradient-to-b from-[#121218] to-[#0a0a0e] p-6 sm:p-8 text-center shadow-lg">
+          <div className="relative overflow-hidden rounded-2xl border border-zinc-800/80 bg-linear-to-b from-[#121218] to-[#0a0a0e] p-6 sm:p-8 text-center shadow-lg">
             <Zap className="mx-auto h-8 w-8 text-zinc-600 mb-2" />
             <p className="font-display text-sm font-bold text-zinc-300">No active applications in the spotlight</p>
             <p className="mt-1 font-mono text-xs text-zinc-500">Apply to campus circulars or explore all tracked drives.</p>
@@ -423,12 +427,13 @@ export default function DashboardClient({
               const category = c.category || (/1[0-9]\s*lpa|[2-9][0-9]\s*lpa/i.test(c.ctc || '') ? 'Super Dream' : 'Dream');
               const initials = c.companyName.slice(0, 2).toUpperCase();
               const hue = getHue(c.companyName);
+              const driveMode = c.driveMode || getDriveMode(c.notes, campus);
 
               return (
                 <Link
                   key={c.id}
                   href={`/companies/${c.companyId}`}
-                  className="group block w-full min-w-0 max-w-full overflow-hidden rounded-xl border border-zinc-800 bg-[#101014] p-3.5 sm:p-4 transition-all duration-200 hover:border-zinc-600"
+                  className="group block w-full min-w-0 max-w-full overflow-hidden rounded-xl border border-zinc-800 bg-bg-surface p-3.5 sm:p-4 transition-all duration-200 hover:border-zinc-600"
                 >
                   <div className="flex items-start gap-2.5 sm:gap-3 min-w-0">
                     <div className={`flex h-10 w-10 sm:h-11 sm:w-11 shrink-0 items-center justify-center rounded-lg border font-display text-xs sm:text-sm font-bold ${hue}`}>
@@ -457,13 +462,22 @@ export default function DashboardClient({
                     <span className="font-tabular font-mono text-xs sm:text-sm font-bold text-zinc-200 shrink-0">
                       {c.ctc || formatStipend(c.stipend) || 'TBA'}
                     </span>
-                    <span
-                      className="flex items-center gap-1 min-w-0 max-w-[130px] sm:max-w-none truncate shrink-0 text-zinc-400"
-                      title={`Work Location: ${cleanLocationString(c.location)}`}
-                    >
-                      <MapPin className="h-3.5 w-3.5 shrink-0 text-zinc-400" />
-                      <span className="truncate">{cleanLocationString(c.location)}</span>
-                    </span>
+                    {/* Work Location: Neutral/Gray Pin + Text (Only show if specified) */}
+                    {(() => {
+                      const loc = cleanLocationString(c.location);
+                      if (!loc || loc === 'Not Specified') return null;
+                      return (
+                        <span
+                          className="flex items-center gap-1 min-w-0 max-w-33.75 sm:max-w-none truncate shrink-0 text-zinc-400"
+                          title={`Work Location: ${loc}`}
+                        >
+                          <MapPin className="h-3.5 w-3.5 shrink-0 text-zinc-400" />
+                          <span className="truncate">{loc}</span>
+                        </span>
+                      );
+                    })()}
+                    {/* Travel Mode Badge */}
+                    <DriveModeBadge driveMode={driveMode} />
                     <span className="ml-auto font-mono text-[10px] text-zinc-600 shrink-0 transition-colors duration-200 group-hover:text-emerald-400">
                       Open drive details ↗
                     </span>

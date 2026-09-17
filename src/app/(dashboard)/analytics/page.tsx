@@ -46,7 +46,8 @@ export default async function AnalyticsPage() {
     supabase
       .from('candidate_matches')
       .select('id, email_id')
-      .eq('user_id', session.userId),
+      .eq('user_id', session.userId)
+      .neq('match_type', 'xlsx_applied_list'),
     supabase
       .from('users')
       .select('name, neo_id')

@@ -96,6 +96,13 @@ export function SyncProvider({
             setSyncProgress(data.progress);
           }
         } else {
+          // If pending, a batch just finished and more pages are queued — resume immediately
+          if (data.phase === 'pending') {
+            stopPolling();
+            handleSync(false, true);
+            return;
+          }
+
           // Sync has finished or is idle
           stopPolling();
           isSyncingRef.current = false;
@@ -115,6 +122,9 @@ export function SyncProvider({
               'Placement sync complete',
               `${resultData.newEmails} new updates · ${resultData.newCompanies} companies indexed`
             );
+            if (typeof window !== 'undefined') {
+              window.dispatchEvent(new CustomEvent('wmo:refresh_notifications'));
+            }
             router.refresh();
             setTimeout(() => setSyncResult(null), 5000);
           }
@@ -150,7 +160,7 @@ export function SyncProvider({
 
       let willAdvanceNextChunk = false;
 
-      if (!silent) {
+      if (!silent && !isChained) {
         setSyncProgress({
           phase: 'initializing',
           accountEmail: '',

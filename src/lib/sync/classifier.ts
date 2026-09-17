@@ -243,7 +243,7 @@ const CLASSIFICATION_RULES: ClassificationRule[] = [
     classification: 'registration',
     confidence: 'medium',
     match: (s, b, sender) =>
-      /vitlions2027|vitbhopal|vitstudent|cdc|placementoffice/i.test(sender) &&
+      /vitlions2027|vitbhopal|vitstudent|cdc/i.test(sender) &&
       /(?:introducing\s+(?:our\s+)?cohorts|flagship\s+hiring|campus\s+hiring\s+season|apply\s+in\s+the\s+neo\s*pat|career\s+opportunities|cohort.*career|campus\s+recruitment)/i.test(b),
     reason: 'Trusted CDC sender + cohort/flagship program announcement in body',
   },
@@ -256,7 +256,7 @@ const CLASSIFICATION_RULES: ClassificationRule[] = [
     classification: 'unclassified_placement_notice',
     confidence: 'medium',
     match: (_s, _b, sender) =>
-      /vitlions2027|vitbhopal|vitstudent|cdc|placementoffice|noreply\.cdc/i.test(sender),
+      /vitlions2027|vitbhopal|vitstudent|cdc|noreply\.cdc/i.test(sender),
     reason: 'Email from trusted placement office/cell with general circular content',
   },
 
@@ -400,41 +400,41 @@ const SUBJECT_COMPANY_PATTERNS: RegExp[] = [
   // NeoPAT Eligibility & Registration:
   // "Congratulations! You're Eligible for M/s.Value Labs Placement Drive"
   // "Confirmed: Your Registration for Sabre Placement Drive"
-  /(?:congratulations\s*!{0,3}\s*(?:you'?re\s+)?eligible\s+for\s+|confirmed:\s*(?:your\s+registration\s+for\s+)?)(?:m\/s\.?\s*)?([A-Za-z0-9&\s\-\.]+?)\s*(?:\([^)]+\))?\s+placement\s+drive/i,
+  /(?:congratulations\s*!{0,3}\s*(?:you'?re\s+)?eligible\s+for\s+|confirmed:\s*(?:your\s+registration\s+for\s+)?)(?:m\/s\.?\s*)?((?:[A-Za-z0-9&\s\-\.]|\([^)]+\))+?)\s*(?:\([^)]+\))?\s+placement\s+drive/i,
   // "Congratulations!! Zluri Super Dream Internship Selection List - 2027 Batch"
   // "Congratulations!! Flipkart Super Dream Internship Selection list 2027 Batch"
   // "Congratulations !! Valuelabs Super Dream Internship Selection list - 2027 Batch !!"
-  /(?:congratulations\s*!{0,3}\s*)(?:for\s+)?([A-Za-z0-9&\s\-\.]+?)\s*(?:\([^)]+\))?\s+(?:super\s+dream|dream|regular|summer)?\s*(?:internship|placement|ppo|offer)?\s*(?:selection\s+list|shortlist)/i,
+  /(?:congratulations\s*!{0,3}\s*)(?:for\s+)?((?:[A-Za-z0-9&\s\-\.]|\([^)]+\))+?)\s*(?:\([^)]+\))?\s+(?:super\s+dream|dream|regular|summer)?\s*[-–—]?\s*(?:internship|placement|ppo|offer)?\s*(?:selection\s+list|shortlist)/i,
   // "Important: Date Change for Value Labs Placement Drive"
   // "Important: Date Change for Infosy 2027 batch Placement Drive"
   // "Important : Date change : Sandisk Device Design Centre Placement Drive"
-  /(?:important|urgent)\s*:\s*date\s+change\s*(?:for|:)\s*(?:m\/s\.?\s*)?([A-Za-z0-9&\s\-\.]+?)(?:\s+(?:2026|2027|2028)\s+batch|\s+placement|\s+drive|$)/i,
+  /(?:important|urgent)\s*:\s*date\s+change\s*(?:for|:)\s*(?:m\/s\.?\s*)?((?:[A-Za-z0-9&\s\-\.]|\([^)]+\))+?)(?:\s+(?:2026|2027|2028)\s+batch|\s+placement|\s+drive|$)/i,
   // "Updated Optional Form Available - Value Labs Drive"
   // "Optional Form Available - Epsilon Drive"
-  /(?:updated\s+)?optional\s+form\s+(?:available\s*)?[-–—:]\s*(?:m\/s\.?\s*)?([A-Za-z0-9&\s\-\.]+?)\s+drive/i,
+  /(?:updated\s+)?optional\s+form\s+(?:available\s*)?[-–—:]\s*(?:m\/s\.?\s*)?((?:[A-Za-z0-9&\s\-\.]|\([^)]+\))+?)\s+drive/i,
   // "Confirmation: Euler Motors Drive Registration Update"
   // "Euler Motors Drive Registration Update"
   // "Confirmation: Responsive (RFP Software) Drive Registration Update"
   /(?:confirmation:\s*)?((?:[A-Za-z0-9&\s\-\.]|\([^)]+\))+?)\s+drive\s+registration\s*(?:update|$)/i,
   // "Company Name - Drive Registration"
-  /^([A-Za-z0-9&\s\-\.]+?)\s*[-–—]\s*drive\s+registration/i,
+  /^((?:[A-Za-z0-9&\s\-\.]|\([^)]+\))+?)\s*[-–—]\s*drive\s+registration/i,
   // "Zluri Super Dream Internship Selection List..."
-  /^([A-Za-z0-9&\s\-\.]+?)\s*(?:\([^)]+\))?\s+(?:super\s+dream|dream|regular)?\s*(?:internship|placement|ppo|offer)?\s*(?:selection\s+list|shortlist)/i,
+  /^((?:[A-Za-z0-9&\s\-\.]|\([^)]+\))+?)\s*(?:\([^)]+\))?\s+(?:super\s+dream|dream|regular)?\s*[-–—]?\s*(?:internship|placement|ppo|offer)?\s*(?:selection\s+list|shortlist)/i,
   // "M/s.Value Labs Placement Drive"
-  /(?:m\/s\.?\s*)([A-Za-z0-9&\s\-\.]+?)\s+placement\s+drive/i,
+  /(?:m\/s\.?\s*)((?:[A-Za-z0-9&\s\-\.]|\([^)]+\))+?)\s+placement\s+drive/i,
   // "Company Name Placement Drive" / "Company Name Campus Drive"
-  /^([A-Za-z0-9&\s\-\.]+?)\s*(?:\([^)]+\))?\s+(?:placement\s+drive|campus\s+drive)\b/i,
+  /^((?:[A-Za-z0-9&\s\-\.]|\([^)]+\))+?)\s*(?:\([^)]+\))?\s+(?:placement\s+drive|campus\s+drive)\b/i,
   // "MUFG (Mitsubishi UFJ Financial Group) next round of selection process is scheduled on..."
   // "Euler Motors - Online test is scheduled on..."
   // "Amazon PPT & online test is scheduled on..."
   // "BluBridge Technologies Pvt. Ltd Physical selection process is scheduled on..."
   // "Wakefit next round of selection process is scheduled on..."
   // "Goldman sachs application registration link & test link"
-  /^([A-Za-z0-9&\s\-\.]+?)\s*(?:\([^)]+\))?\s*[-–—]?\s*(?:online\s+test|assessment|coding\s+test|physical\s+selection|selection\s+process|next\s+round|ppt|interview|selection\s+list|application\s+registration|test\s+link|registration\s+link)/i,
+  /^((?:[A-Za-z0-9&\s\-\.]|\([^)]+\))+?)\s*(?:\([^)]+\))?\s*[-–—]?\s*(?:online\s+test|assessment|coding\s+test|physical\s+selection|selection\s+process|next\s+round|ppt|interview|selection\s+list|application\s+registration|test\s+link|registration\s+link)/i,
   // "Thanks for taking the Assessment Goldman Sachs UG Summer Internship 2027 - Pooled STEM"
-  /(?:thanks\s+for\s+taking\s+(?:the\s+)?assessment|assessment\s+completed)\s+([A-Za-z0-9&\s\-\.]+?)\s+(?:ug|summer|internship|placement|drive|pooled)/i,
-  // "Company Name Super Dream Internship..." / "WTW Dream Offer..."
-  /^([A-Za-z0-9&\s\-\.]+?)\s+(?:super\s+dream|dream|regular)\s+(?:internship|placement|offer|drive|hiring)/i,
+  /(?:thanks\s+for\s+taking\s+(?:the\s+)?assessment|assessment\s+completed)\s+((?:[A-Za-z0-9&\s\-\.]|\([^)]+\))+?)\s+(?:ug|summer|internship|placement|drive|pooled)/i,
+  // "Company Name Super Dream Internship..." / "WTW Dream Offer..." / "RFPIO India Pvt Ltd (DBA Responsive)..."
+  /^((?:[A-Za-z0-9&\s\-\.]|\([^)]+\))+?)\s+(?:super\s+dream|dream|regular)\s*[-–—]?\s*(?:internship|placement|offer|drive|hiring)/i,
   // "Report Immediately : MUFG PPT"
   /report\s+immediately\s*:\s*([A-Za-z0-9&\s\-\.]+?)\s+(?:ppt|test|drive)/i,
   // "Reminder : ProcDNA Analytics Pvt. Ltd's Next round..."
@@ -610,24 +610,31 @@ export function checkAcronymMatch(shortStr: string, longStr: string): boolean {
 
   const longLower = longStr.toLowerCase();
 
-  // 1. Fast path: Known acronym dictionary
+  // 1. Fast path: Known acronym dictionary (strict boundary or exact match only)
   if (KNOWN_ACRONYMS[candidate]) {
     for (const fullName of KNOWN_ACRONYMS[candidate]) {
-      if (longLower.includes(fullName) || fullName.includes(longLower)) {
+      if (
+        longLower === fullName ||
+        new RegExp(`(?:^|[^a-z0-9])${fullName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:[^a-z0-9]|$)`).test(longLower)
+      ) {
         return true;
       }
     }
   }
 
   // 2. Parenthetical check: e.g. "Willis Towers Watson (WTW India)" matching "WTW"
+  const KNOWN_SHORT_BRANDS = new Set(['ey', 'hp', 'ge', 'bp', 'gs', 'ti', 'de']);
   const parenMatches = Array.from(longStr.matchAll(/\(([^)]+)\)/g)).map((m) => m[1].toLowerCase());
   for (const p of parenMatches) {
     const pClean = p.replace(/[^a-z0-9\s]/g, ' ');
     const pWords = pClean.split(/\s+/).filter(Boolean);
-    if (pWords.includes(candidate)) return true;
+    // If parenthetical is a single word (e.g. "(Zomato)", "(WTW)"), allow matching candidate
+    if (pWords.length === 1 && pWords[0] === candidate && (candidate.length >= 3 || KNOWN_SHORT_BRANDS.has(candidate))) {
+      return true;
+    }
 
-    // Check initials of parenthetical phrase
-    if (pWords.length >= 2) {
+    // Check initials of parenthetical phrase (e.g. "(WTW India)" -> "wi" or "wtw")
+    if (pWords.length >= 2 && candidate.length >= 3) {
       const pInitials = pWords.map((w) => w[0]).join('');
       if (pInitials === candidate) return true;
     }
@@ -695,16 +702,13 @@ export function extractCompanyAliases(rawName: string, canonicalName: string, dr
   }
 
   // ROOT STEM EXTRACTION: Strip generic corporate suffixes to generate a shorter root alias.
-  // e.g. "Unilever Industries" → also aliases "unilever", so college circulars that drop the
-  // formal suffix still resolve to the same company record.
-  // NOTE: Substantive brand words like "India", "Tech", "Solutions", "Services" are intentionally
-  // NOT in this list — those are load-bearing brand words (WorkIndia, Tech Mahindra, etc.)
-  const CORPORATE_SUFFIXES_REGEX = /\s+(?:financial\s+services|financial|industries|technologies|technology|services|service|solutions|solution|labs|lab|consulting|consultancy|holdings|holding|group|enterprises|enterprise|management|advisory|capital|systems|system|analytics|pvt|ltd|limited|inc|llc|global|international|india|private|corp|corporation)\b/gi;
+  // e.g. "Unilever Industries" → also aliases "unilever"
+  const CORPORATE_SUFFIXES_REGEX = /\s+(?:financial\s+services|financial|industries|technologies|technology|services|service|solutions|solution|labs|lab|consulting|consultancy|holdings|holding|group|enterprises|enterprise|management|advisory|capital|systems|system|analytics|pvt|ltd|limited|inc|llc|global|international|private|corp|corporation)\b/gi;
   let currentStem = canonicalName;
   while (CORPORATE_SUFFIXES_REGEX.test(currentStem)) {
     currentStem = currentStem.replace(CORPORATE_SUFFIXES_REGEX, '').trim();
     if (
-      currentStem.length >= 2 &&
+      currentStem.length >= 3 &&
       currentStem.toLowerCase() !== canonicalName.toLowerCase() &&
       !ENGLISH_STOPWORDS.has(currentStem.toLowerCase()) &&
       !isInvalidCompanyName(currentStem)
@@ -714,43 +718,35 @@ export function extractCompanyAliases(rawName: string, canonicalName: string, dr
   }
 
   // 1. Parenthetical extraction: e.g. "Willis Towers Watson (WTW India)" -> "wtw india", "wtw"
-  // "Eternal (Zomato)" -> "zomato", "eternal", "eternal zomato", "zomato eternal"
+  // "Eternal (Zomato)" -> "zomato", "eternal"
+  // "RFPIO India Pvt Ltd (DBA Responsive)" -> "responsive", "rfpio"
   const parenMatches = Array.from(rawName.matchAll(/\(([^)]+)\)/g)).map((m) => m[1].trim());
   const outsideParen = rawName.replace(/\([^)]*\)/g, ' ').replace(/\s+/g, ' ').trim();
-  if (outsideParen && outsideParen.toLowerCase() !== rawName.toLowerCase()) {
+  if (outsideParen && outsideParen.length >= 3 && outsideParen.toLowerCase() !== rawName.toLowerCase()) {
     add(outsideParen);
   }
   for (const p of parenMatches) {
-    add(p);
-    if (outsideParen && outsideParen.length >= 2) {
-      add(`${outsideParen} ${p}`);
-      add(`${p} ${outsideParen}`);
+    const cleanP = p.replace(/^(?:dba|d\/b\/a|doing\s+business\s+as|aka|a\.k\.a\.|now)\s+/i, '').trim();
+    if (cleanP.length >= 3 && !isInvalidCompanyName(cleanP)) {
+      add(cleanP);
     }
-    const pWords = p.split(/\s+/).filter(Boolean);
-    for (const w of pWords) {
-      if (w.length >= 2 && w.length <= 6 && !ENGLISH_STOPWORDS.has(w.toLowerCase())) {
-        add(w);
-      }
-    }
-    if (pWords.length >= 3) {
+    const pWords = cleanP.split(/\s+/).filter(Boolean);
+    if (pWords.length >= 2) {
       const pInitials = pWords.map((w) => w[0]).join('').toLowerCase();
       if (pInitials.length >= 3 && !ENGLISH_STOPWORDS.has(pInitials)) {
         add(pInitials);
       }
+      if (pWords[0].length >= 3 && pWords[0] === pWords[0].toUpperCase()) {
+        add(pWords[0]);
+      }
     }
   }
 
-  // 1.5 Drive Name tokens: e.g. "Zomato Eternal Drive Number: ..." -> "eternal", "zomato eternal"
+  // 1.5 Drive Name: only add concise brand names (<= 4 words), never split into individual words
   if (driveName) {
     const cleanDrive = driveName.replace(/\s+drive\s+(?:number|date):.*$/i, '').replace(/[^a-zA-Z0-9\s]/g, ' ').trim();
-    if (cleanDrive && cleanDrive.length >= 2) {
+    if (cleanDrive && cleanDrive.length >= 3 && cleanDrive.split(/\s+/).length <= 4 && !isInvalidCompanyName(cleanDrive)) {
       add(cleanDrive);
-      const driveWords = cleanDrive.split(/\s+/).filter(Boolean);
-      for (const dw of driveWords) {
-        if (dw.length >= 3 && !ENGLISH_STOPWORDS.has(dw.toLowerCase()) && !isInvalidCompanyName(dw)) {
-          add(dw);
-        }
-      }
     }
   }
 
@@ -777,10 +773,13 @@ export function extractCompanyAliases(rawName: string, canonicalName: string, dr
     }
   }
 
-  // 3. Known acronym map additions
+  // 3. Known acronym map additions (strict equality or whole-word match only)
   const cLower = canonicalName.toLowerCase();
   for (const [acro, fullNames] of Object.entries(KNOWN_ACRONYMS)) {
-    if (cLower === acro || fullNames.some((f) => cLower.includes(f) || f.includes(cLower))) {
+    if (
+      cLower === acro ||
+      fullNames.some((f) => cLower === f || new RegExp(`(?:^|[^a-z0-9])${f.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:[^a-z0-9]|$)`).test(cLower))
+    ) {
       add(acro);
       fullNames.forEach((f) => add(f));
     }
@@ -889,7 +888,7 @@ export function extractCompanyName(
       'drive\\s+name|drive\\s+number|new\\s+drive\\s+date|category|date\\s+of\\s+visit|eligibility|eligible|ctc|role|stipend|log\\s+in|next\\s+steps|keep\\s+monitoring|save\\s+this|if\\b|please\\b|stay\\b|this\\b|kindly\\b|note\\b|we\\b|you\\b|dear\\b|all\\s+the\\s+best|best\\s+regards';
     const companyMatch = bodySnippet.match(
       new RegExp(
-        `(?:^|\\s|\\n|\\r)(?:name\\s+of\\s+the\\s+company\\s*[:\\-–—*]*|company\\s+name\\s*[:\\-–—*]*|company\\s*[:\\-–—]+)\\s*([A-Za-z0-9&/(). -]+?)(?=[.\\n\\r;]|\\s+(?:${companyStopWords})|\\*|$)`,
+        `(?:^|\\s|\\n|\\r)(?:name\\s+of\\s+the\\s+company\\s*[:\\-–—*]*|company\\s+name\\s*[:\\-–—*]*|company\\s*[:\\-–—]+)\\s*([A-Za-z0-9&/(). -]+?)(?=[\\n\\r;]|\\s+(?:${companyStopWords})|\\*|$)`,
         'i'
       )
     );

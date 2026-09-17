@@ -528,16 +528,12 @@ export async function recalculateApplicationStatuses(
     const matchedShortlistEmailIds = new Set(
       (candidateMatches || [])
         .filter((m) => {
-          const emailId = (m as unknown as { email_id: string }).email_id;
-          const emailForMatch = activeDriveEmails.find((e) => e.id === emailId);
-          const isTestEmailMatch = !!(emailForMatch && isTestEmail(emailForMatch));
-
           if (m.match_type === 'xlsx_applied_list') {
-            return isTestEmailMatch;
+            return false;
           }
           const val = (m.matched_value || '').toLowerCase();
           if (/applied[_\s-]*list|opt[_\s-]*in[_\s-]*list|opt_in|registration[_\s-]*list|applied[_\s-]*student|applied[_\s-]*candidate/i.test(val)) {
-            return isTestEmailMatch;
+            return false;
           }
           return true;
         })
@@ -571,6 +567,14 @@ export async function recalculateApplicationStatuses(
         testShortlistEmails.some((e) => matchedShortlistEmailIds.has(e.id)) ||
         testEmails.some((e) => matchedShortlistEmailIds.has(e.id));
     }
+    // FALLBACK: A candidate_match may have been stored as 'xlsx_applied_list' when the
+    // email body clearly indicates a shortlist (e.g. "Please find the attached shortlisted
+    // students list") but the filename lacked "shortlist" (e.g. "apex test 22-08-2026.xlsx").
+    // matchedEmailIds includes ALL match_types; testShortlistEmails is independently derived
+    // from body content — so if any match exists for a confirmed shortlist email, trust it.
+    if (!isMatchedInTest) {
+      isMatchedInTest = testShortlistEmails.some((e) => matchedEmailIds.has(e.id));
+    }
     if (hasDirectPersonalTestInvitation) {
       isMatchedInTest = true;
     }
@@ -599,9 +603,11 @@ export async function recalculateApplicationStatuses(
 
     const hasPptEvent = activeDriveEmails.some((e) => {
       if (!isAfterRegistration(e)) return false;
-      const subj = (e.subject || '').toLowerCase();
+      // Use the same isPptEmail() classifier used elsewhere in this function
+      if (isPptEmail(e)) return true;
+      // Also check body snippet for explicit "pre-placement talk" mention
       const body = (e.body_snippet || '').toLowerCase();
-      return /ppt|pre[\s-]*placement\s*talk/i.test(subj) || /pre[\s-]*placement\s*talk/i.test(body);
+      return /pre[\s-]*placement(?:\s+talk)?/i.test(body);
     });
 
     let computedStatus = 'not_applied';
@@ -624,6 +630,12 @@ export async function recalculateApplicationStatuses(
       (isMatchedInSelectionList || isMatchedInNextRound || isMatchedInTest) &&
       (latestPositiveMatchTime > latestWithdrawalTime || hasDirectPersonalTestInvitation);
 
+    // Track why the candidate got 'rejected' so getEffectiveStage can distinguish:
+    // - 'rejected' + 'Eliminated in Test Round' note  → rejected_test (wrote test, failed)
+    // - 'rejected' + 'Interviewed · Not Selected' note → rejected_interview (interviewed, not selected)
+    // - 'not_shortlisted'                              → not shortlisted for test (pre-test screening)
+    let computedRejectionNote: string | null = null;
+
     if (isWithdrawn && !genuinePositiveMatchAfterWithdrawal) {
       computedStatus = 'withdrawn';
     } else if (isMatchedInSelectionList) {
@@ -636,6 +648,9 @@ export async function recalculateApplicationStatuses(
       });
       if (subsequentSelectionEmails.length > 0) {
         computedStatus = 'rejected';
+        // User was interviewed (matched in next-round / interview shortlist) but a
+        // selection list came out afterwards without them → Interviewed · Not Selected
+        computedRejectionNote = 'Interviewed · Not Selected';
       } else {
         computedStatus = 'interview_scheduled';
       }
@@ -651,8 +666,9 @@ export async function recalculateApplicationStatuses(
       });
       if (!hasUpcomingTestEvent && subsequentPostTestEmails.length > 0) {
         computedStatus = 'rejected';
-      } else if (!hasUpcomingTestEvent) {
-        computedStatus = 'test_completed';
+        // User was shortlisted for the test (matched in test email) but a post-test
+        // round email came without them → Eliminated in Test Round
+        computedRejectionNote = 'Eliminated in Test Round';
       } else {
         computedStatus = 'test_scheduled';
       }
@@ -660,7 +676,18 @@ export async function recalculateApplicationStatuses(
       if (selectionEmails.length > 0 || nextRoundEmails.length > 0 || testShortlistEmails.length > 0) {
         computedStatus = 'not_shortlisted';
       } else if (testEmails.length > 0) {
-        computedStatus = 'test_scheduled';
+        // A test was scheduled. If we have no positive candidate match for any test or
+        // shortlist email, the user was not shortlisted (the test announcement went to all
+        // registered students but a separate shortlist determined who actually sits).
+        // Only keep test_scheduled if there's a positive match somewhere (handled above).
+        const hasAnyMatchInTestEmails = testEmails.some((e) => matchedEmailIds.has(e.id));
+        if (hasAnyMatchInTestEmails) {
+          computedStatus = 'test_scheduled';
+        } else {
+          // No match in test emails → likely a general schedule announcement without
+          // personal shortlist confirmation. Stay as not_shortlisted if a test existed.
+          computedStatus = 'not_shortlisted';
+        }
       } else if (hasPptEvent) {
         computedStatus = 'ppt_scheduled';
       } else {
@@ -670,7 +697,12 @@ export async function recalculateApplicationStatuses(
       if (selectionEmails.length > 0 || nextRoundEmails.length > 0 || testShortlistEmails.length > 0) {
         computedStatus = 'not_shortlisted';
       } else if (testEmails.length > 0) {
-        computedStatus = 'test_scheduled';
+        const hasAnyMatchInTestEmails = testEmails.some((e) => matchedEmailIds.has(e.id));
+        if (hasAnyMatchInTestEmails) {
+          computedStatus = 'test_scheduled';
+        } else {
+          computedStatus = 'not_shortlisted';
+        }
       } else if (hasPptEvent) {
         computedStatus = 'ppt_scheduled';
       } else {
@@ -689,6 +721,23 @@ export async function recalculateApplicationStatuses(
       .eq('company_id', comp.id)
       .single();
 
+    // GUARD: Reprocess only has access to email subjects + body snippets — it cannot
+    // re-scan Excel attachments. The live sync (status-engine) CAN scan attachments and
+    // correctly marks candidates as not_shortlisted when their ID is absent from a
+    // shortlist Excel. Without this guard, reprocess would overwrite a sync-computed
+    // not_shortlisted back to test_scheduled/applied every 15 min cron cycle.
+    // Preserve not_shortlisted unless there is concrete positive evidence of shortlisting.
+    if (
+      !existingApp?.manual_override &&
+      existingApp?.status === 'not_shortlisted' &&
+      ['test_scheduled', 'ppt_scheduled', 'applied'].includes(computedStatus) &&
+      !isMatchedInTest &&
+      !isMatchedInNextRound &&
+      !isMatchedInSelectionList
+    ) {
+      computedStatus = 'not_shortlisted';
+    }
+
     const finalStatus = existingApp?.manual_override ? existingApp.status : computedStatus;
 
     let finalRole = existingApp?.manual_override ? existingApp.role : extractedJob.role;
@@ -705,13 +754,30 @@ export async function recalculateApplicationStatuses(
     const hasCampusLabEvent = allExtractedEvents.some((e) => /campus\s*\/\s*offline|\blc\s*\d+\b|\blab\b/i.test(e.venue || ''));
     const hasOnlineEvent = allExtractedEvents.some((e) => e.mode === 'online' || /online|virtual/i.test(e.venue || ''));
 
-    let finalTravel = existingApp?.manual_override ? existingTravel : travelReq;
+    let finalTravel = existingApp?.manual_override ? (existingApp?.notes || null) : travelReq;
     if (!finalTravel) {
       if (hasCampusLabEvent) finalTravel = 'bhopal';
       else if (hasOnlineEvent) finalTravel = 'online';
       else if (existingTravel && ['bhopal', 'bhopal_lab', 'online', 'vellore', 'chennai', 'ap'].includes(existingTravel)) {
         finalTravel = existingTravel;
       }
+    }
+
+    // Build the final notes value:
+    // - For manual override: preserve existing notes verbatim.
+    // - For computed rejection states: the rejection context note is the authoritative first line;
+    //   travel mode (if known) is appended as a second line so it isn't lost.
+    // - Otherwise: travel note is used as-is.
+    let finalNotes: string | null;
+    if (existingApp?.manual_override) {
+      finalNotes = existingApp?.notes || null;
+    } else if (computedRejectionNote) {
+      // Rejection context is the primary note; optionally append travel mode
+      finalNotes = finalTravel
+        ? `${computedRejectionNote}\n${finalTravel}`
+        : computedRejectionNote;
+    } else {
+      finalNotes = finalTravel || null;
     }
 
     let workLocation = extractedJob.location || null;
@@ -754,12 +820,13 @@ export async function recalculateApplicationStatuses(
         status: finalStatus,
         status_source: existingApp?.manual_override ? 'manual_override' : 'sync_reprocess',
         status_confidence: 'high',
+        manual_override: Boolean(existingApp?.manual_override),
         role: finalRole,
         category: finalCategory,
         ctc: finalCtc,
         stipend: finalStipend,
         location: workLocation || null,
-        notes: finalTravel || null,
+        notes: finalNotes,
         applied_at: (registrationEmails[0]?.received_at ? new Date(registrationEmails[0].received_at) : (driveStartDate || (existingApp?.applied_at ? new Date(existingApp.applied_at) : new Date()))).toISOString(),
         last_updated: new Date().toISOString(),
       },
@@ -928,7 +995,11 @@ export async function performReprocess(
       .eq('user_id', userId);
 
     const matchesToDelete = (allMatches || []).filter((m) => {
-      if (m.match_type === 'xlsx_cell') return false; // Keep verified Excel matches
+      if (m.match_type === 'xlsx_applied_list') return true;
+      if (/applied[_\s-]*list|opt[_\s-]*in[_\s-]*list|opt_in|registration[_\s-]*list|applied[_\s-]*student|applied[_\s-]*candidate/i.test(m.matched_value || '')) {
+        return true;
+      }
+      if (m.match_type === 'xlsx_cell' || m.match_type === 'email_body' || m.match_type === 'gsheet_cell') return false; // Keep verified shortlist matches
       const val = (m.matched_value || '').toUpperCase();
       if (regNo && val.includes(regNo) && !val.includes(userNeoId || '___NO_NEO___')) {
         return true;
@@ -1012,14 +1083,20 @@ export async function performReprocess(
     drive_number: string | null;
     drive_name: string | null;
     activeDriveDate: Date;
-  }> = (initialDbCompanies || []).map((c) => ({
-    id: c.id,
-    name: c.name,
-    aliases: (c.aliases || []).map((a: string) => a.toLowerCase()),
-    drive_number: c.drive_number || null,
-    drive_name: c.drive_name || null,
-    activeDriveDate: new Date(c.updated_at || 0),
-  }));
+  }> = (initialDbCompanies || []).map((c) => {
+    const cleanAliases = extractCompanyAliases(c.name, c.name, c.drive_name);
+    if (c.drive_number && !cleanAliases.includes(c.drive_number.toLowerCase())) {
+      cleanAliases.push(c.drive_number.toLowerCase());
+    }
+    return {
+      id: c.id,
+      name: c.name,
+      aliases: cleanAliases.map((a: string) => a.toLowerCase()),
+      drive_number: c.drive_number || null,
+      drive_name: c.drive_name || null,
+      activeDriveDate: new Date(c.updated_at || 0),
+    };
+  });
 
   const validCompanyMap = new Map<string, { id: string; canonicalName: string; activeDriveDate: Date }>();
   const driveNumberToCompanyMap = new Map<string, { id: string; canonicalName: string; activeDriveDate: Date }>();
@@ -1036,6 +1113,14 @@ export async function performReprocess(
       c.name = cleanName;
       companiesToUpdate.set(c.id, { ...(companiesToUpdate.get(c.id) || {}), name: cleanName });
     }
+  }
+
+  // Synchronize freshly sanitized aliases to DB to wipe out poisoned legacy aliases
+  for (const c of cachedCompanies) {
+    companiesToUpdate.set(c.id, {
+      ...(companiesToUpdate.get(c.id) || {}),
+      aliases: c.aliases,
+    });
   }
 
   // Populate maps from initial companies
@@ -1583,11 +1668,10 @@ export async function POST(req: Request) {
         }, 2000);
 
         try {
-          sendEvent('start', { message: 'Analyzing placement archive & recalculating drives…' });
-          sendEvent('progress', { step: 1, totalSteps: 2, message: 'Recalculating pipeline statuses, stages & CTCs…' });
+          sendEvent('start', { message: 'Analyzing placement archive & re-indexing drives…' });
 
-          const statusResult = await recalculateApplicationStatuses(userId!, (progress) => {
-            sendEvent('progress', { step: 1, totalSteps: 2, message: progress.message });
+          const statusResult = await performReprocess(userId!, (progress) => {
+            sendEvent('progress', progress);
           });
 
           // Trigger calendar reconciliation in background so HTTP response returns instantly
@@ -1597,12 +1681,14 @@ export async function POST(req: Request) {
 
           sendEvent('complete', {
             success: true,
-            updatedApplications: statusResult.updatedCount,
-            neoPatDrivesCount: statusResult.results.length,
-            fixed: statusResult.updatedCount,
+            updatedApplications: statusResult.updatedApplications,
+            neoPatDrivesCount: statusResult.neoPatDrivesCount,
+            collegeCircularsLinked: statusResult.collegeCircularsLinked,
+            collegeCircularsDiscarded: statusResult.collegeCircularsDiscarded,
+            fixed: statusResult.updatedApplications,
           });
         } catch (err: any) {
-          sendEvent('error', { message: err instanceof Error ? err.message : 'Pipeline recalculation failed' });
+          sendEvent('error', { message: err instanceof Error ? err.message : 'Placement re-indexing failed' });
         } finally {
           clearInterval(heartbeat);
           controller.close();
@@ -1620,7 +1706,7 @@ export async function POST(req: Request) {
   }
 
   try {
-    const statusResult = await recalculateApplicationStatuses(userId);
+    const statusResult = await performReprocess(userId);
 
     // Trigger calendar reconciliation in background
     import('@/lib/calendar/google-sync')
@@ -1629,14 +1715,16 @@ export async function POST(req: Request) {
 
     return NextResponse.json({
       success: true,
-      updatedApplications: statusResult.updatedCount,
-      neoPatDrivesCount: statusResult.results.length,
-      fixed: statusResult.updatedCount,
+      updatedApplications: statusResult.updatedApplications,
+      neoPatDrivesCount: statusResult.neoPatDrivesCount,
+      collegeCircularsLinked: statusResult.collegeCircularsLinked,
+      collegeCircularsDiscarded: statusResult.collegeCircularsDiscarded,
+      fixed: statusResult.updatedApplications,
     });
   } catch (err) {
-    console.error('Recalculate failed:', err);
+    console.error('Reprocess failed:', err);
     return NextResponse.json(
-      { error: err instanceof Error ? err.message : 'Pipeline recalculation failed' },
+      { error: err instanceof Error ? err.message : 'Placement re-indexing failed' },
       { status: 500 }
     );
   }

@@ -1,13 +1,13 @@
 import type { Metadata } from 'next';
 import { requireSession } from '@/lib/auth';
 import { createAdminClient } from '@/lib/supabase/admin';
-import { detectCampus, detectBranch } from '@/lib/utils';
+import { detectCampus, detectBranch, getDriveMode } from '@/lib/utils';
 import { getEffectiveStage, isInactiveStatus, isEliminatedStatus } from '@/lib/stages';
 import DashboardClient from './dashboard-client';
 
 export const metadata: Metadata = {
-  title: 'Placement Command Center Dashboard',
-  description: 'Your central hub for campus placement drives, shortlist notifications, active stages, and upcoming test schedules.',
+  title: 'Dashboard — NeoPAT Tracker & Placement Command Center',
+  description: 'Your central hub for NeoPAT campus placement drives, shortlist notifications, active stages, and upcoming test schedules.',
   alternates: {
     canonical: '/',
   },
@@ -32,7 +32,7 @@ export default async function DashboardPage() {
       .eq('user_id', session.userId),
     supabase
       .from('applications')
-      .select('id, status, role, ctc, stipend, last_updated, company_id, companies(id, name)')
+      .select('id, status, role, category, ctc, stipend, location, notes, manual_override, last_updated, company_id, companies(id, name)')
       .eq('user_id', session.userId)
       .order('last_updated', { ascending: false }),
     supabase
@@ -52,7 +52,8 @@ export default async function DashboardPage() {
     supabase
       .from('candidate_matches')
       .select('email_id, emails(company_id)')
-      .eq('user_id', session.userId),
+      .eq('user_id', session.userId)
+      .neq('match_type', 'xlsx_applied_list'),
   ]);
 
   const stats = {
@@ -187,10 +188,21 @@ export default async function DashboardPage() {
     }
   }
 
+  const connectedAccounts = (accounts || []).filter((a) => a.is_connected);
+  const hasPersonalAccount = connectedAccounts.some((a) => a.account_type === 'personal');
+  const hasCollegeAccount = connectedAccounts.some((a) => a.account_type === 'college');
+  const disconnectedAccounts = (accounts || []).filter((a) => !a.is_connected);
+  const hasNeoId = !!user?.neo_id;
+
+  const collegeEmail = accounts?.find((a) => a.account_type === 'college')?.email;
+  const personalEmail = accounts?.find((a) => a.account_type === 'personal')?.email || session.email;
+  const campus = detectCampus(collegeEmail || personalEmail);
+  const branch = detectBranch(collegeEmail);
+
   const allAppsList = (applications || []).map((a: any) => {
     const compEvents = eventsByCompany.get(a.company_id) || [];
     const latestEvent = compEvents[compEvents.length - 1] || null;
-    const { effectiveStatus, statusSubtitle } = getEffectiveStage(a.status, latestEvent, compEvents);
+    const { effectiveStatus, statusSubtitle } = getEffectiveStage(a.status, latestEvent, compEvents, a.notes, a.manual_override);
 
     return {
       id: a.id,
@@ -202,20 +214,13 @@ export default async function DashboardPage() {
       role: a.role,
       ctc: a.ctc,
       stipend: a.stipend,
+      location: a.location,
+      category: a.category,
+      notes: a.notes,
+      driveMode: getDriveMode(a.notes, campus),
       lastUpdated: a.last_updated,
     };
   });
-
-  const connectedAccounts = (accounts || []).filter((a) => a.is_connected);
-  const hasPersonalAccount = connectedAccounts.some((a) => a.account_type === 'personal');
-  const hasCollegeAccount = connectedAccounts.some((a) => a.account_type === 'college');
-  const disconnectedAccounts = (accounts || []).filter((a) => !a.is_connected);
-  const hasNeoId = !!user?.neo_id;
-
-  const collegeEmail = accounts?.find((a) => a.account_type === 'college')?.email;
-  const personalEmail = accounts?.find((a) => a.account_type === 'personal')?.email || session.email;
-  const campus = detectCampus(collegeEmail || personalEmail);
-  const branch = detectBranch(collegeEmail);
 
   return (
     <DashboardClient

@@ -22,8 +22,9 @@ import {
   AlertCircle,
   Calendar,
 } from 'lucide-react';
-import { cn, timeAgo, formatDate, formatStipend } from '@/lib/utils';
+import { cn, timeAgo, formatDate, formatStipend, getDriveMode } from '@/lib/utils';
 import { StatusChip, CategoryBadge } from '@/components/ui/status-chip';
+import { DriveModeBadge } from '@/components/ui/drive-mode-badge';
 import {
   StageStepper,
   getStageIndex,
@@ -248,7 +249,7 @@ export default function CompaniesClient({
     const list = companies
       .filter((c) => {
         const rawStatus = c.application?.status || 'applied';
-        const { effectiveStatus } = getEffectiveStage(rawStatus, c.latestEvent, c.events);
+        const { effectiveStatus } = getEffectiveStage(rawStatus, c.latestEvent, c.events, c.application?.notes, c.application?.manual_override);
         return matchFilter(effectiveStatus, filter, c);
       })
       .filter((c) => {
@@ -287,7 +288,7 @@ export default function CompaniesClient({
         // 2. Funnel Progression Rank (Deepest in recruitment pipeline first)
         const getRank = (comp: CompanyWithDetails) => {
           const rawStatus = comp.application?.status || 'applied';
-          const eff = getEffectiveStage(rawStatus, comp.latestEvent, comp.events);
+          const eff = getEffectiveStage(rawStatus, comp.latestEvent, comp.events, comp.application?.notes, comp.application?.manual_override);
           const s = eff.effectiveStatus.toLowerCase();
           if (s === 'selected' || s === 'offer' || s === 'offer_received') return 100;
           if (s === 'interview_completed') return 90;
@@ -316,7 +317,7 @@ export default function CompaniesClient({
       return [...list].sort((a, b) => {
         const getRank = (comp: CompanyWithDetails) => {
           const rawStatus = comp.application?.status || 'applied';
-          const eff = getEffectiveStage(rawStatus, comp.latestEvent, comp.events);
+          const eff = getEffectiveStage(rawStatus, comp.latestEvent, comp.events, comp.application?.notes, comp.application?.manual_override);
           if (eff.eliminatedStage === 3) return 4; // Interview round eliminated
           if (eff.effectiveStatus === 'rejected' && eff.eliminatedStage === 2) return 3; // Eliminated in test round
           if (eff.eliminatedStage === 2) return 2; // Not shortlisted for test (after PPT)
@@ -351,7 +352,7 @@ export default function CompaniesClient({
     };
     for (const c of companies) {
       const rawStatus = c.application?.status || 'applied';
-      const eff = getEffectiveStage(rawStatus, c.latestEvent, c.events);
+      const eff = getEffectiveStage(rawStatus, c.latestEvent, c.events, c.application?.notes, c.application?.manual_override);
       const st = eff.effectiveStatus;
       if (matchFilter(st, 'active', c)) counts.active++;
       if (matchFilter(st, 'shortlisted')) counts.shortlisted++;
@@ -439,7 +440,7 @@ export default function CompaniesClient({
             c.latestEvent ||
             (c.events || []).find((e) => e.start_time && new Date(e.start_time).getTime() >= Date.now());
           const rawStatus = c.application?.status || 'applied';
-          const effectiveResult = getEffectiveStage(rawStatus, nextEv, c.events);
+          const effectiveResult = getEffectiveStage(rawStatus, nextEv, c.events, c.application?.notes, c.application?.manual_override);
           const status = effectiveResult.effectiveStatus;
           const stageIndex = effectiveResult.stageIndex;
           const role = c.application?.role || 'Campus Placement Drive';
@@ -447,30 +448,7 @@ export default function CompaniesClient({
           const initials = c.name.slice(0, 2).toUpperCase();
           const hue = getHue(c.name);
 
-          // Mode & Travel: Standardized to operational venues:
-          // 'Online', 'VIT Vellore', 'VIT Chennai', 'VIT AP', or home campus labs ('Vellore Labs', 'Bhopal Labs', etc.)
-          const notesStr = (c.application?.notes || '').toLowerCase();
-          const homeLabs =
-            userCampus === 'VIT Vellore'
-              ? 'Vellore Labs'
-              : userCampus === 'VIT Chennai'
-                ? 'Chennai Labs'
-                : userCampus === 'VIT AP'
-                  ? 'AP Labs'
-                  : 'Bhopal Labs';
-
-          const driveMode =
-            notesStr.includes('online') || notesStr.includes('virtual')
-              ? 'Online'
-              : notesStr.includes('vellore')
-                ? (userCampus === 'VIT Vellore' ? 'Vellore Labs' : 'VIT Vellore')
-                : notesStr.includes('chennai')
-                  ? (userCampus === 'VIT Chennai' ? 'Chennai Labs' : 'VIT Chennai')
-                  : notesStr.includes('ap') || notesStr.includes('amaravati')
-                    ? (userCampus === 'VIT AP' ? 'AP Labs' : 'VIT AP')
-                    : notesStr.includes('bhopal')
-                      ? (userCampus === 'VIT Bhopal' ? 'Bhopal Labs' : 'VIT Bhopal')
-                      : homeLabs;
+          const driveMode = getDriveMode(c.application?.notes, userCampus);
 
           const stipendFormatted = formatStipend(c.application?.stipend);
           const ctcDisplay = c.application?.ctc
@@ -489,7 +467,7 @@ export default function CompaniesClient({
             >
               <Link
                 href={`/companies/${c.id}`}
-                className={`group flex flex-col justify-between h-full w-full min-w-0 max-w-full overflow-hidden rounded-xl border border-zinc-800 bg-[#101014] p-3.5 sm:p-4 text-left transition-colors duration-200 hover:border-zinc-600 ${status === 'selected' || status === 'offer'
+                className={`group flex flex-col justify-between h-full w-full min-w-0 max-w-full overflow-hidden rounded-xl border border-zinc-800 bg-bg-surface p-3.5 sm:p-4 text-left transition-colors duration-200 hover:border-zinc-600 ${status === 'selected' || status === 'offer'
                     ? 'border-emerald-500/30 shadow-[0_0_40px_rgba(16,185,129,0.08)]'
                     : ''
                   }`}
@@ -531,7 +509,7 @@ export default function CompaniesClient({
                       if (!loc || loc === 'Not Specified') return null;
                       return (
                         <span
-                          className="flex items-center gap-1 min-w-0 max-w-[135px] sm:max-w-none truncate shrink-0 text-zinc-400"
+                          className="flex items-center gap-1 min-w-0 max-w-33.75 sm:max-w-none truncate shrink-0 text-zinc-400"
                           title={`Work Location: ${loc}`}
                         >
                           <MapPin className="h-3.5 w-3.5 shrink-0 text-zinc-400" />
@@ -539,64 +517,7 @@ export default function CompaniesClient({
                         </span>
                       );
                     })()}
-                    {(() => {
-                      const isOnline = driveMode === 'Online';
-                      const isHomeLabs = driveMode.endsWith('Labs');
-                      const isVellore = driveMode === 'VIT Vellore';
-                      const isChennai = driveMode === 'VIT Chennai';
-                      const isAp = driveMode === 'VIT AP';
-
-                      const badgeConfig = isOnline
-                        ? {
-                          cls: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300',
-                          icon: () => <Globe className="h-2.5 w-2.5 text-emerald-400 shrink-0" />,
-                          tooltip: 'Drive Mode: Online (Virtual from hostel)',
-                        }
-                        : isHomeLabs
-                          ? {
-                            cls: 'border-indigo-500/30 bg-indigo-500/15 text-indigo-300',
-                            icon: () => <Building2 className="h-2.5 w-2.5 text-indigo-400 shrink-0" />,
-                            tooltip: `Drive Mode: ${driveMode} (On-Campus Labs / Proctored)`,
-                          }
-                          : isVellore
-                            ? {
-                              cls: 'border-amber-500/30 bg-amber-500/15 text-amber-300',
-                              icon: () => <Plane className="h-2.5 w-2.5 text-amber-400 shrink-0" />,
-                              tooltip: 'Drive Mode: VIT Vellore (Inter-Campus Travel Required)',
-                            }
-                            : isChennai
-                              ? {
-                                cls: 'border-orange-500/30 bg-orange-500/15 text-orange-300',
-                                icon: () => <Plane className="h-2.5 w-2.5 text-orange-400 shrink-0" />,
-                                tooltip: 'Drive Mode: VIT Chennai (Inter-Campus Travel Required)',
-                              }
-                              : isAp
-                                ? {
-                                  cls: 'border-purple-500/30 bg-purple-500/15 text-purple-300',
-                                  icon: () => <Plane className="h-2.5 w-2.5 text-purple-400 shrink-0" />,
-                                  tooltip: 'Drive Mode: VIT AP (Inter-Campus Travel Required)',
-                                }
-                                : {
-                                  cls: 'border-cyan-500/30 bg-cyan-500/15 text-cyan-300',
-                                  icon: () => <Plane className="h-2.5 w-2.5 text-cyan-400 shrink-0" />,
-                                  tooltip: `Drive Mode: ${driveMode} (Inter-Campus Travel Required)`,
-                                };
-
-                      const RenderIcon = badgeConfig.icon;
-
-                      return (
-                        <span
-                          className={cn(
-                            'flex items-center gap-1.5 shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium border transition-colors',
-                            badgeConfig.cls
-                          )}
-                          title={badgeConfig.tooltip}
-                        >
-                          <RenderIcon />
-                          <span>{driveMode}</span>
-                        </span>
-                      );
-                    })()}
+                    <DriveModeBadge driveMode={driveMode} />
                     {(() => {
                       const isManual = Boolean(c.application?.manual_override && c.application?.last_updated);
                       const displayDate = isManual

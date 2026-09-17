@@ -117,3 +117,40 @@ export function detectRegNo(email?: string | null): string | null {
   return match ? match[1].toUpperCase() : null;
 }
 
+/**
+ * Resolves the operational drive mode / travel mode for a campus placement drive.
+ * Matches: 'Online', 'VIT Vellore', 'VIT Chennai', 'VIT AP', or home campus labs ('Vellore Labs', 'Bhopal Labs', etc.)
+ */
+export function getDriveMode(
+  notes?: string | null,
+  userCampus?: string | null
+): string {
+  const notesStr = (notes || '').toLowerCase();
+  const campus = userCampus || 'VIT Bhopal';
+  const homeLabs =
+    campus === 'VIT Vellore'
+      ? 'Vellore Labs'
+      : campus === 'VIT Chennai'
+        ? 'Chennai Labs'
+        : campus === 'VIT AP'
+          ? 'AP Labs'
+          : 'Bhopal Labs';
+
+  if (notesStr.includes('online') || notesStr.includes('virtual')) {
+    return 'Online';
+  }
+  if (notesStr.includes('vellore')) {
+    return campus === 'VIT Vellore' ? 'Vellore Labs' : 'VIT Vellore';
+  }
+  if (notesStr.includes('chennai')) {
+    return campus === 'VIT Chennai' ? 'Chennai Labs' : 'VIT Chennai';
+  }
+  if (notesStr.includes('ap') || notesStr.includes('amaravati')) {
+    return campus === 'VIT AP' ? 'AP Labs' : 'VIT AP';
+  }
+  if (notesStr.includes('bhopal')) {
+    return campus === 'VIT Bhopal' ? 'Bhopal Labs' : 'VIT Bhopal';
+  }
+  return homeLabs;
+}
+

@@ -215,11 +215,10 @@ export default function SettingsClient({
     }
   };
 
-  // Trigger topbar live sync
+  // Trigger live sync
   const handleTriggerSync = () => {
     window.dispatchEvent(new CustomEvent('start-placement-sync'));
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-    appToast.info('Starting sync…', 'Watch live progress in the top navigation bar.');
+    appToast.info('Starting sync…', 'Watch live progress in Campus Radar.');
   };
 
   // Handle Reprocess Archive with live streaming progress

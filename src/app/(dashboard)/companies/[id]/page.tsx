@@ -78,7 +78,8 @@ export default async function CompanyDetailPage({
     supabase
       .from('candidate_matches')
       .select('id, match_type, matched_value, match_location, created_at, email_id, neo_id')
-      .eq('user_id', session.userId),
+      .eq('user_id', session.userId)
+      .neq('match_type', 'xlsx_applied_list'),
 
     supabase
       .from('users')

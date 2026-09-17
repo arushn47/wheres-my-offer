@@ -33,16 +33,32 @@ export interface InAppNotification {
 
 export interface NotificationBellProps {
   align?: 'right' | 'sidebar';
+  triggerToasts?: boolean;
 }
 
-export default function NotificationBell({ align = 'right' }: NotificationBellProps) {
+// Module-level cache to guarantee no duplicate toasts and deduplicate network requests across multiple mounted bell instances
+const globalToastedNotificationIds = new Set<string>();
+const globalKnownNotificationIds = new Set<string>();
+let globalHasLoadedInitial = false;
+let activeFetchPromise: Promise<{ notifications: InAppNotification[]; unreadCount: number } | null> | null = null;
+let lastFetchTimestamp = 0;
+let cachedNotificationData: { notifications: InAppNotification[]; unreadCount: number } | null = null;
+const FETCH_THROTTLE_MS = 15000; // Throttle background requests to at most once per 15s
+
+export default function NotificationBell({
+  align = 'right',
+  triggerToasts = align !== 'sidebar',
+}: NotificationBellProps) {
   const router = useRouter();
+  const routerRef = useRef(router);
+  routerRef.current = router;
+  const triggerToastsRef = useRef(triggerToasts);
+  triggerToastsRef.current = triggerToasts;
+
   const [isOpen, setIsOpen] = useState(false);
   const [notifications, setNotifications] = useState<InAppNotification[]>([]);
   const [unreadCount, setUnreadCount] = useState(0);
   const dropdownRef = useRef<HTMLDivElement>(null);
-  const hasLoadedInitialRef = useRef(false);
-  const knownIdsRef = useRef<Set<string>>(new Set());
 
   const {
     isSupported: isPushSupported,
@@ -52,43 +68,102 @@ export default function NotificationBell({ align = 'right' }: NotificationBellPr
     loading: pushLoading,
   } = usePushNotifications();
 
-  // Fetch notifications from API (auto-pruned to last 7 days by backend)
-  const fetchNotifications = useCallback(async () => {
+  // Fetch notifications from API with request deduplication and throttling
+  const fetchNotifications = useCallback(async (force = false) => {
     try {
-      const res = await fetch('/api/notifications');
-      if (res.ok) {
-        const data = await res.json();
-        const incoming: InAppNotification[] = data.notifications || [];
-
-        // If not initial load, trigger toasts for brand new unread notifications!
-        if (hasLoadedInitialRef.current) {
-          const brandNew = incoming.filter(
-            (n) => !n.is_read && !knownIdsRef.current.has(n.id)
-          );
-
-          for (const notif of brandNew.slice(0, 3)) {
-            appToast.notification(notif, (url) => router.push(url));
-          }
-        } else {
-          hasLoadedInitialRef.current = true;
-        }
-
-        // Keep track of known notification IDs
-        incoming.forEach((n) => knownIdsRef.current.add(n.id));
-
-        setNotifications(incoming);
-        setUnreadCount(data.unreadCount || 0);
+      const now = Date.now();
+      if (!force && cachedNotificationData && (now - lastFetchTimestamp < FETCH_THROTTLE_MS)) {
+        setNotifications(cachedNotificationData.notifications);
+        setUnreadCount(cachedNotificationData.unreadCount);
+        return;
       }
+
+      if (!activeFetchPromise) {
+        activeFetchPromise = (async () => {
+          try {
+            const res = await fetch('/api/notifications');
+            if (res.ok) {
+              const data = await res.json();
+              lastFetchTimestamp = Date.now();
+              cachedNotificationData = {
+                notifications: data.notifications || [],
+                unreadCount: data.unreadCount || 0,
+              };
+              return cachedNotificationData;
+            }
+          } catch (err) {
+            console.error('Failed to load notifications:', err);
+          } finally {
+            activeFetchPromise = null;
+          }
+          return null;
+        })();
+      }
+
+      const result = await activeFetchPromise;
+      if (!result) return;
+
+      const incoming: InAppNotification[] = result.notifications;
+
+      // Only trigger toast for brand new unread notification if this instance is designated to handle toasts
+      if (triggerToastsRef.current && globalHasLoadedInitial) {
+        const brandNew = incoming.filter(
+          (n) =>
+            !n.is_read &&
+            !globalKnownNotificationIds.has(n.id) &&
+            !globalToastedNotificationIds.has(n.id)
+        );
+
+        if (brandNew.length > 0) {
+          const latest = brandNew[0];
+          globalToastedNotificationIds.add(latest.id);
+          appToast.notification(latest, (url) => routerRef.current.push(url));
+        }
+      } else {
+        globalHasLoadedInitial = true;
+      }
+
+      // Keep track of known notification IDs globally
+      incoming.forEach((n) => globalKnownNotificationIds.add(n.id));
+
+      setNotifications(incoming);
+      setUnreadCount(result.unreadCount);
     } catch (err) {
       console.error('Failed to load notifications:', err);
     }
-  }, [router]);
+  }, []);
 
-  // Poll notifications periodically (every 30 seconds) & on mount
+  // Instant listener for notification creation events + focus + visibility, with periodic fallback
   useEffect(() => {
     fetchNotifications();
-    const interval = setInterval(fetchNotifications, 30000);
-    return () => clearInterval(interval);
+
+    const handleRefresh = () => {
+      fetchNotifications(true);
+    };
+
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        fetchNotifications(false);
+      }
+    };
+
+    const handleFocus = () => {
+      fetchNotifications(false);
+    };
+
+    window.addEventListener('wmo:refresh_notifications', handleRefresh);
+    window.addEventListener('focus', handleFocus);
+    document.addEventListener('visibilitychange', handleVisibility);
+
+    // Periodic fallback polling (every 60 seconds)
+    const interval = setInterval(() => fetchNotifications(false), 60000);
+
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('wmo:refresh_notifications', handleRefresh);
+      window.removeEventListener('focus', handleFocus);
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
   }, [fetchNotifications]);
 
   // Close dropdown on outside click or touch
@@ -208,7 +283,10 @@ export default function NotificationBell({ align = 'right' }: NotificationBellPr
           setIsOpen(!isOpen);
           if (!isOpen) fetchNotifications();
         }}
-        className="relative p-2 rounded-lg text-text-tertiary hover:text-text-primary hover:bg-bg-surface-hover transition-all cursor-pointer"
+        className={cn(
+          "relative p-2 rounded-lg text-text-tertiary hover:text-text-primary hover:bg-bg-surface-hover transition-all cursor-pointer",
+          isOpen && "bg-white/10 text-text-primary"
+        )}
         aria-label="Notifications"
       >
         <Bell className="w-4 h-4" />
@@ -222,15 +300,15 @@ export default function NotificationBell({ align = 'right' }: NotificationBellPr
       {/* Notification Dropdown Panel */}
       {isOpen && (
         <>
-          {/* Mobile backdrop for outside tap dismiss */}
+          {/* Mobile backdrop for outside tap dismiss: strictly below header (top-12) so header stays 100% crisp and unblurred */}
           <div
-            className="fixed inset-0 z-40 bg-black/60 backdrop-blur-[2px] sm:hidden"
+            className="fixed top-12 inset-x-0 bottom-0 z-40 bg-black/40 sm:hidden"
             onClick={() => setIsOpen(false)}
           />
 
           <div
             className={cn(
-              "fixed inset-x-3 top-16 max-w-sm mx-auto bg-[#111113] border border-white/10 rounded-2xl shadow-2xl z-50 overflow-hidden animate-fade-in flex flex-col max-h-[calc(100vh-5.5rem)] sm:max-h-[32rem]",
+              "fixed inset-x-2.5 top-13 max-w-sm mx-auto bg-[#111113] border border-white/10 rounded-2xl shadow-2xl z-50 overflow-hidden animate-fade-in flex flex-col max-h-[calc(100vh-4.5rem)] sm:max-h-[32rem]",
               align === 'sidebar'
                 ? "lg:fixed lg:left-[18.75rem] lg:top-3 lg:w-96 lg:max-w-none lg:inset-auto"
                 : "sm:absolute sm:inset-auto sm:right-0 sm:top-full sm:mt-2 sm:w-96 sm:max-w-none"

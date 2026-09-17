@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
@@ -17,9 +17,9 @@ import {
   Building2,
   Globe,
 } from 'lucide-react';
-import { cn, timeAgo } from '@/lib/utils';
+import { cn, timeAgo, getDriveMode } from '@/lib/utils';
 import { CategoryBadge, STATUS_META } from '@/components/ui/status-chip';
-import { StageStepper, getStageIndex, getEffectiveStage } from '@/components/companies/stage-stepper';
+import { StageStepper, getStageIndex, getEffectiveStage, isEliminatedStatus } from '@/components/companies/stage-stepper';
 import { cleanLocationString } from '@/lib/sync/locations';
 
 export interface CompanyDetail {
@@ -244,19 +244,17 @@ export default function CompanyDetailClient({
   const router = useRouter();
   const rawStatus = company.application?.status || 'applied';
   const notesStr = company.application?.notes || '';
-  const effective = useMemo(
-    () => getEffectiveStage(rawStatus, null, company.events, notesStr),
-    [rawStatus, company.events, notesStr]
-  );
+  const isManual = company.application?.manualOverride ?? false;
 
   const initialDropdownStatus = useMemo(() => {
     if (rawStatus === 'rejected') {
-      if (/interviewed|interview/i.test(notesStr)) return 'rejected_interview';
-      if (/test|oa|assessment/i.test(notesStr)) return 'rejected_test';
-      return effective.effectiveStatus || 'not_shortlisted';
+      // Use the same note patterns that getEffectiveStage uses
+      if (/eliminated.*interview|interview.*eliminated|interviewed.*not\s*selected|rejected.*interview/i.test(notesStr)) return 'rejected_interview';
+      if (/eliminated.*test|test.*eliminated|rejected.*test|test.*rejected/i.test(notesStr)) return 'rejected_test';
+      return 'not_shortlisted';
     }
-    return company.application?.manualOverride ? rawStatus : effective.effectiveStatus;
-  }, [rawStatus, notesStr, company.application?.manualOverride, effective.effectiveStatus]);
+    return rawStatus;
+  }, [rawStatus, notesStr]);
 
   const [status, setStatus] = useState(initialDropdownStatus);
   const [isUpdating, setIsUpdating] = useState(false);
@@ -264,14 +262,31 @@ export default function CompanyDetailClient({
   const [openAccordion, setOpenAccordion] = useState<number | null>(0);
   const [isDeleting, setIsDeleting] = useState(false);
 
-  const stage = getEffectiveStage(status, null, company.events, notesStr).stageIndex;
-  const terminal =
-    status === 'rejected' ||
-    status === 'rejected_test' ||
-    status === 'rejected_interview' ||
-    status === 'not_shortlisted' ||
+  // Keep state in sync if server props update
+  useEffect(() => {
+    setStatus(initialDropdownStatus);
+  }, [initialDropdownStatus]);
+
+  const effective = useMemo(
+    () => getEffectiveStage(status, null, company.events, notesStr, isManual),
+    [status, company.events, notesStr, isManual]
+  );
+
+  // The canonical status string to display in the chip — always use the effective
+  // status so the detail page matches exactly what the company card shows.
+  const displayStatus = effective.effectiveStatus;
+
+  const stage = effective.stageIndex;
+  const isWithdrawn =
+    displayStatus === 'withdrawn' ||
+    displayStatus === 'declined' ||
     status === 'withdrawn' ||
     status === 'declined';
+  const isEliminated =
+    isEliminatedStatus(displayStatus) ||
+    isEliminatedStatus(status) ||
+    effective.eliminatedStage !== -1;
+  const terminal = isWithdrawn || isEliminated;
   const hue = useMemo(() => getHue(company.name), [company.name]);
   const initials = company.name.slice(0, 2).toUpperCase();
 
@@ -280,7 +295,7 @@ export default function CompanyDetailClient({
     setShowStatusMenu(false);
 
     let patchStatus = newStatus;
-    let patchNotes: string | undefined = undefined;
+    let patchNotes: string | null = null;
 
     if (newStatus === 'rejected_test') {
       patchStatus = 'rejected';
@@ -291,6 +306,9 @@ export default function CompanyDetailClient({
     } else if (newStatus === 'not_shortlisted') {
       patchStatus = 'not_shortlisted';
       patchNotes = 'Not Shortlisted for Test';
+    } else {
+      // Switching to non-rejection status: clear previous rejection notes
+      patchNotes = null;
     }
 
     try {
@@ -303,8 +321,24 @@ export default function CompanyDetailClient({
         setStatus(newStatus);
         if (company.application) {
           company.application.status = patchStatus;
-          company.application.notes = patchNotes || company.application.notes;
+          company.application.notes = patchNotes;
           company.application.manualOverride = true;
+        } else {
+          company.application = {
+            id: '',
+            status: patchStatus,
+            statusSource: 'manual_override',
+            statusConfidence: 'manual',
+            role: null,
+            ctc: null,
+            stipend: null,
+            location: null,
+            eligibility: null,
+            manualOverride: true,
+            notes: patchNotes,
+            appliedAt: new Date().toISOString(),
+            lastUpdated: new Date().toISOString(),
+          };
         }
         router.refresh();
       }
@@ -320,28 +354,7 @@ export default function CompanyDetailClient({
 
   // Drive Mode & Travel: Standardized to operational venues:
   // 'Online', 'VIT Vellore', 'VIT Chennai', 'VIT AP', or home campus labs ('Vellore Labs', 'Bhopal Labs', etc.)
-  const notesLower = notesStr.toLowerCase();
-  const homeLabs =
-    userCampus === 'VIT Vellore'
-      ? 'Vellore Labs'
-      : userCampus === 'VIT Chennai'
-      ? 'Chennai Labs'
-      : userCampus === 'VIT AP'
-      ? 'AP Labs'
-      : 'Bhopal Labs';
-
-  const driveModeDisplay =
-    notesLower.includes('online') || notesLower.includes('virtual')
-      ? 'Online'
-      : notesLower.includes('vellore')
-      ? (userCampus === 'VIT Vellore' ? 'Vellore Labs' : 'VIT Vellore')
-      : notesLower.includes('chennai')
-      ? (userCampus === 'VIT Chennai' ? 'Chennai Labs' : 'VIT Chennai')
-      : notesLower.includes('ap') || notesLower.includes('amaravati')
-      ? (userCampus === 'VIT AP' ? 'AP Labs' : 'VIT AP')
-      : notesLower.includes('bhopal')
-      ? (userCampus === 'VIT Bhopal' ? 'Bhopal Labs' : 'VIT Bhopal')
-      : homeLabs;
+  const driveModeDisplay = getDriveMode(notesStr, userCampus);
 
   // Role display
   const displayRole = (() => {
@@ -390,7 +403,7 @@ export default function CompanyDetailClient({
   }, [company.application?.eligibility, company.application?.notes]);
 
   return (
-    <div data-testid="company-detail-page" className="mx-auto max-w-4xl space-y-4 w-full min-w-0">
+    <div data-testid="company-detail-page" className="mx-auto max-w-4xl space-y-4 w-full min-w-0 my-3">
       {/* Back button */}
       <button
         data-testid="back-to-pipeline-btn"
@@ -405,7 +418,7 @@ export default function CompanyDetailClient({
         initial={{ opacity: 0, y: 16 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.45 }}
-        className="rounded-2xl border border-zinc-800 bg-[#101014] p-4 sm:p-6"
+        className="rounded-2xl border border-zinc-800 bg-bg-surface p-4 sm:p-6"
       >
         <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3 sm:gap-4">
           <div className="flex items-start gap-3 sm:gap-4 min-w-0 flex-1">
@@ -425,7 +438,8 @@ export default function CompanyDetailClient({
             {/* Status override dropdown — single unified pill with cursor-pointer */}
             <div className="relative">
               {(() => {
-                const normStatus = (status || 'not_applied').toLowerCase();
+                // Use effectiveStatus (same as the company card) so both show identical labels
+                const normStatus = (displayStatus || 'not_applied').toLowerCase();
                 const m = STATUS_META[normStatus] || STATUS_META.not_applied;
                 return (
                   <button
@@ -572,7 +586,7 @@ export default function CompanyDetailClient({
         {nextUpcomingEvent && (
           <div
             data-testid="venue-banner"
-            className="mt-4 flex items-start gap-3 rounded-lg border border-amber-500/25 bg-amber-500/[0.06] px-4 py-3 text-xs text-amber-200/90"
+            className="mt-4 flex items-start gap-3 rounded-lg border border-amber-500/25 bg-amber-500/6 px-4 py-3 text-xs text-amber-200/90"
           >
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
             <div>
@@ -595,9 +609,15 @@ export default function CompanyDetailClient({
             data-testid="terminal-banner"
             className="mt-4 rounded-lg border border-zinc-700 bg-zinc-900 px-4 py-3 text-xs text-zinc-400"
           >
-            {status === 'rejected' || status === 'not_shortlisted'
-              ? "Your ID wasn't in the final selection sheet. This drive is archived — the radar stays on the next ones."
-              : 'You opted out or withdrew from this drive. Archived from the active pipeline.'}
+            {isWithdrawn
+              ? 'You opted out or withdrew from this drive. Archived from the active pipeline.'
+              : displayStatus === 'rejected_test' || status === 'rejected_test' || effective.eliminatedStage === 3
+              ? 'Eliminated in the test round. This drive is archived — the radar stays on the next ones.'
+              : displayStatus === 'rejected_interview' || status === 'rejected_interview' || effective.eliminatedStage === 4
+              ? 'Interview completed · Not selected. This drive is archived — the radar stays on the next ones.'
+              : displayStatus === 'not_shortlisted' || status === 'not_shortlisted' || effective.eliminatedStage === 2
+              ? "Your ID wasn't in the shortlist. This drive is archived — the radar stays on the next ones."
+              : "Your ID wasn't in the final selection sheet. This drive is archived — the radar stays on the next ones."}
           </div>
         )}
       </motion.div>
@@ -607,7 +627,7 @@ export default function CompanyDetailClient({
         initial={{ opacity: 0, y: 16 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.45, delay: 0.1 }}
-        className="rounded-2xl border border-zinc-800 bg-[#101014] p-6"
+        className="rounded-2xl border border-zinc-800 bg-bg-surface p-6"
       >
         <div className="mb-5 flex items-center justify-between">
           <h2 className="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Recruitment Stage</h2>
@@ -620,7 +640,7 @@ export default function CompanyDetailClient({
             {effective.statusSubtitle}
           </span>
         </div>
-        <StageStepper status={status} events={company.events} notes={notesStr} />
+        <StageStepper status={status} events={company.events} notes={notesStr} manualOverride={isManual} />
       </motion.div>
 
       {/* Circular & Email Timeline */}
@@ -628,7 +648,7 @@ export default function CompanyDetailClient({
         initial={{ opacity: 0, y: 16 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.45, delay: 0.2 }}
-        className="rounded-2xl border border-zinc-800 bg-[#101014] p-4 sm:p-6 w-full min-w-0 overflow-hidden"
+        className="rounded-2xl border border-zinc-800 bg-bg-surface p-4 sm:p-6 w-full min-w-0 overflow-hidden"
       >
         <div className="mb-5 flex items-center justify-between">
           <h2 className="font-mono text-[10px] uppercase tracking-widest text-zinc-500">
@@ -644,7 +664,7 @@ export default function CompanyDetailClient({
             No emails or circulars linked to this company yet.
           </div>
         ) : (
-          <div className="relative space-y-2.5 before:absolute before:bottom-2 before:left-[15px] before:top-2 before:w-px before:bg-zinc-800 w-full min-w-0">
+          <div className="relative space-y-2.5 before:absolute before:bottom-2 before:left-3.75 before:top-2 before:w-px before:bg-zinc-800 w-full min-w-0">
             {company.emails.map((email, idx) => {
               const isShortlist = email.classification === 'shortlist' || email.subject.toLowerCase().includes('shortlist');
               const isTest = email.classification === 'test' || email.subject.toLowerCase().includes('test') || email.subject.toLowerCase().includes('assessment');
@@ -668,7 +688,7 @@ export default function CompanyDetailClient({
 
               return (
                 <div key={email.id} data-testid={`timeline-item-${idx}`} className="relative flex items-start gap-3 sm:gap-4 w-full min-w-0">
-                  <div className={cn('z-10 mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-full border shadow-sm ring-4 ring-[#101014]', iconCls)}>
+                  <div className={cn('z-10 mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-full border shadow-sm ring-4 ring-bg-surface', iconCls)}>
                     <Icon className="h-3.5 w-3.5 shrink-0" />
                   </div>
 
@@ -679,7 +699,7 @@ export default function CompanyDetailClient({
                       className="flex w-full items-center justify-between gap-3 px-3.5 sm:px-4 py-3 text-left min-w-0 hover:bg-zinc-900/60 transition-colors cursor-pointer"
                     >
                       <div className="flex-1 min-w-0 overflow-hidden">
-                        <div className="text-xs sm:text-sm font-semibold text-zinc-200 line-clamp-2 leading-snug break-words" title={email.subject}>
+                        <div className="text-xs sm:text-sm font-semibold text-zinc-200 line-clamp-2 leading-snug wrap-break-word" title={email.subject}>
                           {email.subject}
                         </div>
                         <div className="mt-1 flex items-center gap-2 font-mono text-[10px] text-zinc-500">
@@ -730,7 +750,7 @@ export default function CompanyDetailClient({
                                     </span>
                                   </div>
                                   <div className="overflow-x-auto">
-                                    <div className="min-w-[300px] grid grid-cols-4 gap-px bg-zinc-800/70 font-mono text-[10px]">
+                                    <div className="min-w-75 grid grid-cols-4 gap-px bg-zinc-800/70 font-mono text-[10px]">
                                       <div className="bg-[#0b0d11] px-2.5 sm:px-3 py-2 text-violet-300 truncate font-semibold">
                                         {matchInfo.identifier}
                                       </div>

@@ -32,17 +32,26 @@ const siteUrl =
 export const metadata: Metadata = {
   metadataBase: new URL(siteUrl),
   title: {
-    default: "Where's My Offer? — Campus Placement Radar",
-    template: "%s — Where's My Offer?",
+    default: "Where's My Offer? — NeoPAT Tracker & Campus Placement Radar",
+    template: "%s — Where's My Offer? | NeoPAT Tracker",
   },
   description:
-    "Real-time campus placement radar. Automated email sync, shortlist spreadsheet scanner, OA test alerts, and interview rounds in one unified mission-control dashboard.",
+    "The #1 real-time NeoPAT tracker and campus placement radar. Automated email sync, shortlist spreadsheet scanner, OA test alerts, and interview rounds in one unified mission-control dashboard.",
   keywords: [
+    "NeoPAT Tracker",
+    "neopat tracker",
+    "NeoPAT",
+    "neopat",
     "Where's My Offer?",
     "Where's My Offer App",
     "Campus Placement Radar",
     "Campus Placement Tracker",
-    "NeoPAT Tracker",
+    "NeoPAT Placement Tracker",
+    "NeoPAT Status Tracker",
+    "NeoPAT Email Tracker",
+    "VIT NeoPAT",
+    "NeoPAT student tracker",
+    "NeoPAT drive tracker",
     "VIT Placement Tracker",
     "VIT Bhopal Placements",
     "College Placement Management",
@@ -65,24 +74,24 @@ export const metadata: Metadata = {
     type: "website",
     locale: "en_US",
     url: siteUrl,
-    siteName: "Where's My Offer?",
-    title: "Where's My Offer? — Campus Placement Radar",
+    siteName: "Where's My Offer? — NeoPAT Tracker",
+    title: "Where's My Offer? — NeoPAT Tracker & Campus Placement Radar",
     description:
-      "Never miss a shortlist, test, or interview. Real-time campus placement tracking and automated email parsing.",
+      "The #1 real-time NeoPAT tracker and campus placement radar. Automated email sync, shortlist spreadsheet scanner, OA test alerts, and interview rounds.",
     images: [
       {
         url: "/opengraph-image",
         width: 1200,
         height: 630,
-        alt: "Where's My Offer? — Campus Placement Radar",
+        alt: "Where's My Offer? — NeoPAT Tracker & Campus Placement Radar",
       },
     ],
   },
   twitter: {
     card: "summary_large_image",
-    title: "Where's My Offer? — Campus Placement Radar",
+    title: "Where's My Offer? — NeoPAT Tracker & Campus Placement Radar",
     description:
-      "Never miss a shortlist, test, or interview. Real-time campus placement tracking and automated email parsing.",
+      "The #1 real-time NeoPAT tracker and campus placement radar. Automated email sync, shortlist spreadsheet scanner, OA test alerts, and interview rounds.",
     images: ["/opengraph-image"],
   },
   robots: {
@@ -163,17 +172,16 @@ export default function RootLayout({
         />
       </head>
       <body
-        className={`${outfit.variable} ${jetbrainsMono.variable} font-sans antialiased bg-[#09090b] text-zinc-100`}
+        className={`${outfit.variable} ${jetbrainsMono.variable} font-sans antialiased bg-bg-primary text-zinc-100`}
       >
         {children}
         <Toaster
           theme="dark"
-          position="top-right"
+          position="bottom-right"
           className="app-toaster"
           richColors
+          visibleToasts={3}
           duration={Infinity}
-          visibleToasts={4}
-          closeButton
         />
       </body>
     </html>

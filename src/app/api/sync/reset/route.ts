@@ -37,7 +37,11 @@ export async function POST() {
     // 6. Delete all companies
     await supabase.from('companies').delete().eq('user_id', userId);
 
-    // 7. Reset Gmail account sync history so next sync does a full re-fetch
+    // 7. Delete sync pages & sync state
+    await supabase.from('sync_pages').delete().eq('user_id', userId);
+    await supabase.from('sync_state').delete().eq('user_id', userId);
+
+    // 8. Reset Gmail account sync history so next sync does a full re-fetch
     await supabase
       .from('gmail_accounts')
       .update({

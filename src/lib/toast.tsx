@@ -19,6 +19,8 @@ import {
 import { cn } from '@/lib/utils';
 import type { InAppNotification } from '@/components/notifications/notification-bell';
 
+import { AppLogoMark } from '@/components/brand/logo';
+
 export type ToastVariant =
   | 'success'
   | 'error'
@@ -40,218 +42,142 @@ export interface PremiumToastProps {
   variant?: ToastVariant;
   title: string;
   description?: string;
-  categoryBadge?: string;
   action?: ToastAction;
   duration?: number;
+  onClick?: () => void;
 }
 
 const VARIANT_CONFIGS: Record<
   ToastVariant,
   {
-    icon: React.ComponentType<{ className?: string }>;
-    iconBg: string;
-    iconColor: string;
     borderColor: string;
     glowColor: string;
-    badgeBg: string;
-    badgeText: string;
-    defaultBadge: string;
-    actionBtnClass: string;
+    dotColor: string;
   }
 > = {
   shortlist: {
-    icon: Sparkles,
-    iconBg: 'bg-emerald-500/10 border-emerald-500/25 shadow-[0_0_12px_rgba(52,211,153,0.15)]',
-    iconColor: 'text-emerald-400',
-    borderColor: 'border-emerald-500/25',
-    glowColor: 'from-emerald-500/10 via-transparent to-transparent',
-    badgeBg: 'bg-emerald-500/10 border border-emerald-500/25',
-    badgeText: 'text-emerald-300',
-    defaultBadge: 'SHORTLIST MATCH',
-    actionBtnClass:
-      'bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-semibold shadow-[0_0_12px_rgba(52,211,153,0.25)]',
+    borderColor: 'border-emerald-500/35 hover:border-emerald-500/50',
+    glowColor: 'from-emerald-500/20 via-transparent to-transparent',
+    dotColor: 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]',
   },
   test: {
-    icon: FileText,
-    iconBg: 'bg-emerald-500/10 border-emerald-500/25 shadow-[0_0_12px_rgba(52,211,153,0.15)]',
-    iconColor: 'text-emerald-400',
-    borderColor: 'border-emerald-500/25',
-    glowColor: 'from-emerald-500/10 via-transparent to-transparent',
-    badgeBg: 'bg-emerald-500/10 border border-emerald-500/25',
-    badgeText: 'text-emerald-300',
-    defaultBadge: 'TEST SCHEDULED',
-    actionBtnClass:
-      'bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-semibold shadow-[0_0_12px_rgba(52,211,153,0.25)]',
+    borderColor: 'border-amber-500/35 hover:border-amber-500/50',
+    glowColor: 'from-amber-500/20 via-transparent to-transparent',
+    dotColor: 'bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.8)]',
   },
   interview: {
-    icon: Award,
-    iconBg: 'bg-emerald-500/10 border-emerald-500/25 shadow-[0_0_12px_rgba(52,211,153,0.15)]',
-    iconColor: 'text-emerald-400',
-    borderColor: 'border-emerald-500/25',
-    glowColor: 'from-emerald-500/10 via-transparent to-transparent',
-    badgeBg: 'bg-emerald-500/10 border border-emerald-500/25',
-    badgeText: 'text-emerald-300',
-    defaultBadge: 'INTERVIEW ROUND',
-    actionBtnClass:
-      'bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-semibold shadow-[0_0_12px_rgba(52,211,153,0.25)]',
+    borderColor: 'border-purple-500/35 hover:border-purple-500/50',
+    glowColor: 'from-purple-500/20 via-transparent to-transparent',
+    dotColor: 'bg-purple-400 shadow-[0_0_8px_rgba(192,132,252,0.8)]',
   },
   success: {
-    icon: CheckCircle2,
-    iconBg: 'bg-emerald-500/10 border-emerald-500/25 shadow-[0_0_12px_rgba(52,211,153,0.15)]',
-    iconColor: 'text-emerald-400',
-    borderColor: 'border-emerald-500/25',
-    glowColor: 'from-emerald-500/10 via-transparent to-transparent',
-    badgeBg: 'bg-emerald-500/10 border border-emerald-500/25',
-    badgeText: 'text-emerald-300',
-    defaultBadge: 'SUCCESS',
-    actionBtnClass:
-      'bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-semibold shadow-[0_0_12px_rgba(52,211,153,0.25)]',
+    borderColor: 'border-emerald-500/35 hover:border-emerald-500/50',
+    glowColor: 'from-emerald-500/20 via-transparent to-transparent',
+    dotColor: 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]',
   },
   error: {
-    icon: AlertCircle,
-    iconBg: 'bg-rose-500/10 border-rose-500/25 shadow-[0_0_12px_rgba(244,63,94,0.15)]',
-    iconColor: 'text-rose-400',
-    borderColor: 'border-rose-500/30',
-    glowColor: 'from-rose-500/10 via-transparent to-transparent',
-    badgeBg: 'bg-rose-500/10 border border-rose-500/25',
-    badgeText: 'text-rose-400',
-    defaultBadge: 'ERROR',
-    actionBtnClass: 'bg-rose-500 hover:bg-rose-400 text-white font-semibold',
+    borderColor: 'border-rose-500/40 hover:border-rose-500/60',
+    glowColor: 'from-rose-500/20 via-transparent to-transparent',
+    dotColor: 'bg-rose-400 shadow-[0_0_8px_rgba(244,63,94,0.8)]',
   },
   warning: {
-    icon: AlertTriangle,
-    iconBg: 'bg-emerald-500/10 border-emerald-500/25',
-    iconColor: 'text-emerald-400',
-    borderColor: 'border-emerald-500/25',
-    glowColor: 'from-emerald-500/8 via-transparent to-transparent',
-    badgeBg: 'bg-emerald-500/10 border border-emerald-500/25',
-    badgeText: 'text-emerald-300',
-    defaultBadge: 'NOTICE',
-    actionBtnClass: 'bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-semibold',
+    borderColor: 'border-amber-500/35 hover:border-amber-500/50',
+    glowColor: 'from-amber-500/20 via-transparent to-transparent',
+    dotColor: 'bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.8)]',
   },
   info: {
-    icon: Info,
-    iconBg: 'bg-emerald-500/10 border-emerald-500/25',
-    iconColor: 'text-emerald-400',
-    borderColor: 'border-emerald-500/25',
-    glowColor: 'from-emerald-500/8 via-transparent to-transparent',
-    badgeBg: 'bg-emerald-500/10 border border-emerald-500/25',
-    badgeText: 'text-emerald-300',
-    defaultBadge: 'INFO',
-    actionBtnClass: 'bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-semibold',
+    borderColor: 'border-zinc-800 hover:border-zinc-700',
+    glowColor: 'from-emerald-500/10 via-transparent to-transparent',
+    dotColor: 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.6)]',
   },
   sync: {
-    icon: Zap,
-    iconBg: 'bg-emerald-500/10 border-emerald-500/25 shadow-[0_0_12px_rgba(52,211,153,0.15)]',
-    iconColor: 'text-emerald-400',
-    borderColor: 'border-emerald-500/25',
-    glowColor: 'from-emerald-500/10 via-transparent to-transparent',
-    badgeBg: 'bg-emerald-500/10 border border-emerald-500/25',
-    badgeText: 'text-emerald-300',
-    defaultBadge: 'RADAR SYNC',
-    actionBtnClass:
-      'bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-semibold shadow-[0_0_12px_rgba(52,211,153,0.25)]',
+    borderColor: 'border-emerald-500/30 hover:border-emerald-500/45',
+    glowColor: 'from-emerald-500/20 via-transparent to-transparent',
+    dotColor: 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]',
   },
 };
 
 /**
  * PremiumToast Component
- * Obsidian glass chassis, glowing micro-accent, custom badge, and responsive actions.
+ * Uniform fixed size (360px x 66px), clean AppLogoMark, no cluttering badges,
+ * clean title & short description, dismiss button, and click-to-open interaction.
  */
 export function PremiumToast({
   id,
   variant = 'info',
   title,
   description,
-  categoryBadge,
   action,
+  onClick,
 }: PremiumToastProps) {
   const config = VARIANT_CONFIGS[variant] || VARIANT_CONFIGS.info;
-  const Icon = config.icon;
+
+  const handleClick = () => {
+    if (action?.onClick) {
+      action.onClick();
+      toast.dismiss(id);
+    } else if (onClick) {
+      onClick();
+      toast.dismiss(id);
+    }
+  };
+
+  const isClickable = Boolean(action?.onClick || onClick);
 
   return (
     <div
       data-premium-toast=""
+      onClick={handleClick}
       className={cn(
-        'relative w-full max-w-[370px] overflow-hidden rounded-xl border px-3.5 py-2.5 shadow-xl transition-all duration-300',
+        'relative w-[360px] h-[66px] flex items-center gap-3 px-3.5 rounded-xl border shadow-xl transition-all duration-200 select-none overflow-hidden',
         'bg-[#0d0d11]/95 backdrop-blur-2xl',
-        config.borderColor
+        config.borderColor,
+        isClickable && 'cursor-pointer hover:bg-[#121218] hover:border-zinc-700'
       )}
     >
       {/* Subtle ambient radial glow in corner */}
       <div
         className={cn(
-          'pointer-events-none absolute -top-8 -left-8 h-24 w-24 rounded-full bg-gradient-to-br blur-xl opacity-80',
+          'pointer-events-none absolute -top-6 -left-6 h-20 w-20 rounded-full bg-gradient-to-br blur-xl opacity-40',
           config.glowColor
         )}
       />
 
-      <div className="relative flex items-center gap-2.5">
-        {/* Compact Type Icon Square */}
-        <div
+      {/* App Logo Mark with micro status dot */}
+      <div className="relative shrink-0 flex items-center justify-center">
+        <AppLogoMark size={28} className="shadow-md" />
+        <span
           className={cn(
-            'flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border',
-            config.iconBg,
-            config.iconColor
+            'absolute -bottom-0.5 -right-0.5 h-2 w-2 rounded-full ring-2 ring-[#0d0d11]',
+            config.dotColor
           )}
-        >
-          <Icon className="h-3.5 w-3.5" />
-        </div>
-
-        {/* Content Area */}
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-1.5 min-w-0">
-            {categoryBadge && (
-              <span
-                className={cn(
-                  'inline-flex items-center px-1.5 py-0.5 rounded font-mono text-[8px] font-bold tracking-wider uppercase shrink-0',
-                  config.badgeBg,
-                  config.badgeText
-                )}
-              >
-                {categoryBadge}
-              </span>
-            )}
-            <h4 className="font-display text-xs font-semibold text-white tracking-tight truncate">
-              {title}
-            </h4>
-          </div>
-
-          {description && (
-            <p className="text-[11px] text-zinc-400 truncate mt-0.5 leading-tight">
-              {description}
-            </p>
-          )}
-        </div>
-
-        {/* Action Button */}
-        {action && (
-          <button
-            type="button"
-            onClick={() => {
-              action.onClick();
-              toast.dismiss(id);
-            }}
-            className={cn(
-              'shrink-0 inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[10px] font-semibold transition-transform active:scale-95 cursor-pointer',
-              config.actionBtnClass
-            )}
-          >
-            <span>{action.label}</span>
-            <ArrowUpRight className="h-2.5 w-2.5" />
-          </button>
-        )}
-
-        {/* Dismiss Cross */}
-        <button
-          type="button"
-          onClick={() => toast.dismiss(id)}
-          className="shrink-0 rounded-md p-1 text-zinc-500 hover:bg-white/10 hover:text-zinc-200 transition-colors cursor-pointer"
-          title="Close"
-        >
-          <X className="h-3.5 w-3.5" />
-        </button>
+        />
       </div>
+
+      {/* Content Area: Title & Short Desc */}
+      <div className="min-w-0 flex-1 flex flex-col justify-center">
+        <h4 className="font-display text-[13px] font-semibold text-zinc-100 tracking-tight truncate leading-tight">
+          {title}
+        </h4>
+        {description && (
+          <p className="text-xs text-zinc-400 truncate mt-0.5 leading-normal">
+            {description}
+          </p>
+        )}
+      </div>
+
+      {/* Dismiss Cross */}
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          toast.dismiss(id);
+        }}
+        className="shrink-0 rounded-lg p-1.5 text-zinc-500 hover:bg-white/10 hover:text-zinc-200 transition-colors cursor-pointer"
+        title="Close"
+      >
+        <X className="h-3.5 w-3.5" />
+      </button>
     </div>
   );
 }
@@ -262,7 +188,7 @@ export function PremiumToast({
 
 export const appToast = {
   /**
-   * Shortlist cracked alert (Emerald aura, sparkles, high impact)
+   * Shortlist cracked alert
    */
   shortlist: (
     title: string,
@@ -280,7 +206,6 @@ export const appToast = {
           variant="shortlist"
           title={title}
           description={options?.description}
-          categoryBadge={options?.company ? `${options.company} · SHORTLIST` : undefined}
           action={options?.action}
         />
       ),
@@ -289,7 +214,7 @@ export const appToast = {
   },
 
   /**
-   * OA / Assessment / Test scheduled alert (Amber aura, test sheet)
+   * OA / Assessment / Test scheduled alert
    */
   test: (
     title: string,
@@ -307,7 +232,6 @@ export const appToast = {
           variant="test"
           title={title}
           description={options?.description}
-          categoryBadge={options?.company ? `${options.company} · TEST ROUND` : undefined}
           action={options?.action}
         />
       ),
@@ -316,7 +240,7 @@ export const appToast = {
   },
 
   /**
-   * Interview round alert (Purple aura)
+   * Interview round alert
    */
   interview: (
     title: string,
@@ -334,7 +258,6 @@ export const appToast = {
           variant="interview"
           title={title}
           description={options?.description}
-          categoryBadge={options?.company ? `${options.company} · INTERVIEW` : undefined}
           action={options?.action}
         />
       ),
@@ -465,43 +388,35 @@ export const appToast = {
     routerNavigate?: (url: string) => void
   ) => {
     let variant: ToastVariant = 'info';
-    let badge: string | undefined;
 
     switch (notif.type) {
       case 'shortlist_match':
         variant = 'shortlist';
-        badge = 'SHORTLIST MATCH';
         break;
       case 'test_scheduled':
         variant = 'test';
-        badge = 'TEST SCHEDULED';
         break;
       case 'interview_scheduled':
         variant = 'interview';
-        badge = 'INTERVIEW';
         break;
       case 'ppt_scheduled':
         variant = 'info';
-        badge = 'PPT SESSION';
         break;
       case 'new_company':
         variant = 'sync';
-        badge = 'NEW DRIVE';
         break;
       case 'status_change':
         variant = 'success';
-        badge = 'STAGE UPDATE';
         break;
       default:
         variant = 'info';
-        badge = 'ALERT';
     }
 
     const actionUrl = notif.link || (notif.company_id ? `/companies/${notif.company_id}` : undefined);
     const action: ToastAction | undefined =
       actionUrl && routerNavigate
         ? {
-            label: 'View Details',
+            label: 'View',
             onClick: () => routerNavigate(actionUrl),
           }
         : undefined;
@@ -513,11 +428,10 @@ export const appToast = {
           variant={variant}
           title={notif.title}
           description={notif.body || notif.message}
-          categoryBadge={badge}
           action={action}
         />
       ),
-      { duration: Infinity }
+      { id: `notif-${notif.id}`, duration: Infinity }
     );
   },
 };

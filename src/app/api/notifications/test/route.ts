@@ -18,7 +18,7 @@ export async function POST() {
   const result = await sendNotification({
     userId: session.userId,
     type: 'general',
-    title: '🔔 Where\'s My Offer Notification Test',
+    title: 'Where\'s My Offer Notification Test',
     body: 'Your browser push and in-app notification system is working perfectly!',
     link: '/settings',
     dedupeKey,

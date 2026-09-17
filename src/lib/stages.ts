@@ -92,7 +92,8 @@ export function getEffectiveStage(
   status: string,
   latestEvent?: EventLike | null,
   events?: EventLike[] | null,
-  notes?: string | null
+  notes?: string | null,
+  manualOverride?: boolean
 ): EffectiveStageResult {
   const s = (status || '').toLowerCase();
 
@@ -172,8 +173,289 @@ export function getEffectiveStage(
   const isInterviewCompleted = hasInterview && intEvents.every(isEventPast);
 
   const notesText = notes || '';
-  const isNotesInterview = /interviewed|interview/i.test(notesText);
-  const isNotesTest = /test|oa|assessment/i.test(notesText);
+  const isNotesInterview = /eliminated.*interview|interview.*eliminated|interviewed.*not\s*selected|rejected.*interview/i.test(notesText);
+  const isNotesTest = /eliminated.*test|test.*eliminated|rejected.*test|test.*rejected/i.test(notesText);
+
+  // ─── MANUAL OVERRIDE FAST PATH ──────────────────────────────────────────
+  // If the application status was manually set by the user, honor it strictly!
+  // Do NOT let company-wide broadcast events hijack a manually specified status.
+  if (manualOverride) {
+    if (s === 'not_shortlisted') {
+      return {
+        stageIndex: 2,
+        effectiveStatus: 'not_shortlisted',
+        eliminatedStage: 2,
+        furthestPassedStage: hasPpt ? 1 : 0,
+        statusSubtitle: 'Not Shortlisted for Test',
+        hasPpt,
+        hasTest,
+        hasInterview,
+        isTestCompleted,
+        isPptCompleted,
+        isInterviewCompleted,
+      };
+    }
+
+    if (s === 'rejected_interview' || (s === 'rejected' && isNotesInterview)) {
+      return {
+        stageIndex: 4,
+        effectiveStatus: 'rejected_interview',
+        eliminatedStage: 4,
+        furthestPassedStage: 3,
+        statusSubtitle: 'Interviewed · Not Selected',
+        hasPpt,
+        hasTest,
+        hasInterview,
+        isTestCompleted,
+        isPptCompleted,
+        isInterviewCompleted,
+      };
+    }
+
+    if (s === 'rejected_test' || s === 'test_eliminated' || (s === 'rejected' && isNotesTest)) {
+      return {
+        stageIndex: 3,
+        effectiveStatus: 'rejected_test',
+        eliminatedStage: 3,
+        furthestPassedStage: 2,
+        statusSubtitle: 'Eliminated in Test Round',
+        hasPpt,
+        hasTest,
+        hasInterview,
+        isTestCompleted,
+        isPptCompleted,
+        isInterviewCompleted,
+      };
+    }
+
+    if (s === 'rejected') {
+      return {
+        stageIndex: 2,
+        effectiveStatus: 'not_shortlisted',
+        eliminatedStage: 2,
+        furthestPassedStage: hasPpt ? 1 : 0,
+        statusSubtitle: 'Not Shortlisted for Test',
+        hasPpt,
+        hasTest,
+        hasInterview,
+        isTestCompleted,
+        isPptCompleted,
+        isInterviewCompleted,
+      };
+    }
+
+    if (s === 'withdrawn' || s === 'declined') {
+      return {
+        stageIndex: 0,
+        effectiveStatus: s,
+        eliminatedStage: -1,
+        furthestPassedStage: hasInterview ? 2 : hasTest ? 1 : 0,
+        statusSubtitle: 'Withdrawn by Candidate',
+        hasPpt,
+        hasTest,
+        hasInterview,
+        isTestCompleted,
+        isPptCompleted,
+        isInterviewCompleted,
+      };
+    }
+
+    if (s === 'not_applied') {
+      return {
+        stageIndex: 0,
+        effectiveStatus: 'not_applied',
+        eliminatedStage: -1,
+        furthestPassedStage: -1,
+        statusSubtitle: 'Not Registered',
+        hasPpt,
+        hasTest,
+        hasInterview,
+        isTestCompleted,
+        isPptCompleted,
+        isInterviewCompleted,
+      };
+    }
+
+    if (['selected', 'offer', 'offer_received'].includes(s)) {
+      return {
+        stageIndex: 4,
+        effectiveStatus: 'selected',
+        eliminatedStage: -1,
+        furthestPassedStage: 4,
+        statusSubtitle: 'Selected · Offer Received 🎉',
+        hasPpt,
+        hasTest,
+        hasInterview,
+        isTestCompleted,
+        isPptCompleted,
+        isInterviewCompleted,
+      };
+    }
+
+    if (s === 'interview_completed') {
+      return {
+        stageIndex: 3,
+        effectiveStatus: 'interview_completed',
+        eliminatedStage: -1,
+        furthestPassedStage: 3,
+        statusSubtitle: 'Interview Completed · Results Awaited',
+        hasPpt,
+        hasTest,
+        hasInterview,
+        isTestCompleted,
+        isPptCompleted,
+        isInterviewCompleted: true,
+      };
+    }
+
+    if (['interview_scheduled', 'interview', 'interview_ongoing'].includes(s)) {
+      return {
+        stageIndex: 3,
+        effectiveStatus: isInterviewOngoing ? 'interview_ongoing' : 'interview_scheduled',
+        eliminatedStage: -1,
+        furthestPassedStage: 2,
+        statusSubtitle: isInterviewOngoing ? 'Interview in Progress · Live Now' : 'Shortlisted for Interview',
+        hasPpt,
+        hasTest,
+        hasInterview,
+        isTestCompleted,
+        isPptCompleted,
+        isInterviewCompleted,
+        isInterviewOngoing,
+      };
+    }
+
+    if (s === 'test_completed') {
+      return {
+        stageIndex: 2,
+        effectiveStatus: 'test_completed',
+        eliminatedStage: -1,
+        furthestPassedStage: 2,
+        statusSubtitle: 'Test Completed · Awaiting Results',
+        hasPpt,
+        hasTest,
+        hasInterview,
+        isTestCompleted: true,
+        isPptCompleted,
+        isInterviewCompleted,
+      };
+    }
+
+    if (['test_scheduled', 'shortlisted', 'test_ongoing', 'test'].includes(s)) {
+      const isShortlistOnly = s === 'shortlisted';
+      return {
+        stageIndex: 2,
+        effectiveStatus: isTestOngoing ? 'test_ongoing' : isShortlistOnly ? 'shortlisted' : 'test_scheduled',
+        eliminatedStage: -1,
+        furthestPassedStage: hasPpt ? 1 : 0,
+        statusSubtitle: isTestOngoing ? 'Assessment in Progress · Live Now' : 'Shortlisted for Test',
+        hasPpt,
+        hasTest,
+        hasInterview,
+        isTestCompleted,
+        isPptCompleted,
+        isInterviewCompleted,
+        isTestOngoing,
+      };
+    }
+
+    if (s === 'ppt_completed') {
+      return {
+        stageIndex: 1,
+        effectiveStatus: 'ppt_completed',
+        eliminatedStage: -1,
+        furthestPassedStage: 1,
+        statusSubtitle: 'PPT Completed · Test Shortlist Awaited',
+        hasPpt,
+        hasTest,
+        hasInterview,
+        isTestCompleted,
+        isPptCompleted: true,
+        isInterviewCompleted,
+      };
+    }
+
+    if (['ppt_scheduled', 'ppt', 'ppt_ongoing'].includes(s)) {
+      return {
+        stageIndex: 1,
+        effectiveStatus: isPptOngoing ? 'ppt_ongoing' : 'ppt_scheduled',
+        eliminatedStage: -1,
+        furthestPassedStage: 0,
+        statusSubtitle: isPptOngoing ? 'Pre-Placement Talk Live Now' : 'Pre-Placement Talk Scheduled',
+        hasPpt,
+        hasTest,
+        hasInterview,
+        isTestCompleted,
+        isPptCompleted,
+        isInterviewCompleted,
+        isPptOngoing,
+      };
+    }
+
+    // Default manual applied — but check if PPT/Test events reveal a further stage
+    // (handles the case where status is 'applied' but a PPT event exists)
+    if (isPptCompleted) {
+      return {
+        stageIndex: 1,
+        effectiveStatus: 'ppt_completed',
+        eliminatedStage: -1,
+        furthestPassedStage: 1,
+        statusSubtitle: 'PPT Completed · Test Shortlist Awaited',
+        hasPpt,
+        hasTest,
+        hasInterview,
+        isTestCompleted,
+        isPptCompleted: true,
+        isInterviewCompleted,
+      };
+    }
+    if (isPptOngoing) {
+      return {
+        stageIndex: 1,
+        effectiveStatus: 'ppt_ongoing',
+        eliminatedStage: -1,
+        furthestPassedStage: 0,
+        statusSubtitle: 'Pre-Placement Talk Live Now',
+        hasPpt,
+        hasTest,
+        hasInterview,
+        isTestCompleted,
+        isPptCompleted: false,
+        isInterviewCompleted,
+        isPptOngoing: true,
+      };
+    }
+    if (hasPpt) {
+      return {
+        stageIndex: 1,
+        effectiveStatus: 'ppt_scheduled',
+        eliminatedStage: -1,
+        furthestPassedStage: 0,
+        statusSubtitle: 'Stage 2 of 5 · PPT Scheduled',
+        hasPpt,
+        hasTest,
+        hasInterview,
+        isTestCompleted,
+        isPptCompleted,
+        isInterviewCompleted,
+      };
+    }
+    return {
+      stageIndex: 0,
+      effectiveStatus: 'applied',
+      eliminatedStage: -1,
+      furthestPassedStage: 0,
+      statusSubtitle: 'Stage 1 of 5 · Applied',
+      hasPpt,
+      hasTest,
+      hasInterview,
+      isTestCompleted,
+      isPptCompleted,
+      isInterviewCompleted,
+    };
+  }
+
+  // ─── AUTOMATED INFERRED STAGE PATH ────────────────────────────────────────
 
   // 1. Not Shortlisted: candidate applied but was screened out before test round (Pre-Test Screening)
   if (s === 'not_shortlisted') {
@@ -193,7 +475,7 @@ export function getEffectiveStage(
   }
 
   // 2. Eliminated in Interview Round (Interviewed · Not Selected)
-  if (s === 'rejected_interview' || (s === 'rejected' && (isNotesInterview || hasInterview))) {
+  if (s === 'rejected_interview' || (s === 'rejected' && isNotesInterview)) {
     return {
       stageIndex: 4,
       effectiveStatus: 'rejected_interview',
@@ -213,7 +495,7 @@ export function getEffectiveStage(
   if (
     s === 'rejected_test' ||
     s === 'test_eliminated' ||
-    (s === 'rejected' && (isNotesTest || hasTest || isTestCompleted))
+    (s === 'rejected' && isNotesTest)
   ) {
     return {
       stageIndex: 3,
@@ -247,7 +529,7 @@ export function getEffectiveStage(
     };
   }
 
-  // 3. Withdrawn / Declined
+  // 5. Withdrawn / Declined
   if (s === 'withdrawn' || s === 'declined') {
     const passed = hasInterview ? 2 : hasTest ? 1 : 0;
     return {
@@ -265,7 +547,7 @@ export function getEffectiveStage(
     };
   }
 
-  // 4. Not applied
+  // 6. Not applied
   if (s === 'not_applied') {
     return {
       stageIndex: 0,
@@ -282,7 +564,7 @@ export function getEffectiveStage(
     };
   }
 
-  // 5. Selected / Offer
+  // 7. Selected / Offer
   if (['selected', 'offer', 'offer_received'].includes(s)) {
     return {
       stageIndex: 4,
@@ -299,8 +581,8 @@ export function getEffectiveStage(
     };
   }
 
-  // 6. Interview scheduled / Interview ongoing / Interview completed
-  if (['interview_scheduled', 'interview', 'interview_completed', 'interview_ongoing'].includes(s) || hasInterview) {
+  // 8. Interview scheduled / Interview ongoing / Interview completed
+  if (['interview_scheduled', 'interview', 'interview_completed', 'interview_ongoing'].includes(s)) {
     if (isInterviewOngoing) {
       return {
         stageIndex: 3,
@@ -349,8 +631,8 @@ export function getEffectiveStage(
     };
   }
 
-  // 7. Test scheduled / Shortlisted for test / Test ongoing / Test completed
-  if (['test_scheduled', 'shortlisted', 'test_completed', 'test_ongoing'].includes(s) || hasTest) {
+  // 9. Test scheduled / Shortlisted for test / Test ongoing / Test completed
+  if (['test_scheduled', 'shortlisted', 'test_completed', 'test_ongoing', 'test'].includes(s)) {
     if (isTestOngoing) {
       return {
         stageIndex: 2,
@@ -386,7 +668,7 @@ export function getEffectiveStage(
 
     return {
       stageIndex: 2,
-      effectiveStatus: 'test_scheduled',
+      effectiveStatus: s === 'shortlisted' ? 'shortlisted' : 'test_scheduled',
       eliminatedStage: -1,
       furthestPassedStage: hasPpt ? 1 : 0,
       statusSubtitle: 'Shortlisted for Test',
@@ -399,8 +681,8 @@ export function getEffectiveStage(
     };
   }
 
-  // 8. PPT scheduled / PPT ongoing / PPT completed
-  if (['ppt_scheduled', 'ppt', 'ppt_completed', 'ppt_ongoing'].includes(s) || hasPpt) {
+  // 10. PPT scheduled / PPT ongoing / PPT completed
+  if (['ppt_scheduled', 'ppt', 'ppt_completed', 'ppt_ongoing'].includes(s)) {
     if (isPptOngoing) {
       return {
         stageIndex: 1,
@@ -449,7 +731,55 @@ export function getEffectiveStage(
     };
   }
 
-  // 9. Default Applied
+  // 11. Default Applied — but check if PPT/Test events reveal a further stage.
+  // This handles companies stored as 'applied' in the DB that have PPT events in the
+  // events table which have already passed (isPptCompleted) or are upcoming (hasPpt).
+  if (isPptCompleted) {
+    return {
+      stageIndex: 1,
+      effectiveStatus: 'ppt_completed',
+      eliminatedStage: -1,
+      furthestPassedStage: 1,
+      statusSubtitle: 'PPT Completed · Test Shortlist Awaited',
+      hasPpt,
+      hasTest,
+      hasInterview,
+      isTestCompleted,
+      isPptCompleted: true,
+      isInterviewCompleted,
+    };
+  }
+  if (isPptOngoing) {
+    return {
+      stageIndex: 1,
+      effectiveStatus: 'ppt_ongoing',
+      eliminatedStage: -1,
+      furthestPassedStage: 0,
+      statusSubtitle: 'Pre-Placement Talk Live Now',
+      hasPpt,
+      hasTest,
+      hasInterview,
+      isTestCompleted,
+      isPptCompleted: false,
+      isInterviewCompleted,
+      isPptOngoing: true,
+    };
+  }
+  if (hasPpt) {
+    return {
+      stageIndex: 1,
+      effectiveStatus: 'ppt_scheduled',
+      eliminatedStage: -1,
+      furthestPassedStage: 0,
+      statusSubtitle: 'Stage 2 of 5 · PPT Scheduled',
+      hasPpt,
+      hasTest,
+      hasInterview,
+      isTestCompleted,
+      isPptCompleted,
+      isInterviewCompleted,
+    };
+  }
   return {
     stageIndex: 0,
     effectiveStatus: 'applied',

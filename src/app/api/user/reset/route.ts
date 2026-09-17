@@ -22,19 +22,17 @@ export async function POST() {
   const supabase = createAdminClient();
 
   try {
-    // 1. Delete placement analysis records
-    await Promise.allSettled([
-      supabase.from('events').delete().eq('user_id', userId),
-      supabase.from('candidate_matches').delete().eq('user_id', userId),
-      supabase.from('notifications').delete().eq('user_id', userId),
-      supabase.from('applications').delete().eq('user_id', userId),
-      supabase.from('emails').delete().eq('user_id', userId),
-      supabase.from('companies').delete().eq('user_id', userId),
-      supabase.from('sync_pages').delete().eq('user_id', userId),
-      supabase.from('sync_state').delete().eq('user_id', userId),
-    ]);
+    // 1. Delete placement analysis records in strict foreign-key order
+    await supabase.from('candidate_matches').delete().eq('user_id', userId);
+    await supabase.from('events').delete().eq('user_id', userId);
+    await supabase.from('notifications').delete().eq('user_id', userId);
+    await supabase.from('applications').delete().eq('user_id', userId);
+    await supabase.from('emails').delete().eq('user_id', userId);
+    await supabase.from('companies').delete().eq('user_id', userId);
+    await supabase.from('sync_pages').delete().eq('user_id', userId);
+    await supabase.from('sync_state').delete().eq('user_id', userId);
 
-    // 2. Reset Gmail account sync history so next sync performs an initial fetch
+    // 2. Reset Gmail account sync history so next sync performs a full initial scan
     await supabase
       .from('gmail_accounts')
       .update({

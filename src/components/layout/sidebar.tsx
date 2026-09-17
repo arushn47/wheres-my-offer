@@ -11,15 +11,11 @@ import {
   PieChart,
   Settings as SettingsIcon,
   Search,
-  RefreshCw,
   LogOut,
-  CheckCircle2,
-  Radio,
-  Zap,
 } from 'lucide-react';
 import NotificationBell from '@/components/notifications/notification-bell';
+import CampusRadar from '@/components/layout/campus-radar';
 import { AppLogo, AppLogoMark } from '@/components/brand/logo';
-import { useSync } from '@/context/sync-context';
 export { AppLogo, AppLogoMark };
 
 const NAV = [
@@ -40,35 +36,23 @@ interface SidebarProps {
 export default function Sidebar({
   userName,
   userAvatar,
-  lastSyncAt,
 }: SidebarProps) {
   const pathname = usePathname();
   const router = useRouter();
 
-  const {
-    isSyncing,
-    syncProgress,
-    progressPercent,
-    lastSyncAt: currentLastSyncAt,
-    startSync,
-    syncResult,
-  } = useSync();
-
-  const displayLastSync = currentLastSyncAt || lastSyncAt;
-
   const handleLogout = async () => {
     try {
       await fetch('/api/auth/logout', { method: 'POST' });
-      router.push('/login');
+      window.location.href = '/login';
     } catch {
-      router.push('/login');
+      window.location.href = '/login';
     }
   };
 
   return (
     <aside className="fixed inset-y-0 left-0 hidden h-screen w-72 shrink-0 flex-col border-r border-zinc-800/80 bg-[#0b0b0e] lg:flex z-40 select-none">
       {/* Brand Header & In-Sidebar Notification Bell */}
-      <div className="flex h-12 items-center justify-between border-b border-zinc-800/80 px-4 shrink-0">
+      <div className="flex h-16 items-center justify-between border-b border-zinc-800/80 px-4 shrink-0">
         <AppLogo />
         <NotificationBell align="sidebar" />
       </div>
@@ -83,7 +67,7 @@ export default function Sidebar({
               key={href}
               href={href}
               className={cn(
-                'group flex items-center gap-3 rounded-xl px-3.5 py-2.5 text-xs font-medium transition-colors duration-150',
+                'group flex items-center gap-3 rounded-xl px-3.5 py-2.5 text-sm font-medium transition-colors duration-150',
                 isActive
                   ? 'bg-zinc-800/80 text-zinc-100 font-semibold'
                   : 'text-zinc-400 hover:bg-zinc-900/80 hover:text-zinc-200'
@@ -106,122 +90,7 @@ export default function Sidebar({
 
       {/* Spacious area below NAV items: Live Placement Radar & Sync Station */}
       <div className="flex-1 px-3.5 py-2 flex flex-col justify-end overflow-y-auto">
-        <div
-          className={cn(
-            'rounded-2xl border p-3.5 transition-all duration-300 shadow-md',
-            isSyncing
-              ? 'border-emerald-500/35 bg-emerald-950/20 shadow-[0_0_24px_rgba(16,185,129,0.08)]'
-              : 'border-zinc-800/90 bg-zinc-900/45 hover:border-zinc-700/80'
-          )}
-        >
-          {/* Header Row: Radar status & Sync action */}
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2 text-xs font-semibold text-zinc-200">
-              <span className="relative flex h-2 w-2">
-                <span
-                  className={cn(
-                    'absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-70',
-                    isSyncing ? 'animate-ping' : 'animate-ping'
-                  )}
-                />
-                <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-400" />
-              </span>
-              <span className="tracking-tight">Campus Radar</span>
-            </div>
-
-            {isSyncing ? (
-              <div className="flex items-center gap-1.5 rounded-lg border border-emerald-500/30 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-mono font-semibold text-emerald-300">
-                <RefreshCw className="h-2.5 w-2.5 text-emerald-400 animate-spin shrink-0" />
-                <span>{progressPercent > 0 ? `${progressPercent}%` : 'Syncing'}</span>
-              </div>
-            ) : (
-              <button
-                type="button"
-                onClick={() => startSync(false)}
-                disabled={isSyncing}
-                className="flex items-center gap-1.5 rounded-lg border border-emerald-500/25 bg-emerald-500/10 px-2.5 py-1 text-[11px] font-mono text-emerald-300 hover:bg-emerald-500/20 active:scale-95 transition-all cursor-pointer disabled:opacity-50"
-                title={
-                  displayLastSync
-                    ? `Last synced ${timeAgo(displayLastSync)} · Click to sync inboxes`
-                    : 'Click to sync Gmail inboxes'
-                }
-              >
-                <RefreshCw className="h-3 w-3 text-emerald-400" />
-                <span>Sync</span>
-              </button>
-            )}
-          </div>
-
-          {/* Active Live Sync Details */}
-          {isSyncing ? (
-            <div className="mt-3 space-y-2.5 animate-fade-in">
-              {/* Animated Progress Bar */}
-              <div className="h-1.5 w-full overflow-hidden rounded-full bg-zinc-800/90">
-                <div
-                  className="h-full bg-gradient-to-r from-emerald-500 via-teal-400 to-emerald-300 transition-all duration-300 shadow-[0_0_8px_rgba(52,211,153,0.7)]"
-                  style={{ width: `${Math.max(progressPercent, 6)}%` }}
-                />
-              </div>
-
-              {/* Current Scanning Phase & Email Count */}
-              <div className="flex items-center justify-between text-[10px] font-mono">
-                <span className="truncate text-emerald-400 font-medium">
-                  {syncProgress?.phase === 'initializing'
-                    ? 'Connecting inboxes…'
-                    : syncProgress?.phase === 'fetching'
-                    ? `Scanning ${syncProgress.accountType || 'CDC'}…`
-                    : syncProgress?.phase === 'processing'
-                    ? `Processing ${syncProgress.processedMessages}/${syncProgress.totalMessages}`
-                    : syncProgress?.phase === 'complete'
-                    ? 'Finalizing index…'
-                    : 'Syncing inboxes…'}
-                </span>
-                {syncProgress && syncProgress.totalMessages > 0 && (
-                  <span className="text-zinc-500 shrink-0 ml-1">
-                    {syncProgress.processedMessages}/{syncProgress.totalMessages}
-                  </span>
-                )}
-              </div>
-
-              {/* Live Subject Snippet */}
-              {syncProgress?.currentSubject && (
-                <div className="truncate rounded-lg bg-black/45 border border-zinc-800/70 px-2.5 py-1 text-[10px] font-mono text-zinc-400">
-                  <span className="text-zinc-500 mr-1.5">📄</span>
-                  <span className="truncate">{syncProgress.currentSubject}</span>
-                </div>
-              )}
-
-              {/* Real-time Tally of Found Drives/Updates */}
-              {((syncProgress?.newEmails ?? 0) > 0 || (syncProgress?.newCompanies ?? 0) > 0) && (
-                <div className="flex items-center gap-1.5 text-[10px] font-mono text-emerald-400/90">
-                  <span className="inline-flex h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                  <span>+{syncProgress?.newEmails} updates</span>
-                  {(syncProgress?.newCompanies ?? 0) > 0 && (
-                    <span>· +{syncProgress?.newCompanies} companies</span>
-                  )}
-                </div>
-              )}
-            </div>
-          ) : syncResult?.show && syncResult.success ? (
-            <div className="mt-2.5 flex items-center gap-2 rounded-lg bg-emerald-500/10 border border-emerald-500/20 px-2.5 py-1.5 text-[10px] font-mono text-emerald-300 animate-fade-in">
-              <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
-              <span className="truncate">
-                {syncResult.newEmails} updates · {syncResult.newCompanies} companies indexed
-              </span>
-            </div>
-          ) : (
-            /* Idle State */
-            <div className="mt-2.5 space-y-1.5">
-              <div className="flex items-center justify-between text-[10px] font-mono text-zinc-400">
-                <span>{displayLastSync ? `Synced ${timeAgo(displayLastSync)}` : 'Live scanning active'}</span>
-                <span className="text-zinc-500 font-medium">15m cron</span>
-              </div>
-              <p className="text-[10px] text-zinc-500 leading-tight">
-                Continuous radar indexing official CDC announcements and test circulars.
-              </p>
-            </div>
-          )}
-        </div>
+        <CampusRadar />
       </div>
 
       {/* Support & Legal Links */}

@@ -157,9 +157,16 @@ export async function processEmailForEventsAndStatus(
     /shortlist|selection\s+list|selected\s+candidates|shortlisted\s+students|shortlist\s+for|candidates\s+shortlisted/i.test(
       subjLower
     ) ||
-    /find\s+the\s+below\s+shortlist|below\s+is\s+the\s+shortlist|attached\s+list\s+of\s+shortlisted|shortlist\s+for\s+next\s+round|attached\s+(?:students?|candidates?)\s+list/i.test(
+    // Body patterns — order matters: more specific first
+    /find\s+the\s+below\s+shortlist|below\s+is\s+the\s+shortlist|attached\s+list\s+of\s+shortlisted|shortlist\s+for\s+next\s+round/i.test(
       fullText
-    );
+    ) ||
+    // "attached shortlisted students/candidates list" (word "shortlisted" between "attached" and "students")
+    /attached\s+(?:(?:updated|final|revised)\s+)?shortlisted\s+(?:students?|candidates?)(?:\s+list)?/i.test(fullText) ||
+    // "attached students/candidates list" (no qualifier — generic attachment shortlist)
+    /attached\s+(?:students?|candidates?)\s+list/i.test(fullText) ||
+    // "shortlisted students/candidates list" anywhere in body (e.g. Gmail snippet)
+    /shortlisted\s+(?:students?|candidates?)\s+list/i.test(fullText);
 
   const isShortlistEmail = (hasShortlistAttachment || isExplicitShortlistNotice) && !isAppliedOrOptInRoster;
 
@@ -273,8 +280,8 @@ export async function processEmailForEventsAndStatus(
     matchDetail = 'Direct personal test invitation received from NeoPAT';
   }
 
-  if (isNeoMatched || isInAppliedList) {
-    // Record candidate match in DB
+  if (isNeoMatched) {
+    // Only record genuine shortlist matches (never applied/opt-in rosters)
     await supabase.from('candidate_matches').insert({
       user_id: userId,
       email_id: emailDbId,
@@ -570,7 +577,7 @@ export async function processEmailForEventsAndStatus(
       newStatus = 'interview_scheduled';
     } else if (isTestCompletedShortlist) {
       // The test round is already complete! Candidate completed the test and is in the post-test form / preference stage.
-      newStatus = 'test_completed';
+      newStatus = 'test_scheduled';
     } else if (/online\s+test|coding\s+test|assessment|test/i.test(subjLower) || /next\s+round/i.test(subjLower) || (matchDetail?.includes('Google Sheet') && !/ppt|pre[\s-]*placement/i.test(subjLower))) {
       newStatus = 'test_scheduled';
     } else if (/ppt|pre[\s-]*placement/i.test(subjLower)) {
@@ -595,7 +602,7 @@ export async function processEmailForEventsAndStatus(
     const current = existingApp?.status || 'not_applied';
     if (
       (current === 'not_applied' || current === 'unknown' || current === 'not_shortlisted' || isEmailAfterApplication) &&
-      !['ppt_scheduled', 'test_scheduled', 'interview_scheduled', 'selected', 'offer'].includes(current)
+      !['ppt_scheduled', 'ppt_completed', 'shortlisted', 'test_scheduled', 'test_ongoing', 'test_completed', 'interview_scheduled', 'interview_completed', 'selected', 'offer', 'offer_received'].includes(current)
     ) {
       newStatus = 'applied';
     }
@@ -711,17 +718,23 @@ export async function processEmailForEventsAndStatus(
       unknown: 0,
       not_applied: 1,
       applied: 2,
-      shortlisted: 3,
-      ppt_scheduled: 4,
-      test_scheduled: 5,
-      interview_scheduled: 6,
-      offer_received: 7,
-      selected: 8,
+      ppt_scheduled: 3,
+      ppt_completed: 4,
+      shortlisted: 5,
+      test_scheduled: 6,
+      test_ongoing: 6,
+      test_completed: 7,
+      interview_scheduled: 8,
+      interview_completed: 9,
+      offer_received: 10,
+      selected: 11,
       // Terminal states — always allowed to be set (withdrawal, rejection, etc.)
-      not_shortlisted: 9,
-      declined: 9,
-      withdrawn: 10,
-      rejected: 10,
+      not_shortlisted: 12,
+      declined: 12,
+      withdrawn: 13,
+      rejected: 13,
+      rejected_test: 13,
+      rejected_interview: 13,
     };
     const existingPriority = STATUS_PRIORITY[existingApp.status] ?? 0;
     const newPriority = STATUS_PRIORITY[newStatus] ?? 0;
@@ -729,16 +742,16 @@ export async function processEmailForEventsAndStatus(
     // If the new status has lower priority than existing AND existing is NOT terminal,
     // block the downgrade. Terminal states (withdrawn, rejected, not_shortlisted) are
     // always allowed to be applied.
-    const isTerminal = (s: string) => ['withdrawn', 'declined', 'rejected', 'not_shortlisted'].includes(s);
+    const isTerminal = (s: string) => ['withdrawn', 'declined', 'rejected', 'not_shortlisted', 'rejected_test', 'rejected_interview'].includes(s);
 
     // EXCEPTION: A positive Excel/body match (isNeoMatched) is concrete evidence the candidate
-    // IS participating. It must be allowed to override a previous 'not_shortlisted' determination,
-    // which is only an absence-of-evidence signal from an earlier email scan.
-    // e.g. "Test Scheduled" email + user found in opt-in Excel → test_scheduled should win over not_shortlisted.
+    // IS participating. It must be allowed to override a previous 'not_shortlisted' or 'withdrawn' determination,
+    // which was either an absence-of-evidence signal or an earlier NeoPAT opt-out that the CDC subsequently shortlisted anyway.
+    // e.g. "Test Scheduled" email + user found in shortlist Excel → test_scheduled/test_completed should win.
     const isConfirmedParticipation =
       isNeoMatched &&
-      existingApp?.status === 'not_shortlisted' &&
-      ['shortlisted', 'test_scheduled', 'interview_scheduled', 'ppt_scheduled'].includes(newStatus);
+      (existingApp?.status === 'not_shortlisted' || existingApp?.status === 'withdrawn') &&
+      ['shortlisted', 'test_scheduled', 'test_completed', 'interview_scheduled', 'ppt_scheduled'].includes(newStatus);
 
     if (!isTerminal(newStatus) && newPriority < existingPriority && !isConfirmedParticipation) {
       newStatus = null; // Block the downgrade
@@ -751,6 +764,9 @@ export async function processEmailForEventsAndStatus(
     company_id: companyId,
     last_updated: existingApp?.manual_override && existingApp?.last_updated ? existingApp.last_updated : new Date().toISOString(),
   };
+  if (existingApp?.manual_override) {
+    appUpdate.manual_override = true;
+  }
 
   const { extractTravelRequirement } = await import('@/lib/sync/events');
   const travelReq = extractTravelRequirement(fullText);
@@ -765,20 +781,28 @@ export async function processEmailForEventsAndStatus(
   if (jobDetails.stipend && (!existingApp?.stipend || !isOlderThanCurrentStatus)) appUpdate.stipend = jobDetails.stipend;
   if (resolvedLocation && (!existingApp?.location || !isOlderThanCurrentStatus)) appUpdate.location = resolvedLocation;
 
-  // Accumulate notes: travel requirement + AI review flags occupy the same column.
-  // Build them separately and join so neither overwrites the other.
-  const noteParts: string[] = [];
-  if (travelReq) {
-    noteParts.push(travelReq);
-  } else if (existingApp?.notes) {
-    // Preserve previously extracted travel mode so later circulars (e.g. test links) don't overwrite it
-    const prevTravel = existingApp.notes.split('\n')[0]?.trim();
-    if (['vellore', 'chennai', 'ap', 'bhopal', 'bhopal_lab', 'online'].includes(prevTravel)) {
-      noteParts.push(prevTravel);
+  if (existingApp?.manual_override) {
+    // If the user manually set a note (e.g. "Eliminated in Test Round" or "Interviewed · Not Selected"),
+    // strictly preserve it!
+    if (existingApp.notes) {
+      appUpdate.notes = existingApp.notes;
     }
+  } else {
+    // Accumulate notes: travel requirement + AI review flags occupy the same column.
+    // Build them separately and join so neither overwrites the other.
+    const noteParts: string[] = [];
+    if (travelReq) {
+      noteParts.push(travelReq);
+    } else if (existingApp?.notes) {
+      // Preserve previously extracted travel mode so later circulars (e.g. test links) don't overwrite it
+      const prevTravel = existingApp.notes.split('\n')[0]?.trim();
+      if (['vellore', 'chennai', 'ap', 'bhopal', 'bhopal_lab', 'online'].includes(prevTravel)) {
+        noteParts.push(prevTravel);
+      }
+    }
+    if (isAiFlaggedForReview && aiReviewNotes) noteParts.push(aiReviewNotes);
+    if (noteParts.length > 0) appUpdate.notes = noteParts.join('\n');
   }
-  if (isAiFlaggedForReview && aiReviewNotes) noteParts.push(aiReviewNotes);
-  if (noteParts.length > 0) appUpdate.notes = noteParts.join('\n');
 
   if (newStatus) {
     appUpdate.status = newStatus;

@@ -106,9 +106,7 @@ export interface SyncResult {
 // Known NeoPAT/CDC senders that always pass (no keyword check needed)
 export const TRUSTED_PLACEMENT_SENDERS = [
   'noreply.cdcinfo@vitstudent.ac.in',
-  'cdcinfo@vitstudent.ac.in',
   'vitlions2027@vitbhopal.ac.in',
-  'placementoffice@vitbhopal.ac.in',
 ];
 
 // Known non-placement senders to always skip (Google, Microsoft notifications, social media, etc.)
@@ -263,6 +261,7 @@ async function processSingleMessage(
       companyLocks: Map<string, Promise<void>>;
     };
     pageIndex: number;
+    totalPagesCount?: number;
     totalMessages: number;
     onProgress?: (progress: SyncProgress) => void;
     liveTracker: LiveSyncTracker;
@@ -330,6 +329,7 @@ async function processSingleMessage(
       totalMessages: ctx.totalMessages,
       processedMessages: ctx.liveTracker.processedMessages,
       currentPageIndex: ctx.pageIndex,
+      totalPagesCount: ctx.totalPagesCount,
       currentSubject: parsedEmail.subject.slice(0, 80),
       newEmails: ctx.liveTracker.newEmails,
       newCompanies: ctx.liveTracker.newCompanies,
@@ -557,7 +557,8 @@ export async function processPage(
   },
   onProgress?: (progress: SyncProgress) => void,
   initialCounts?: { newEmails: number; newCompanies: number; skippedDuplicates: number },
-  globalDeadline?: number
+  globalDeadline?: number,
+  totalPagesCount?: number
 ): Promise<ProcessPageResult> {
   // Mark page in_progress
   await supabase
@@ -572,8 +573,8 @@ export async function processPage(
 
   const isPersonal = account.account_type === 'personal';
   const isAccountInitialSync = !account.last_history_id;
-  const BATCH_SIZE = isAccountInitialSync ? 3 : 5;
-  const INTER_BATCH_DELAY_MS = isAccountInitialSync ? 500 : 0;
+  const BATCH_SIZE = 5;
+  const INTER_BATCH_DELAY_MS = 0;
 
   const { gmail } = await createGmailClient(account);
   const { fetchMessageMetadata } = await import('@/lib/gmail/client');
@@ -644,6 +645,7 @@ export async function processPage(
           existingInDb,
           deps,
           pageIndex: page.page_index,
+          totalPagesCount,
           totalMessages: chronoSortedMsgIds.length,
           onProgress,
           liveTracker,
@@ -671,6 +673,7 @@ export async function processPage(
       totalMessages: chronoSortedMsgIds.length,
       processedMessages: liveTracker.processedMessages,
       currentPageIndex: page.page_index,
+      totalPagesCount,
       newEmails: liveTracker.newEmails,
       newCompanies: liveTracker.newCompanies,
       skippedDuplicates: liveTracker.skippedDuplicates,
@@ -834,7 +837,7 @@ export async function runSync(
   activeSyncLocks.add(userId);
 
   // Global wall-clock deadline for this entire invocation
-  const defaultBudgetMs = options?.isBackgroundCron ? CRON_TOTAL_BUDGET_MS : 25_000;
+  const defaultBudgetMs = options?.isBackgroundCron ? CRON_TOTAL_BUDGET_MS : 45_000;
   const totalBudgetMs = options?.timeBudgetMs ?? defaultBudgetMs;
   const globalDeadline = options?.globalDeadline ?? (Date.now() + totalBudgetMs);
 
@@ -1153,7 +1156,9 @@ export async function runSync(
                   newEmails: result.newEmails,
                   newCompanies: result.newCompanies,
                   skippedDuplicates: result.skippedDuplicates,
-                }
+                },
+                globalDeadline,
+                totalPagesCount
               );
 
               accountResult.emailsProcessed += pageRes.emailsProcessed;
@@ -1198,54 +1203,69 @@ export async function runSync(
 
           } else {
             // ── FOREGROUND / MANUAL SYNC PATH ────────────────────────────────────────────
-            // Foreground: ALWAYS target Page 0 if pending (most recent ~150 emails).
-            // If Page 0 is already complete, target the lowest pending page.
-            let targetPage = pendingPages.find((p) => p.page_index === 0) || pendingPages[0];
+            // Loop through all pending pages as long as time budget remains
+            let remainingPages = [...pendingPages].sort((a, b) => a.page_index - b.page_index);
 
-            const targetIndex = targetPage.page_index;
-            progress.phase = 'processing';
-            progress.currentPageIndex = targetIndex;
-            progress.totalPagesCount = totalPagesCount;
-            progress.totalMessages = targetPage.message_ids.length;
-            progress.processedMessages = targetPage.next_offset || 0;
-            notifyProgress(progress, true);
+            for (const targetPage of remainingPages) {
+              if (Date.now() >= globalDeadline - 4000) {
+                console.log(`[Manual Sync] Time budget nearing limit for ${account.email}. Pausing page loop.`);
+                break;
+              }
 
-            const remainingBudget = Math.max(2000, globalDeadline - Date.now() - 3000);
+              const targetIndex = targetPage.page_index;
+              progress.phase = 'processing';
+              progress.currentPageIndex = targetIndex;
+              progress.totalPagesCount = totalPagesCount;
+              progress.totalMessages = targetPage.message_ids.length;
+              progress.processedMessages = targetPage.next_offset || 0;
+              notifyProgress(progress, true);
 
-            const pageRes = await processPage(
-              supabase,
-              userId,
-              account,
-              targetPage,
-              remainingBudget,
-              {
-                userNeoId,
-                userEmail,
-                circularCatalog: cCatalog,
-                persistedResolutions: pRes,
-                driveResolutionsMap: dMap,
-                companyLocks: new Map<string, Promise<void>>(),
-              },
-              (pageProg) => {
-                pageProg.currentPageIndex = targetIndex;
-                pageProg.totalPagesCount = totalPagesCount;
-                notifyProgress(pageProg);
-              },
-              {
-                newEmails: result.newEmails,
-                newCompanies: result.newCompanies,
-                skippedDuplicates: result.skippedDuplicates,
-              },
-              globalDeadline
-            );
+              const budgetForThisPage = Math.max(2000, globalDeadline - Date.now() - 3000);
+              if (budgetForThisPage <= 0) break;
 
-            accountResult.emailsProcessed += pageRes.emailsProcessed;
-            accountResult.newEmails += pageRes.newEmails;
-            accountResult.newCompanies += pageRes.newCompanies;
-            result.newEmails += pageRes.newEmails;
-            result.newCompanies += pageRes.newCompanies;
-            result.skippedDuplicates += pageRes.skippedDuplicates;
-            result.errors.push(...pageRes.errors);
+              const pageRes = await processPage(
+                supabase,
+                userId,
+                account,
+                targetPage,
+                budgetForThisPage,
+                {
+                  userNeoId,
+                  userEmail,
+                  circularCatalog: cCatalog,
+                  persistedResolutions: pRes,
+                  driveResolutionsMap: dMap,
+                  companyLocks: new Map<string, Promise<void>>(),
+                },
+                (pageProg) => {
+                  pageProg.currentPageIndex = targetIndex;
+                  pageProg.totalPagesCount = totalPagesCount;
+                  notifyProgress(pageProg);
+                },
+                {
+                  newEmails: result.newEmails,
+                  newCompanies: result.newCompanies,
+                  skippedDuplicates: result.skippedDuplicates,
+                },
+                globalDeadline,
+                totalPagesCount
+              );
+
+              accountResult.emailsProcessed += pageRes.emailsProcessed;
+              accountResult.newEmails += pageRes.newEmails;
+              accountResult.newCompanies += pageRes.newCompanies;
+              result.newEmails += pageRes.newEmails;
+              result.newCompanies += pageRes.newCompanies;
+              result.skippedDuplicates += pageRes.skippedDuplicates;
+              result.errors.push(...pageRes.errors);
+              result.currentPageIndex = targetIndex;
+              result.totalPagesCount = totalPagesCount;
+
+              if (!pageRes.completed) {
+                // Mid-page budget consumed; next_offset persisted
+                break;
+              }
+            }
 
             // Check if all pages for this account are now complete
             const { data: refreshedPages } = await supabase
@@ -1265,9 +1285,7 @@ export async function runSync(
                 .eq('id', account.id);
             }
 
-            result.currentPageIndex = targetIndex;
-            result.totalPagesCount = totalPagesCount;
-            result.isPage0Complete = targetIndex === 0 && pageRes.completed;
+            result.isPage0Complete = refreshedPages?.find((p: any) => p.page_index === 0)?.status === 'complete';
           }
         }
       } catch (accountErr) {
@@ -1682,6 +1700,16 @@ const GENERIC_MATCH_TOKENS = new Set([
   'batch', '2026', '2027', '2028', 'urgent', 'extended', 'deadline',
   'update', 'updated', 'campus', 'hiring', 'recruitment', 'talk', 'test',
   'intelligence', 'intelligent', 'artificial', 'hardware',
+  'software', 'india', 'data', 'digital', 'media', 'network', 'networks',
+  'security', 'centre', 'center', 'hub', 'engineering', 'products',
+  'development', 'research', 'interactive', 'communications', 'communication',
+  'design', 'health', 'healthcare', 'energy', 'mobility', 'smart', 'power',
+  'cloud', 'retail', 'games', 'game', 'life', 'science', 'sciences', 'part',
+  'bank', 'banking', 'small', 'additional', 'selects', 'shortlist',
+  'shortlisted', 'candidates', 'students', 'applied', 'round', 'process',
+  'portal', 'interview', 'assessment', 'announcement', 'office', 'location',
+  'virtual', 'online', 'offline', 'physical', 'associate', 'engineer',
+  'intern', 'trainee', 'analyst', 'developer',
   ...ENGLISH_STOPWORDS,
 ]);
 
@@ -1782,7 +1810,25 @@ export function isFuzzyCompanyMatch(compName: string, targetName: string): boole
     return false;
   };
 
-  // Match if all distinctive tokens of target exist in comp, or vice versa
+  // If both have 1 token: they must match
+  if (cTokens.length === 1 && tTokens.length === 1) {
+    return tokenMatches(cTokens[0], tTokens[0]);
+  }
+
+  // If one has 1 token and the other has >= 2 tokens:
+  // The single token must match the FIRST (primary brand) token of the multi-token company
+  if (cTokens.length === 1 && tTokens.length >= 2) {
+    return tokenMatches(cTokens[0], tTokens[0]);
+  }
+  if (tTokens.length === 1 && cTokens.length >= 2) {
+    return tokenMatches(tTokens[0], cTokens[0]);
+  }
+
+  // Both have >= 2 tokens:
+  // Require that the primary first token matches AND all tokens of target exist in comp or vice versa
+  const firstTokenMatches = tokenMatches(cTokens[0], tTokens[0]);
+  if (!firstTokenMatches) return false;
+
   const allTargetInComp = tTokens.every((t) => cTokens.some((c) => tokenMatches(c, t)));
   const allCompInTarget = cTokens.every((c) => tTokens.some((t) => tokenMatches(c, t)));
 
@@ -1956,7 +2002,9 @@ async function doUpsertCompany(
       .maybeSingle();
 
     if (aliasMatch && !(await isBoundToOtherDrive(aliasMatch.id))) {
-      await learnAliasesAndDrive(aliasMatch);
+      if (driveNumber && !aliasMatch.drive_number) {
+        await supabase.from('companies').update({ drive_number: driveNumber, ...(driveName && !aliasMatch.drive_name ? { drive_name: driveName } : {}) }).eq('id', aliasMatch.id);
+      }
       return aliasMatch.id;
     }
   }
@@ -1975,7 +2023,10 @@ async function doUpsertCompany(
       });
       if (isMatched) {
         if (!(await isBoundToOtherDrive(comp.id))) {
-          await learnAliasesAndDrive(comp);
+          if (driveNumber && !comp.drive_number) {
+            await supabase.from('companies').update({ drive_number: driveNumber, ...(driveName && !comp.drive_name ? { drive_name: driveName } : {}) }).eq('id', comp.id);
+            comp.drive_number = driveNumber;
+          }
           return comp.id;
         }
       }

@@ -18,6 +18,7 @@ export interface StageStepperProps {
   latestEvent?: EventLike | null;
   events?: EventLike[] | null;
   notes?: string | null;
+  manualOverride?: boolean;
   compact?: boolean;
   className?: string;
 }
@@ -28,10 +29,11 @@ export function StageStepper({
   latestEvent,
   events,
   notes,
+  manualOverride,
   compact = false,
   className,
 }: StageStepperProps) {
-  const effective = getEffectiveStage(status, latestEvent, events, notes);
+  const effective = getEffectiveStage(status, latestEvent, events, notes, manualOverride);
   const currentStage = stageProp ?? effective.stageIndex;
   const eliminatedStage = effective.eliminatedStage;
   const furthestPassed = effective.furthestPassedStage;

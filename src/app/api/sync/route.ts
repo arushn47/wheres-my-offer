@@ -59,7 +59,7 @@ export async function POST() {
             sendEvent('progress', progress);
           },
           {
-            timeBudgetMs: 25_000, // 25s — comfortably fits within Vercel serverless execution limits
+            timeBudgetMs: process.env.NODE_ENV === 'development' ? 120_000 : 45_000,
           }
         );
 

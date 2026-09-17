@@ -330,6 +330,8 @@ body::after {
   box-shadow: none !important;
   padding: 0 !important;
   backdrop-filter: none !important;
+  width: 360px !important;
+  height: 66px !important;
 }
 
 [data-sonner-toaster] [data-close-button] {

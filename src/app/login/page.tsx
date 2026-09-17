@@ -4,16 +4,16 @@ import { redirect } from 'next/navigation';
 import LoginClient from './login-client';
 
 export const metadata: Metadata = {
-  title: "Where's My Offer? — Campus Placement Radar",
+  title: "Login — Where's My Offer? | NeoPAT Tracker & Campus Placement Radar",
   description:
-    'Track every placement drive, shortlist, and interview from one dashboard. Connect your Gmail and let the radar do the rest.',
+    'Real-time NeoPAT tracker and campus placement radar. Track every placement drive, shortlist, OA test, and interview from one unified dashboard. Connect your Gmail and let the radar do the rest.',
   alternates: {
     canonical: '/login',
   },
   openGraph: {
-    title: "Where's My Offer?",
+    title: "Where's My Offer? — NeoPAT Tracker & Campus Placement Radar",
     description:
-      'Track every placement drive, shortlist, and interview from one dashboard.',
+      'Real-time NeoPAT tracker and campus placement radar. Track every placement drive, shortlist, OA test, and interview from one dashboard.',
     url: '/login',
   },
 };

@@ -132,14 +132,8 @@ export default function NotificationSettings() {
         const data = await res.json();
         const pushDelivered = data.result?.pushSent;
 
-        appToast.shortlist("Where's My Offer? Notification Test", {
-          description: 'Your notification system is working perfectly!',
-          company: "Where's My Offer?",
-          action: {
-            label: 'Dismiss',
-            onClick: () => {},
-          },
-        });
+        // Instantly notify the bell to fetch the new notification with 0ms delay
+        window.dispatchEvent(new CustomEvent('wmo:refresh_notifications'));
 
         setTestFeedback({
           success: true,

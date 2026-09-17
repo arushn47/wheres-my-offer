@@ -42,6 +42,8 @@ export async function PATCH(
   } else if (status === 'not_shortlisted') {
     normalizedStatus = 'not_shortlisted';
     normalizedNotes = notes || 'Not Shortlisted for Test';
+  } else if (notes === null) {
+    normalizedNotes = null;
   }
 
   const supabase = createAdminClient();
@@ -60,7 +62,7 @@ export async function PATCH(
         role: role || undefined,
         ctc: ctc || undefined,
         location: location || undefined,
-        notes: normalizedNotes || undefined,
+        notes: normalizedNotes !== undefined ? normalizedNotes : undefined,
         last_updated: new Date().toISOString(),
       },
       { onConflict: 'user_id,company_id' }

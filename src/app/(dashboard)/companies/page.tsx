@@ -7,8 +7,8 @@ import CompaniesClient, { type CompanyWithDetails } from './companies-client';
 import { detectCampus } from '@/lib/utils';
 
 export const metadata: Metadata = {
-  title: 'Companies & Recruitment Drives',
-  description: 'View and track all campus recruitment drives, company CTCs, stipends, job roles, and application statuses.',
+  title: 'NeoPAT Recruitment Drives & Companies',
+  description: 'View and track all NeoPAT campus recruitment drives, company CTCs, stipends, job roles, and application statuses.',
   alternates: {
     canonical: '/companies',
   },
@@ -47,7 +47,8 @@ export default async function CompaniesPage() {
     supabase
       .from('candidate_matches')
       .select('id, application_id, email_id')
-      .eq('user_id', session.userId),
+      .eq('user_id', session.userId)
+      .neq('match_type', 'xlsx_applied_list'),
 
     supabase
       .from('emails')
