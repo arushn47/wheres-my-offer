@@ -35,7 +35,7 @@ export default async function CalendarPage() {
 
     supabase
       .from('applications')
-      .select('company_id, status')
+      .select('company_id, status, registration_deadline')
       .eq('user_id', session.userId),
   ]);
 
@@ -120,6 +120,33 @@ export default async function CalendarPage() {
           venue: evt.venue,
           mode: evt.mode,
         });
+      }
+    }
+  }
+
+  // Also include future registration deadlines stored on applications
+  if (applications) {
+    const now = Date.now();
+    for (const app of applications as any[]) {
+      if (app.registration_deadline && (!app.status || app.status === 'not_applied' || app.status === 'unknown')) {
+        const isFuture = new Date(app.registration_deadline).getTime() > now;
+        if (isFuture) {
+          const key = `${app.company_id}:registration_deadline`;
+          if (!seenCalendarKeys.has(key)) {
+            seenCalendarKeys.add(key);
+            calendarEvents.push({
+              id: `reg_${app.company_id}`,
+              companyId: app.company_id,
+              companyName: companyMap.get(app.company_id) || 'Placement Drive',
+              eventType: 'registration_deadline',
+              title: 'Registration Deadline',
+              startTime: app.registration_deadline,
+              endTime: null,
+              venue: 'NeoPAT Portal / Online Form',
+              mode: 'online',
+            });
+          }
+        }
       }
     }
   }

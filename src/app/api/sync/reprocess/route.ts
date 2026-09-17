@@ -403,7 +403,7 @@ export async function recalculateApplicationStatuses(
     );
 
     const nextRoundPattern =
-      /interview\s+(?:is\s+)?scheduled|technical\s+interview|hr\s+interview|final\s+interview|interview\s+shortlist|shortlist\s+for\s+interview|shortlisted\s+for\s+(?:the\s+)?interview/i;
+      /interview\s+(?:is\s+)?scheduled|technical\s+interview|hr\s+interview|final\s+interview|interview\s+shortlist|shortlist\s+for\s+interview|shortlisted\s+for\s+(?:the\s+)?interview|next\s+round\s+of\s+(?:the\s+)?(?:selection\s+process|selection|process|hiring)|selection\s+process\s+is\s+scheduled|physical\s+selection/i;
     const nextRoundEmails = activeDriveEmails.filter((e) => {
       if (!isAfterRegistration(e)) return false;
       const subj = e.subject || '';
@@ -411,8 +411,13 @@ export async function recalculateApplicationStatuses(
       const full = `${subj} ${body}`;
       if (nextRoundPattern.test(subj)) return true;
       if (/next\s+round/i.test(subj)) {
-        // Only classify as nextRound (interview) if it DOES NOT describe a test/assessment
-        return !/test|assessment|coding|exam|shl|mettl|hackerrank|aptitude/i.test(full);
+        if (/(?:online\s+)?test|assessment\s*\d|coding\s+test|\bshl\b|\bmettl\b|\bhackerrank\b/i.test(subj)) {
+          return false;
+        }
+        if (/interview|in[\s-]*person|f2f|resumes?|formal\s+dress|blacklisted/i.test(full)) {
+          return true;
+        }
+        return !/online\s+test|coding\s+test|\bshl\b|\bmettl\b|\bhackerrank\b/i.test(body);
       }
       return false;
     });
@@ -716,7 +721,7 @@ export async function recalculateApplicationStatuses(
 
     const { data: existingApp } = await supabase
       .from('applications')
-      .select('status, manual_override, role, ctc, stipend, location, notes, applied_at')
+      .select('status, manual_override, role, ctc, stipend, location, notes, applied_at, registration_deadline')
       .eq('user_id', userId)
       .eq('company_id', comp.id)
       .single();
@@ -813,6 +818,9 @@ export async function recalculateApplicationStatuses(
       }
     }
 
+    const regDeadlineEvt = allExtractedEvents.find((e) => e.eventType === 'registration_deadline' && e.startTime);
+    const finalRegDeadline = regDeadlineEvt?.startTime ? regDeadlineEvt.startTime.toISOString() : (existingApp?.registration_deadline || null);
+
     await supabase.from('applications').upsert(
       {
         user_id: userId,
@@ -826,6 +834,7 @@ export async function recalculateApplicationStatuses(
         ctc: finalCtc,
         stipend: finalStipend,
         location: workLocation || null,
+        registration_deadline: finalRegDeadline,
         notes: finalNotes,
         applied_at: (registrationEmails[0]?.received_at ? new Date(registrationEmails[0].received_at) : (driveStartDate || (existingApp?.applied_at ? new Date(existingApp.applied_at) : new Date()))).toISOString(),
         last_updated: new Date().toISOString(),

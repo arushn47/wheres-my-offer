@@ -2,6 +2,7 @@ import React from 'react';
 
 export const STATUS_META: Record<string, { label: string; cls: string; dot: string; isPulse?: boolean }> = {
   not_applied: { label: 'Not Applied', cls: 'bg-zinc-800/40 text-zinc-400 border-zinc-700/40', dot: 'bg-zinc-500' },
+  registration_open: { label: 'Registration Open', cls: 'bg-amber-500/15 text-amber-300 border-amber-500/30', dot: 'bg-amber-400', isPulse: true },
   applied: { label: 'Applied', cls: 'bg-emerald-500/10 text-emerald-300 border-emerald-500/25', dot: 'bg-emerald-400' },
   shortlisted: { label: 'Shortlisted', cls: 'bg-sky-500/10 text-sky-300 border-sky-500/30', dot: 'bg-sky-400' },
   test: { label: 'Test Scheduled', cls: 'bg-sky-500/10 text-sky-300 border-sky-500/30', dot: 'bg-sky-400', isPulse: true },
@@ -39,11 +40,12 @@ export const EVENT_META: Record<string, { label: string; cls: string; dot: strin
 
 interface StatusChipProps {
   status: string;
+  label?: string;
   size?: 'sm' | 'md';
   className?: string;
 }
 
-export const StatusChip: React.FC<StatusChipProps> = ({ status, size = 'sm', className = '' }) => {
+export const StatusChip: React.FC<StatusChipProps> = ({ status, label, size = 'sm', className = '' }) => {
   const normStatus = (status || 'not_applied').toLowerCase();
   const m = STATUS_META[normStatus] || STATUS_META.not_applied;
 
@@ -54,7 +56,7 @@ export const StatusChip: React.FC<StatusChipProps> = ({ status, size = 'sm', cla
         } ${className}`}
     >
       <span className={`h-1.5 w-1.5 rounded-full shrink-0 ${m.dot} ${m.isPulse ? 'pulse-dot' : ''}`} />
-      {m.label}
+      {label || m.label}
     </span>
   );
 };

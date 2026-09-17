@@ -35,7 +35,7 @@ export default async function CompaniesPage() {
 
     supabase
       .from('applications')
-      .select('id, company_id, status, role, category, ctc, stipend, location, notes, manual_override, applied_at, last_updated')
+      .select('id, company_id, status, role, category, ctc, stipend, location, notes, manual_override, applied_at, last_updated, registration_deadline')
       .eq('user_id', session.userId),
 
     supabase
@@ -93,6 +93,36 @@ export default async function CompaniesPage() {
     }
   }
 
+  // Synthesize registration_deadline event if stored on application but missing from events
+  if (applications) {
+    for (const app of applications as any[]) {
+      if (app.registration_deadline && (!app.status || app.status === 'not_applied' || app.status === 'unknown')) {
+        const isPast = app.registration_deadline < nowIso;
+        if (!isPast) {
+          const compEvts = allEventsByCompany.get(app.company_id) || [];
+          const hasEvt = compEvts.some((e: any) => e.event_type === 'registration_deadline');
+          if (!hasEvt) {
+            const synthEvt = {
+              id: `reg_${app.company_id}`,
+              company_id: app.company_id,
+              event_type: 'registration_deadline',
+              title: 'Registration Deadline',
+              start_time: app.registration_deadline,
+              end_time: null,
+              venue: 'NeoPAT Portal / Online Form',
+              mode: 'online',
+            };
+            compEvts.push(synthEvt as any);
+            allEventsByCompany.set(app.company_id, compEvts);
+            if (!eventMap.has(app.company_id)) {
+              eventMap.set(app.company_id, synthEvt);
+            }
+          }
+        }
+      }
+    }
+  }
+
   const emailCountMap = new Map<string, number>();
   const latestEmailMap = new Map<string, string>();
   if (emails) {
@@ -142,6 +172,7 @@ export default async function CompaniesPage() {
             manual_override: app.manual_override,
             applied_at: app.applied_at,
             last_updated: app.last_updated,
+            registration_deadline: app.registration_deadline || null,
           }
         : null,
       latestEvent: eventMap.get(comp.id) || null,

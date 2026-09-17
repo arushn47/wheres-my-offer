@@ -296,7 +296,13 @@ export default function DashboardClient({
               className="flex shrink-0 items-center gap-2 rounded-full border border-zinc-800 bg-zinc-900/70 px-2.5 sm:px-3 py-1 text-[10px] sm:text-[11px] text-zinc-300"
             >
               <span className="h-1.5 w-1.5 rounded-full bg-amber-400 pulse-dot shrink-0" />
-              <span className="truncate max-w-37.5 sm:max-w-none">{e.companyName || 'Company'} — {e.title || e.event_type.replace(/_/g, ' ')}</span>
+              <span className="truncate max-w-37.5 sm:max-w-none">
+                {e.companyName || 'Company'} — {
+                  (e.title || e.event_type.replace(/_/g, ' ')).toLowerCase().startsWith((e.companyName || 'Company').toLowerCase())
+                    ? (e.title || e.event_type.replace(/_/g, ' ')).substring((e.companyName || 'Company').length).replace(/^[\s\-—–:]+/, '')
+                    : (e.title || e.event_type.replace(/_/g, ' '))
+                }
+              </span>
               <span className="font-tabular font-mono text-amber-300 shrink-0">{formatEventTime(e.start_time)}</span>
             </span>
           ))}
@@ -371,12 +377,14 @@ export default function DashboardClient({
                     <span className="font-display text-sm font-bold text-zinc-100 group-hover:text-emerald-300 transition-colors truncate">
                       {ev.companyName || 'Company'}
                     </span>
-                    <span className={`rounded-full border px-2 py-0.5 font-mono text-[9px] font-bold uppercase tracking-wider ${NEXT_EVENT_CLS[ev.event_type] || 'border-amber-500/30 bg-amber-500/10 text-amber-300'}`}>
+                    <span className={`shrink-0 whitespace-nowrap rounded-full border px-2 py-0.5 font-mono text-[9px] font-bold uppercase tracking-wider ${NEXT_EVENT_CLS[ev.event_type] || 'border-amber-500/30 bg-amber-500/10 text-amber-300'}`}>
                       {ev.event_type.replace(/_/g, ' ')}
                     </span>
                   </div>
                   <h4 className="mt-2 text-xs font-semibold text-zinc-300 line-clamp-1">
-                    {ev.title || 'Recruitment Assessment'}
+                    {(ev.title || 'Recruitment Assessment').toLowerCase().startsWith((ev.companyName || 'Company').toLowerCase())
+                      ? (ev.title || 'Recruitment Assessment').substring((ev.companyName || 'Company').length).replace(/^[\s\-—–:]+/, '')
+                      : (ev.title || 'Recruitment Assessment')}
                   </h4>
                   <div className="mt-2 flex items-center gap-1.5 font-mono text-[11px] text-zinc-400">
                     <Clock className="h-3 w-3 text-amber-400" />

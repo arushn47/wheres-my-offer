@@ -32,7 +32,7 @@ export default async function DashboardPage() {
       .eq('user_id', session.userId),
     supabase
       .from('applications')
-      .select('id, status, role, category, ctc, stipend, location, notes, manual_override, last_updated, company_id, companies(id, name)')
+      .select('id, status, role, category, ctc, stipend, location, notes, manual_override, last_updated, company_id, registration_deadline, companies(id, name)')
       .eq('user_id', session.userId)
       .order('last_updated', { ascending: false }),
     supabase
@@ -56,6 +56,8 @@ export default async function DashboardPage() {
       .neq('match_type', 'xlsx_applied_list'),
   ]);
 
+  const nowIso = new Date().toISOString();
+
   const stats = {
     total_companies: totalCompanies || 0,
     active_applications: 0,
@@ -74,10 +76,13 @@ export default async function DashboardPage() {
   const appStatusMap = new Map<string, string>();
 
   if (applications) {
-    for (const app of applications) {
+    for (const app of applications as any[]) {
       appStatusMap.set(app.company_id, app.status);
       if (!nonAppliedStatuses.includes(app.status)) stats.total_applied++;
-      if (!isInactiveStatus(app.status)) stats.active_applications++;
+      // Count as "active" if in an active status OR if it has a future registration deadline (registration_open)
+      const hasRegistrationOpen = (app.status === 'not_applied' || !app.status) &&
+        app.registration_deadline && app.registration_deadline > nowIso;
+      if (!isInactiveStatus(app.status) || hasRegistrationOpen) stats.active_applications++;
       if (app.status === 'applied') stats.applied++;
       if (['shortlisted', 'test_scheduled', 'test_completed', 'interview_scheduled', 'interview_completed'].includes(app.status)) stats.shortlisted++;
       if (app.status === 'not_shortlisted') stats.not_shortlisted++;
@@ -125,7 +130,7 @@ export default async function DashboardPage() {
   // Deduplicate upcoming events by (company_id, event_type, date) and filter out eliminated companies
   const uniqueUpcomingEvents: NonNullable<typeof rawUpcomingEvents> = [];
   const seenEventKeys = new Set<string>();
-  const nowIso = new Date().toISOString();
+
 
   if (rawUpcomingEvents) {
     for (const event of rawUpcomingEvents) {
@@ -165,6 +170,34 @@ export default async function DashboardPage() {
       }
     }
   }
+
+  // Also include future registration deadlines stored on applications
+  if (applications) {
+    for (const a of applications as any[]) {
+      if (a.registration_deadline && a.registration_deadline > nowIso && (a.status === 'not_applied' || a.status === 'unknown')) {
+        const key = `${a.company_id}:registration_deadline`;
+        if (!seenEventKeys.has(key)) {
+          seenEventKeys.add(key);
+          uniqueUpcomingEvents.push({
+            id: `reg_${a.company_id}`,
+            company_id: a.company_id,
+            event_type: 'registration_deadline',
+            title: 'Registration Deadline',
+            start_time: a.registration_deadline,
+            end_time: null,
+            venue: 'NeoPAT Portal',
+            mode: 'online',
+          } as any);
+        }
+      }
+    }
+  }
+
+  uniqueUpcomingEvents.sort((a, b) => {
+    const tA = a.start_time ? new Date(a.start_time).getTime() : 0;
+    const tB = b.start_time ? new Date(b.start_time).getTime() : 0;
+    return tA - tB;
+  });
 
   const companyNameMap = new Map<string, string>();
   if (applications) {

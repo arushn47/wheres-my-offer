@@ -1,7 +1,7 @@
 'use client';
 
 import React from 'react';
-import { Ban, FileX2 } from 'lucide-react';
+import { Ban, FileX2, Clock } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 export * from '@/lib/stages';
@@ -39,7 +39,52 @@ export function StageStepper({
   const furthestPassed = effective.furthestPassedStage;
 
   const isWithdrawn = (effective.effectiveStatus === 'withdrawn' || effective.effectiveStatus === 'declined');
+  const isRegistrationOpen = (effective.effectiveStatus === 'registration_open');
   const isNotApplied = (effective.effectiveStatus === 'not_applied');
+
+  // Dedicated UI Banner for Registration Open
+  if (isRegistrationOpen) {
+    if (compact) {
+      return (
+        <div
+          data-testid="stage-stepper-registration-open"
+          className={cn(
+            'flex items-center gap-2.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 select-none',
+            className
+          )}
+        >
+          <div className="flex h-5 w-5 shrink-0 items-center justify-center rounded border border-amber-500/40 bg-amber-500/20 text-amber-400">
+            <Clock className="h-3 w-3 text-amber-400 animate-pulse" />
+          </div>
+          <div className="flex min-w-0 flex-1 items-center justify-between gap-2">
+            <span className="truncate text-[11px] font-medium text-amber-300">
+              Apply on NeoPAT · {effective.statusSubtitle}
+            </span>
+          </div>
+        </div>
+      );
+    }
+
+    return (
+      <div
+        data-testid="stage-stepper-registration-open"
+        className={cn(
+          'flex items-center gap-3.5 rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 select-none',
+          className
+        )}
+      >
+        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-amber-500/40 bg-amber-500/20 text-amber-400">
+          <Clock className="h-4 w-4 animate-pulse" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <h4 className="text-sm font-semibold text-amber-200">Registration Window Open</h4>
+          <p className="mt-0.5 text-xs text-amber-300/90">
+            {effective.statusSubtitle} — Complete your registration on the NeoPAT portal before the deadline expires.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   // Dedicated UI Banner for Withdrawn / Opted Out drives
   if (isWithdrawn) {

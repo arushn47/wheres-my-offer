@@ -9,6 +9,8 @@ import {
   CheckCircle2,
   FileSpreadsheet,
   Mail,
+  Building2,
+  Calendar,
   PieChart,
   ShieldCheck,
   ChevronRight,
@@ -70,6 +72,7 @@ export default function AnalyticsClient({
     superDreamCount,
     dreamCount,
     regularCount,
+    unknownCtcCount,
     highestCtcNum,
     highestCtcFormatted,
     avgAppliedCtc,
@@ -86,6 +89,7 @@ export default function AnalyticsClient({
     let superDream = 0;
     let dream = 0;
     let regular = 0;
+    let unknownCtc = 0;
 
     const appliedCtcs: number[] = [];
     let maxCtc = 0;
@@ -203,7 +207,8 @@ export default function AnalyticsClient({
         const cat = (app.category || '').toLowerCase();
         if (cat.includes('super')) superDream++;
         else if (cat.includes('dream')) dream++;
-        else regular++;
+        else if (cat.includes('regular') || cat.includes('core')) regular++;
+        else unknownCtc++;
       }
     });
 
@@ -223,6 +228,7 @@ export default function AnalyticsClient({
       superDreamCount: superDream,
       dreamCount: dream,
       regularCount: regular,
+      unknownCtcCount: unknownCtc,
       highestCtcNum: maxCtc,
       highestCtcFormatted: maxCtc > 0 ? maxCtcStr : '—',
       avgAppliedCtc: avgApplied ? `₹${avgApplied} LPA` : '—',
@@ -261,7 +267,7 @@ export default function AnalyticsClient({
     },
   ];
 
-  const totalCategorized = superDreamCount + dreamCount + regularCount || 1;
+  const totalCategorized = superDreamCount + dreamCount + regularCount + unknownCtcCount || 1;
 
   return (
     <div data-testid="analytics-page" className="mx-auto max-w-7xl space-y-5 sm:space-y-6 w-full min-w-0">
@@ -418,21 +424,23 @@ export default function AnalyticsClient({
           initial={{ opacity: 0, y: 16 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.45, delay: 0.25 }}
-          className="rounded-2xl border border-zinc-800 bg-[#101014] p-6"
+          className="rounded-2xl border border-zinc-800 bg-[#101014] p-4 sm:p-6 flex flex-col justify-between h-full"
         >
-          <div className="flex items-center gap-2">
-            <Award className="h-4 w-4 text-violet-400" />
-            <h2 className="font-display text-base font-bold text-white">
-              Applied CTC Distribution
-            </h2>
+          <div>
+            <div className="flex items-center gap-2">
+              <Award className="h-4 w-4 text-violet-400" />
+              <h2 className="font-display text-base font-bold text-white">
+                Applied CTC Distribution
+              </h2>
+            </div>
+            <p className="mt-0.5 text-xs text-zinc-500">
+              Hiring tier breakdown across your {appliedCount} applied drives (excluding opted out)
+            </p>
           </div>
-          <p className="mt-0.5 text-xs text-zinc-500">
-            Hiring tier breakdown across your {appliedCount} applied drives (excluding opted out)
-          </p>
 
-          <div className="mt-6 space-y-4">
+          <div className="mt-5 space-y-3">
             {/* Super Dream */}
-            <div className="rounded-xl border border-violet-500/25 bg-violet-500/[0.05] p-3.5">
+            <div className="rounded-xl border border-violet-500/25 bg-violet-500/[0.05] p-3">
               <div className="flex items-center justify-between">
                 <span className="rounded-md border border-violet-500/30 bg-violet-500/10 px-2 py-0.5 text-[10px] font-bold text-violet-300 uppercase tracking-wider">
                   Super Dream (≥ ₹10 LPA)
@@ -447,7 +455,7 @@ export default function AnalyticsClient({
             </div>
 
             {/* Dream */}
-            <div className="rounded-xl border border-sky-500/25 bg-sky-500/[0.05] p-3.5">
+            <div className="rounded-xl border border-sky-500/25 bg-sky-500/[0.05] p-3">
               <div className="flex items-center justify-between">
                 <span className="rounded-md border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-[10px] font-bold text-sky-300 uppercase tracking-wider">
                   Dream (₹6 – ₹10 LPA)
@@ -462,7 +470,7 @@ export default function AnalyticsClient({
             </div>
 
             {/* Regular */}
-            <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-3.5">
+            <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-3">
               <div className="flex items-center justify-between">
                 <span className="rounded-md border border-zinc-700 bg-zinc-800 px-2 py-0.5 text-[10px] font-bold text-zinc-400 uppercase tracking-wider">
                   Regular / Core (&lt; ₹6 LPA)
@@ -475,6 +483,21 @@ export default function AnalyticsClient({
                 {Math.round((regularCount / totalCategorized) * 100)}% of your applied drives
               </div>
             </div>
+
+            {/* Unknown */}
+            <div className="rounded-xl border border-zinc-800/60 bg-zinc-900/30 p-3">
+              <div className="flex items-center justify-between">
+                <span className="rounded-md border border-zinc-700/50 bg-zinc-800/50 px-2 py-0.5 text-[10px] font-bold text-zinc-500 uppercase tracking-wider">
+                  Unknown / TBA
+                </span>
+                <span className="font-tabular font-mono text-sm font-bold text-zinc-300">
+                  {unknownCtcCount} drives
+                </span>
+              </div>
+              <div className="mt-2 text-xs text-zinc-500">
+                {Math.round((unknownCtcCount / totalCategorized) * 100)}% of your applied drives
+              </div>
+            </div>
           </div>
         </motion.div>
 
@@ -483,7 +506,7 @@ export default function AnalyticsClient({
           initial={{ opacity: 0, y: 16 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.45, delay: 0.3 }}
-          className="rounded-2xl border border-zinc-800 bg-[#101014] p-4 sm:p-6 flex flex-col justify-between"
+          className="rounded-2xl border border-zinc-800 bg-[#101014] p-4 sm:p-6 flex flex-col justify-between h-full"
         >
           <div>
             <div className="flex items-center gap-2">
@@ -497,7 +520,15 @@ export default function AnalyticsClient({
             </p>
 
             <div className="mt-5 sm:mt-6 space-y-3">
-              <div className="flex items-center justify-between gap-2 rounded-xl border border-zinc-800/80 bg-zinc-900/40 p-3">
+              <div className="flex items-center justify-between gap-2 rounded-xl border border-zinc-800/80 bg-zinc-900/40 p-4">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <Building2 className="h-4 w-4 text-emerald-400 shrink-0" />
+                  <span className="text-xs text-zinc-300 font-medium truncate">Tracked Drives</span>
+                </div>
+                <span className="font-mono text-xs font-bold text-zinc-100 shrink-0 whitespace-nowrap">{(companiesCount || 0).toLocaleString()}</span>
+              </div>
+
+              <div className="flex items-center justify-between gap-2 rounded-xl border border-zinc-800/80 bg-zinc-900/40 p-4">
                 <div className="flex items-center gap-2.5 min-w-0">
                   <Mail className="h-4 w-4 text-sky-400 shrink-0" />
                   <span className="text-xs text-zinc-300 font-medium truncate">Emails & Circulars</span>
@@ -505,7 +536,7 @@ export default function AnalyticsClient({
                 <span className="font-mono text-xs font-bold text-zinc-100 shrink-0 whitespace-nowrap">{(emailsCount || 0).toLocaleString()}</span>
               </div>
 
-              <div className="flex items-center justify-between gap-2 rounded-xl border border-zinc-800/80 bg-zinc-900/40 p-3">
+              <div className="flex items-center justify-between gap-2 rounded-xl border border-zinc-800/80 bg-zinc-900/40 p-4">
                 <div className="flex items-center gap-2.5 min-w-0">
                   <FileSpreadsheet className="h-4 w-4 text-violet-400 shrink-0" />
                   <div className="min-w-0">
@@ -520,7 +551,7 @@ export default function AnalyticsClient({
                 </div>
               </div>
 
-              <div className="flex items-center justify-between gap-2 rounded-xl border border-zinc-800/80 bg-zinc-900/40 p-3">
+              <div className="flex items-center justify-between gap-2 rounded-xl border border-zinc-800/80 bg-zinc-900/40 p-4">
                 <div className="flex items-center gap-2.5 min-w-0">
                   <ShieldCheck className="h-4 w-4 text-emerald-400 shrink-0" />
                   <span className="text-xs text-zinc-300 font-medium truncate">Sync Frequency</span>
@@ -532,7 +563,7 @@ export default function AnalyticsClient({
             </div>
           </div>
 
-          <div className="mt-5 sm:mt-6 rounded-xl border border-emerald-500/20 bg-emerald-500/[0.04] p-3 sm:p-3.5 flex items-center justify-between gap-2">
+          <div className="mt-3 rounded-xl border border-emerald-500/20 bg-emerald-500/[0.04] p-3 sm:p-3.5 flex items-center justify-between gap-2">
             <div className="flex items-center gap-2 min-w-0">
               <span className="relative flex h-2 w-2 shrink-0">
                 <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />

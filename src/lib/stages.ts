@@ -260,7 +260,41 @@ export function getEffectiveStage(
       };
     }
 
-    if (s === 'not_applied') {
+    if (s === 'not_applied' || s === 'unknown' || s === 'registration_open') {
+      // Check if there is an upcoming registration deadline event
+      const regDeadlineEvt = allEvents.find((e) => {
+        const typeStr = getEvtType(e);
+        return typeStr.includes('registration_deadline') || typeStr.includes('deadline');
+      });
+      const regTime = regDeadlineEvt ? getEventTime(regDeadlineEvt) : null;
+      const isRegOpen = regTime !== null && regTime > now.getTime();
+
+      if (isRegOpen && regTime !== null) {
+        const diffMs = regTime - now.getTime();
+        const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
+        const diffMins = Math.round((diffMs % (1000 * 60 * 60)) / (1000 * 60));
+        const countdownStr =
+          diffHours >= 24
+            ? `${Math.round(diffMs / (1000 * 60 * 60 * 24))}d`
+            : diffHours > 0
+            ? `${diffHours}h ${diffMins}m`
+            : `${diffMins}m`;
+
+        return {
+          stageIndex: 0,
+          effectiveStatus: 'registration_open',
+          eliminatedStage: -1,
+          furthestPassedStage: -1,
+          statusSubtitle: `Closes in ${countdownStr}`,
+          hasPpt,
+          hasTest,
+          hasInterview,
+          isTestCompleted,
+          isPptCompleted,
+          isInterviewCompleted,
+        };
+      }
+
       return {
         stageIndex: 0,
         effectiveStatus: 'not_applied',
@@ -547,8 +581,42 @@ export function getEffectiveStage(
     };
   }
 
-  // 6. Not applied
-  if (s === 'not_applied') {
+  // 6. Not applied / registration open
+  if (s === 'not_applied' || s === 'unknown' || s === 'registration_open') {
+    // Check if there is an upcoming registration deadline event
+    const regDeadlineEvt = allEvents.find((e) => {
+      const typeStr = getEvtType(e);
+      return typeStr.includes('registration_deadline') || typeStr.includes('deadline');
+    });
+    const regTime = regDeadlineEvt ? getEventTime(regDeadlineEvt) : null;
+    const isRegOpen = regTime !== null && regTime > now.getTime();
+
+    if (isRegOpen && regTime !== null) {
+      const diffMs = regTime - now.getTime();
+      const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
+      const diffMins = Math.round((diffMs % (1000 * 60 * 60)) / (1000 * 60));
+      const countdownStr =
+        diffHours >= 24
+          ? `${Math.round(diffMs / (1000 * 60 * 60 * 24))}d`
+          : diffHours > 0
+          ? `${diffHours}h ${diffMins}m`
+          : `${diffMins}m`;
+
+      return {
+        stageIndex: 0,
+        effectiveStatus: 'registration_open',
+        eliminatedStage: -1,
+        furthestPassedStage: -1,
+        statusSubtitle: `Closes in ${countdownStr}`,
+        hasPpt,
+        hasTest,
+        hasInterview,
+        isTestCompleted,
+        isPptCompleted,
+        isInterviewCompleted,
+      };
+    }
+
     return {
       stageIndex: 0,
       effectiveStatus: 'not_applied',

@@ -41,6 +41,13 @@
 html {
   background-color: #09090b;
   overflow-x: clip;
+  font-size: 106.25%; /* Scales 1rem to 17px globally to fix small text feedback */
+}
+
+@media (min-width: 1024px) {
+  html {
+    font-size: 112.5%; /* Scales 1rem to 18px on desktop for even better readability */
+  }
 }
 
 body {

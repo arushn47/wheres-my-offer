@@ -3,6 +3,7 @@
 import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { appToast } from '@/lib/toast';
+import { createClient } from '@/lib/supabase/client';
 
 export interface SyncProgress {
   phase: 'initializing' | 'fetching' | 'processing' | 'complete' | 'error';
@@ -56,6 +57,7 @@ export function SyncProvider({
   const [syncProgress, setSyncProgress] = useState<SyncProgress | null>(null);
   const [syncResult, setSyncResult] = useState<SyncResult | null>(null);
   const [lastSyncAt, setLastSyncAt] = useState<string | null>(initialLastSyncAt || null);
+  const lastSyncAtRef = useRef<string | null>(initialLastSyncAt || null);
 
   const isSyncingRef = useRef(false);
   const isSseActiveRef = useRef(false);
@@ -66,6 +68,7 @@ export function SyncProvider({
   useEffect(() => {
     if (initialLastSyncAt) {
       setLastSyncAt(initialLastSyncAt);
+      lastSyncAtRef.current = initialLastSyncAt;
     }
   }, [initialLastSyncAt]);
 
@@ -418,7 +421,17 @@ export function SyncProvider({
         const data = await res.json();
 
         if (data.lastSyncAt) {
-          setLastSyncAt(data.lastSyncAt);
+          if (lastSyncAtRef.current && data.lastSyncAt !== lastSyncAtRef.current) {
+            lastSyncAtRef.current = data.lastSyncAt;
+            setLastSyncAt(data.lastSyncAt);
+            if (typeof window !== 'undefined') {
+              window.dispatchEvent(new CustomEvent('wmo:refresh_notifications'));
+            }
+            router.refresh();
+          } else {
+            lastSyncAtRef.current = data.lastSyncAt;
+            setLastSyncAt(data.lastSyncAt);
+          }
         }
 
         if (data.isSyncing) {
@@ -443,6 +456,53 @@ export function SyncProvider({
     window.addEventListener('start-placement-sync', handleTriggerSync);
     return () => window.removeEventListener('start-placement-sync', handleTriggerSync);
   }, [handleSync]);
+
+  // Supabase Realtime listener: instant updates when applications or notifications change
+  useEffect(() => {
+    let refreshDebounceTimer: NodeJS.Timeout | null = null;
+
+    const scheduleRefresh = () => {
+      // Don't trigger a page re-render while a sync is actively running via SSE
+      // (the sync's own complete handler calls router.refresh())
+      if (isSyncingRef.current) return;
+      if (refreshDebounceTimer) clearTimeout(refreshDebounceTimer);
+      // Debounce 2s — batch DB writes (e.g. during cron) produce many events;
+      // coalesce them into a single refresh
+      refreshDebounceTimer = setTimeout(() => {
+        refreshDebounceTimer = null;
+        router.refresh();
+      }, 2000);
+    };
+
+    try {
+      const supabase = createClient();
+      const channel = supabase
+        .channel('schema-db-changes')
+        .on(
+          'postgres_changes',
+          { event: '*', schema: 'public', table: 'applications' },
+          scheduleRefresh
+        )
+        .on(
+          'postgres_changes',
+          { event: 'INSERT', schema: 'public', table: 'in_app_notifications' },
+          () => {
+            if (typeof window !== 'undefined') {
+              window.dispatchEvent(new CustomEvent('wmo:refresh_notifications'));
+            }
+            scheduleRefresh();
+          }
+        )
+        .subscribe();
+
+      return () => {
+        if (refreshDebounceTimer) clearTimeout(refreshDebounceTimer);
+        supabase.removeChannel(channel);
+      };
+    } catch {
+      // Ignore if realtime fails to initialize in unsupported environment
+    }
+  }, [router]);
 
   const progressPercent =
     syncProgress && syncProgress.totalMessages > 0

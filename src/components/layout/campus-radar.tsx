@@ -61,8 +61,8 @@ export default function CampusRadar({ className, compact = false }: CampusRadarP
               {hasMultiplePages
                 ? `P${currentPage}/${totalPages}`
                 : progressPercent > 0
-                ? `${progressPercent}%`
-                : 'Syncing'}
+                  ? `${progressPercent}%`
+                  : 'Syncing'}
             </span>
           </div>
         ) : (
@@ -106,12 +106,12 @@ export default function CampusRadar({ className, compact = false }: CampusRadarP
                 {syncProgress?.phase === 'initializing'
                   ? 'Connecting inboxes…'
                   : syncProgress?.phase === 'fetching'
-                  ? `Scanning ${syncProgress.accountType === 'personal' ? 'Personal' : 'College'}…`
-                  : syncProgress?.phase === 'processing'
-                  ? `${syncProgress.accountType === 'personal' ? 'Personal' : 'College'} Inbox`
-                  : syncProgress?.phase === 'complete'
-                  ? 'Finalizing index…'
-                  : 'Syncing inboxes…'}
+                    ? `Scanning ${syncProgress.accountType === 'personal' ? 'Personal' : 'College'}…`
+                    : syncProgress?.phase === 'processing'
+                      ? `${syncProgress.accountType === 'personal' ? 'Personal' : 'College'} Inbox`
+                      : syncProgress?.phase === 'complete'
+                        ? 'Finalizing index…'
+                        : 'Syncing inboxes…'}
               </span>
             </div>
 

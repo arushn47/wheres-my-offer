@@ -1318,369 +1318,369 @@ export async function runSync(
     const hadCompletedInitialPages = (allPendingPages || []).length > 0 && !hasAnyPending;
     result.hasMorePagesPending = hasAnyPending;
 
-  // 5. Circular reconciliation: reconcile unlinked college circulars against user companies
-  // IDLE & ARCHIVE GUARD: ONLY run heavy post-sync steps (reconciliation, dedup, status recalc, calendar)
-  // when new emails were actually received or initial setup pages just completed.
-  // This prevents idle cron runs from downloading thousands of email rows every 15 minutes and exhausting database egress!
-  const hasNewData = (result.newEmails > 0 || result.newCompanies > 0 || hadCompletedInitialPages);
-  if (!result.hasMorePagesPending && hasNewData) {
-    try {
-      const { data: unlinkedEmails } = await supabase
-        .from('emails')
-        .select('id, thread_id, subject, sender, received_at, body_snippet')
-        .eq('user_id', userId)
-        .is('company_id', null);
+    // 5. Circular reconciliation: reconcile unlinked college circulars against user companies
+    // IDLE & ARCHIVE GUARD: ONLY run heavy post-sync steps (reconciliation, dedup, status recalc, calendar)
+    // when new emails were actually received or initial setup pages just completed.
+    // This prevents idle cron runs from downloading thousands of email rows every 15 minutes and exhausting database egress!
+    const hasNewData = (result.newEmails > 0 || result.newCompanies > 0 || hadCompletedInitialPages);
+    if (!result.hasMorePagesPending && hasNewData) {
+      try {
+        const { data: unlinkedEmails } = await supabase
+          .from('emails')
+          .select('id, thread_id, subject, sender, received_at, body_snippet')
+          .eq('user_id', userId)
+          .is('company_id', null);
 
-      if (unlinkedEmails && unlinkedEmails.length > 0) {
-        const { data: allUserComps } = await supabase
-          .from('companies')
-          .select('id, name, aliases')
-          .eq('user_id', userId);
+        if (unlinkedEmails && unlinkedEmails.length > 0) {
+          const { data: allUserComps } = await supabase
+            .from('companies')
+            .select('id, name, aliases')
+            .eq('user_id', userId);
 
-        if (allUserComps && allUserComps.length > 0) {
-          // A. Build Thread-to-Company map from confident, already-linked emails
-          // Directionality guard: Only inherit if a thread has EXACTLY ONE unique company_id
-          const { data: threadLinkedEmails } = await supabase
-            .from('emails')
-            .select('thread_id, company_id')
-            .eq('user_id', userId)
-            .not('thread_id', 'is', null)
-            .not('company_id', 'is', null);
+          if (allUserComps && allUserComps.length > 0) {
+            // A. Build Thread-to-Company map from confident, already-linked emails
+            // Directionality guard: Only inherit if a thread has EXACTLY ONE unique company_id
+            const { data: threadLinkedEmails } = await supabase
+              .from('emails')
+              .select('thread_id, company_id')
+              .eq('user_id', userId)
+              .not('thread_id', 'is', null)
+              .not('company_id', 'is', null);
 
-          const threadCompanyMap = new Map<string, Set<string>>();
-          for (const te of threadLinkedEmails || []) {
-            if (te.thread_id && te.company_id) {
-              const set = threadCompanyMap.get(te.thread_id) || new Set<string>();
-              set.add(te.company_id);
-              threadCompanyMap.set(te.thread_id, set);
+            const threadCompanyMap = new Map<string, Set<string>>();
+            for (const te of threadLinkedEmails || []) {
+              if (te.thread_id && te.company_id) {
+                const set = threadCompanyMap.get(te.thread_id) || new Set<string>();
+                set.add(te.company_id);
+                threadCompanyMap.set(te.thread_id, set);
+              }
             }
-          }
 
-          // TEMPORAL FILTER: Build Drive Anchor Date map (company_id -> latest Anchor Date)
-          // An Anchor Date is the latest received_at of a NeoPAT email or an email containing pat-PL-
-          const { data: anchorEmails } = await supabase
-            .from('emails')
-            .select('company_id, received_at')
-            .eq('user_id', userId)
-            .not('company_id', 'is', null)
-            .or('sender.ilike.%noreply.cdcinfo@vitstudent.ac.in%,body_snippet.ilike.%pat-PL-%');
-          
-          const companyAnchorDates = new Map<string, number>();
-          for (const ae of anchorEmails || []) {
-            if (!ae.company_id || !ae.received_at) continue;
-            const time = new Date(ae.received_at).getTime();
-            const current = companyAnchorDates.get(ae.company_id) || 0;
-            if (time > current) {
-               companyAnchorDates.set(ae.company_id, time);
+            // TEMPORAL FILTER: Build Drive Anchor Date map (company_id -> latest Anchor Date)
+            // An Anchor Date is the latest received_at of a NeoPAT email or an email containing pat-PL-
+            const { data: anchorEmails } = await supabase
+              .from('emails')
+              .select('company_id, received_at')
+              .eq('user_id', userId)
+              .not('company_id', 'is', null)
+              .or('sender.ilike.%noreply.cdcinfo@vitstudent.ac.in%,body_snippet.ilike.%pat-PL-%');
+
+            const companyAnchorDates = new Map<string, number>();
+            for (const ae of anchorEmails || []) {
+              if (!ae.company_id || !ae.received_at) continue;
+              const time = new Date(ae.received_at).getTime();
+              const current = companyAnchorDates.get(ae.company_id) || 0;
+              if (time > current) {
+                companyAnchorDates.set(ae.company_id, time);
+              }
             }
-          }
 
-          // B. Build NeoPAT registration timeline map for timing correlation (±24h window)
-          const { data: neoPatEmails } = await supabase
-            .from('emails')
-            .select('company_id, received_at')
-            .eq('user_id', userId)
-            .not('company_id', 'is', null)
-            .ilike('sender', '%noreply.cdcinfo@vitstudent.ac.in%');
+            // B. Build NeoPAT registration timeline map for timing correlation (±24h window)
+            const { data: neoPatEmails } = await supabase
+              .from('emails')
+              .select('company_id, received_at')
+              .eq('user_id', userId)
+              .not('company_id', 'is', null)
+              .ilike('sender', '%noreply.cdcinfo@vitstudent.ac.in%');
 
-          const neoPatTimelines = (neoPatEmails || []).map((ne) => {
-            const comp = allUserComps.find((c) => c.id === ne.company_id);
-            return {
-              companyId: ne.company_id as string,
-              companyName: comp ? comp.name : '',
-              time: new Date(ne.received_at).getTime(),
-            };
-          }).filter((n) => n.companyName.length > 0);
+            const neoPatTimelines = (neoPatEmails || []).map((ne) => {
+              const comp = allUserComps.find((c) => c.id === ne.company_id);
+              return {
+                companyId: ne.company_id as string,
+                companyName: comp ? comp.name : '',
+                time: new Date(ne.received_at).getTime(),
+              };
+            }).filter((n) => n.companyName.length > 0);
 
-          const WINDOW_MS = 24 * 60 * 60 * 1000; // ±24h window
+            const WINDOW_MS = 24 * 60 * 60 * 1000; // ±24h window
 
-          for (const email of unlinkedEmails) {
-            let matchedCompanyId: string | null = null;
+            for (const email of unlinkedEmails) {
+              let matchedCompanyId: string | null = null;
 
-            // 1. Direct Company Name Extraction Match
-            const compName = extractCompanyName(
-              email.subject || '',
-              email.sender || '',
-              email.body_snippet || '',
-              email.received_at ? new Date(email.received_at) : undefined
-            );
+              // 1. Direct Company Name Extraction Match
+              const compName = extractCompanyName(
+                email.subject || '',
+                email.sender || '',
+                email.body_snippet || '',
+                email.received_at ? new Date(email.received_at) : undefined
+              );
 
-            if (compName) {
-              const norm = normalizeCompanyName(compName).toLowerCase();
-              const unlinkedDrive = extractDriveNumber(`${email.subject}\n${email.body_snippet || ''}`);
+              if (compName) {
+                const norm = normalizeCompanyName(compName).toLowerCase();
+                const unlinkedDrive = extractDriveNumber(`${email.subject}\n${email.body_snippet || ''}`);
 
-              // Extract parenthetical variants: e.g. "Eternal (Zomato)" -> ["eternal (zomato)", "zomato", "eternal"]
-              const parenMatches = Array.from(compName.matchAll(/\(([^)]+)\)/g)).map((m) => m[1].trim().toLowerCase());
-              const outsideParen = compName.replace(/\([^)]*\)/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
-              const searchCandidates = Array.from(new Set([
-                norm,
-                ...parenMatches.filter((p) => p.length >= 2),
-                ...(outsideParen && outsideParen.length >= 2 ? [outsideParen] : []),
-              ]));
+                // Extract parenthetical variants: e.g. "Eternal (Zomato)" -> ["eternal (zomato)", "zomato", "eternal"]
+                const parenMatches = Array.from(compName.matchAll(/\(([^)]+)\)/g)).map((m) => m[1].trim().toLowerCase());
+                const outsideParen = compName.replace(/\([^)]*\)/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
+                const searchCandidates = Array.from(new Set([
+                  norm,
+                  ...parenMatches.filter((p) => p.length >= 2),
+                  ...(outsideParen && outsideParen.length >= 2 ? [outsideParen] : []),
+                ]));
 
-              const matchedList = allUserComps.filter((c) => {
-                const cLower = c.name.toLowerCase();
-                const cAliases = (c.aliases || []).map((a: string) => a.toLowerCase());
-                return searchCandidates.some((cand) => {
-                  return (
-                    cLower === cand ||
-                    cAliases.includes(cand) ||
-                    isFuzzyCompanyMatch(c.name, cand) ||
-                    (c.aliases || []).some((a: string) => isFuzzyCompanyMatch(a, cand))
-                  );
+                const matchedList = allUserComps.filter((c) => {
+                  const cLower = c.name.toLowerCase();
+                  const cAliases = (c.aliases || []).map((a: string) => a.toLowerCase());
+                  return searchCandidates.some((cand) => {
+                    return (
+                      cLower === cand ||
+                      cAliases.includes(cand) ||
+                      isFuzzyCompanyMatch(c.name, cand) ||
+                      (c.aliases || []).some((a: string) => isFuzzyCompanyMatch(a, cand))
+                    );
+                  });
                 });
-              });
 
-              let matched = null;
-              if (matchedList.length === 1) {
-                matched = matchedList[0];
-              } else if (matchedList.length > 1) {
-                // Ambiguous! Disambiguate using drive number if present
-                if (unlinkedDrive) {
-                  for (const cand of matchedList) {
-                    const { data: candEmails } = await supabase
+                let matched = null;
+                if (matchedList.length === 1) {
+                  matched = matchedList[0];
+                } else if (matchedList.length > 1) {
+                  // Ambiguous! Disambiguate using drive number if present
+                  if (unlinkedDrive) {
+                    for (const cand of matchedList) {
+                      const { data: candEmails } = await supabase
+                        .from('emails')
+                        .select('body_snippet')
+                        .eq('company_id', cand.id)
+                        .not('body_snippet', 'is', null)
+                        .ilike('body_snippet', '%pat-PL-%')
+                        .limit(5);
+                      const drives = (candEmails || []).flatMap((e: { body_snippet: string | null }) => extractAllDriveNumbers(e.body_snippet || ''));
+                      if (drives.includes(unlinkedDrive)) {
+                        matched = cand;
+                        break;
+                      }
+                    }
+                  }
+                }
+
+                if (matched) {
+                  // If unlinked email carries a drive number, ensure candidate company is not bound to a different drive
+                  let driveConflict = false;
+                  if (unlinkedDrive) {
+                    // Check existing emails for candidate company
+                    const { data: cEmails } = await supabase
                       .from('emails')
                       .select('body_snippet')
-                      .eq('company_id', cand.id)
+                      .eq('company_id', matched.id)
                       .not('body_snippet', 'is', null)
                       .ilike('body_snippet', '%pat-PL-%')
                       .limit(5);
-                    const drives = (candEmails || []).flatMap((e: { body_snippet: string | null }) => extractAllDriveNumbers(e.body_snippet || ''));
-                    if (drives.includes(unlinkedDrive)) {
-                      matched = cand;
-                      break;
+
+                    const establishedDrives = (cEmails || []).flatMap((e: { body_snippet: string | null }) =>
+                      extractAllDriveNumbers(e.body_snippet || '')
+                    );
+
+                    if (establishedDrives.length > 0 && !establishedDrives.includes(unlinkedDrive)) {
+                      driveConflict = true;
+                    }
+                  }
+
+                  if (!driveConflict) {
+                    // TEMPORAL FILTER: Only accept if >= Anchor Date - 14 days
+                    const anchorTime = companyAnchorDates.get(matched.id);
+                    const emailTime = email.received_at ? new Date(email.received_at).getTime() : 0;
+                    if (!anchorTime || emailTime >= anchorTime - 14 * 24 * 60 * 60 * 1000) {
+                      matchedCompanyId = matched.id;
                     }
                   }
                 }
               }
 
-              if (matched) {
-                // If unlinked email carries a drive number, ensure candidate company is not bound to a different drive
-                let driveConflict = false;
-                if (unlinkedDrive) {
-                  // Check existing emails for candidate company
-                  const { data: cEmails } = await supabase
+              // 2. Thread Inheritance (Directionality: only if thread has EXACTLY 1 unique company)
+              if (!matchedCompanyId && email.thread_id) {
+                const candidateSet = threadCompanyMap.get(email.thread_id);
+                if (candidateSet && candidateSet.size === 1) {
+                  const candId = Array.from(candidateSet)[0];
+                  const anchorTime = companyAnchorDates.get(candId);
+                  const emailTime = email.received_at ? new Date(email.received_at).getTime() : 0;
+                  if (!anchorTime || emailTime >= anchorTime - 14 * 24 * 60 * 60 * 1000) {
+                    matchedCompanyId = candId;
+                  }
+                }
+              }
+
+              // 3. Same-Day Timing Correlation (Unambiguous only: strictly 1 candidate)
+              // Directionality guard: NEVER hijack emails that already have an extracted company name (e.g. Divum, Danfoss)
+              // and ONLY match against email subject, NEVER against body_snippet (which contains random branch names & course terms).
+              if (!matchedCompanyId && !compName && email.received_at) {
+                const emailTime = new Date(email.received_at).getTime();
+                const candidates = neoPatTimelines.filter((n) => {
+                  if (Math.abs(n.time - emailTime) > WINDOW_MS) return false;
+                  return isFuzzyCompanyMatch(n.companyName, email.subject || '');
+                });
+
+                const uniqueCandidates = Array.from(new Set(candidates.map((c) => c.companyId)));
+                if (uniqueCandidates.length === 1) {
+                  const candidateCompanyId = uniqueCandidates[0];
+
+                  // Fix B: If the candidate company already has an established drive number,
+                  // require the unlinked email to share that drive number OR pass a strict
+                  // normalized-key name match. Prevents stale timing-only re-associations
+                  // after a company's identity is already well-anchored.
+                  const { data: existingCompEmails } = await supabase
                     .from('emails')
                     .select('body_snippet')
-                    .eq('company_id', matched.id)
+                    .eq('company_id', candidateCompanyId)
                     .not('body_snippet', 'is', null)
-                    .ilike('body_snippet', '%pat-PL-%')
                     .limit(5);
 
-                  const establishedDrives = (cEmails || []).flatMap((e: { body_snippet: string | null }) =>
-                    extractAllDriveNumbers(e.body_snippet || '')
-                  );
+                  const existingDriveNums = (existingCompEmails || [])
+                    .flatMap((e: { body_snippet: string | null }) => extractAllDriveNumbers(e.body_snippet || ''));
 
-                  if (establishedDrives.length > 0 && !establishedDrives.includes(unlinkedDrive)) {
-                    driveConflict = true;
+                  let timingMatchOk = true;
+                  if (existingDriveNums.length > 0) {
+                    const emailDriveNums = extractAllDriveNumbers(email.subject || '');
+                    if (emailDriveNums.length > 0) {
+                      const hasMatchingDrive = emailDriveNums.some((d) => existingDriveNums.includes(d));
+                      if (!hasMatchingDrive) {
+                        timingMatchOk = false;
+                        console.log(`[Timing Correlation] Skipped attach for email "${email.subject}" → company ${candidateCompanyId}: established drive nums [${existingDriveNums.join(',')}] not found in email.`);
+                      }
+                    }
                   }
-                }
 
-                if (!driveConflict) {
-                  // TEMPORAL FILTER: Only accept if >= Anchor Date - 14 days
-                  const anchorTime = companyAnchorDates.get(matched.id);
-                  const emailTime = email.received_at ? new Date(email.received_at).getTime() : 0;
-                  if (!anchorTime || emailTime >= anchorTime - 14 * 24 * 60 * 60 * 1000) {
-                    matchedCompanyId = matched.id;
-                  }
-                }
-              }
-            }
-
-            // 2. Thread Inheritance (Directionality: only if thread has EXACTLY 1 unique company)
-            if (!matchedCompanyId && email.thread_id) {
-              const candidateSet = threadCompanyMap.get(email.thread_id);
-              if (candidateSet && candidateSet.size === 1) {
-                const candId = Array.from(candidateSet)[0];
-                const anchorTime = companyAnchorDates.get(candId);
-                const emailTime = email.received_at ? new Date(email.received_at).getTime() : 0;
-                if (!anchorTime || emailTime >= anchorTime - 14 * 24 * 60 * 60 * 1000) {
-                  matchedCompanyId = candId;
-                }
-              }
-            }
-
-            // 3. Same-Day Timing Correlation (Unambiguous only: strictly 1 candidate)
-            // Directionality guard: NEVER hijack emails that already have an extracted company name (e.g. Divum, Danfoss)
-            // and ONLY match against email subject, NEVER against body_snippet (which contains random branch names & course terms).
-            if (!matchedCompanyId && !compName && email.received_at) {
-              const emailTime = new Date(email.received_at).getTime();
-              const candidates = neoPatTimelines.filter((n) => {
-                if (Math.abs(n.time - emailTime) > WINDOW_MS) return false;
-                return isFuzzyCompanyMatch(n.companyName, email.subject || '');
-              });
-
-              const uniqueCandidates = Array.from(new Set(candidates.map((c) => c.companyId)));
-              if (uniqueCandidates.length === 1) {
-                const candidateCompanyId = uniqueCandidates[0];
-
-                // Fix B: If the candidate company already has an established drive number,
-                // require the unlinked email to share that drive number OR pass a strict
-                // normalized-key name match. Prevents stale timing-only re-associations
-                // after a company's identity is already well-anchored.
-                const { data: existingCompEmails } = await supabase
-                  .from('emails')
-                  .select('body_snippet')
-                  .eq('company_id', candidateCompanyId)
-                  .not('body_snippet', 'is', null)
-                  .limit(5);
-
-                const existingDriveNums = (existingCompEmails || [])
-                  .flatMap((e: { body_snippet: string | null }) => extractAllDriveNumbers(e.body_snippet || ''));
-
-                let timingMatchOk = true;
-                if (existingDriveNums.length > 0) {
-                  const emailDriveNums = extractAllDriveNumbers(email.subject || '');
-                  if (emailDriveNums.length > 0) {
-                    const hasMatchingDrive = emailDriveNums.some((d) => existingDriveNums.includes(d));
-                    if (!hasMatchingDrive) {
-                      timingMatchOk = false;
-                      console.log(`[Timing Correlation] Skipped attach for email "${email.subject}" → company ${candidateCompanyId}: established drive nums [${existingDriveNums.join(',')}] not found in email.`);
+                  if (timingMatchOk) {
+                    const anchorTime = companyAnchorDates.get(candidateCompanyId);
+                    const emailTime = email.received_at ? new Date(email.received_at).getTime() : 0;
+                    if (!anchorTime || emailTime >= anchorTime - 14 * 24 * 60 * 60 * 1000) {
+                      matchedCompanyId = candidateCompanyId;
                     }
                   }
                 }
+                // If > 1 candidates, ambiguous: do not guess!
+              }
 
-                if (timingMatchOk) {
-                  const anchorTime = companyAnchorDates.get(candidateCompanyId);
-                  const emailTime = email.received_at ? new Date(email.received_at).getTime() : 0;
-                  if (!anchorTime || emailTime >= anchorTime - 14 * 24 * 60 * 60 * 1000) {
-                    matchedCompanyId = candidateCompanyId;
-                  }
+              if (matchedCompanyId) {
+                await supabase
+                  .from('emails')
+                  .update({ company_id: matchedCompanyId, is_relevant: true })
+                  .eq('id', email.id);
+
+                // Register newly linked email to thread map for downstream emails in same pass
+                if (email.thread_id) {
+                  const set = threadCompanyMap.get(email.thread_id) || new Set<string>();
+                  set.add(matchedCompanyId);
+                  threadCompanyMap.set(email.thread_id, set);
                 }
-              }
-              // If > 1 candidates, ambiguous: do not guess!
-            }
 
-            if (matchedCompanyId) {
-              await supabase
-                .from('emails')
-                .update({ company_id: matchedCompanyId, is_relevant: true })
-                .eq('id', email.id);
+                // Lazy-fetch body_snippet ONLY for this matched email to extract events/CTC
+                const { data: fullEmail } = await supabase
+                  .from('emails')
+                  .select('body_snippet')
+                  .eq('id', email.id)
+                  .single();
+                const emailBodySnippet = fullEmail?.body_snippet || '';
 
-              // Register newly linked email to thread map for downstream emails in same pass
-              if (email.thread_id) {
-                const set = threadCompanyMap.get(email.thread_id) || new Set<string>();
-                set.add(matchedCompanyId);
-                threadCompanyMap.set(email.thread_id, set);
-              }
-
-              // Lazy-fetch body_snippet ONLY for this matched email to extract events/CTC
-              const { data: fullEmail } = await supabase
-                .from('emails')
-                .select('body_snippet')
-                .eq('id', email.id)
-                .single();
-              const emailBodySnippet = fullEmail?.body_snippet || '';
-
-              // Process reconciled circular for Events, CTC, and Roles
-              try {
-                const { processEmailForEventsAndStatus } = await import(
-                  '@/lib/sync/status-engine'
-                );
-                await processEmailForEventsAndStatus(
-                  supabase,
-                  userId,
-                  matchedCompanyId,
-                  {
-                    gmailMessageId: email.id,
-                    threadId: email.thread_id,
-                    sender: email.sender || '',
-                    senderEmail: email.sender?.match(/<([^>]+)>/)?.[1] || email.sender || '',
-                    subject: email.subject || '',
-                    receivedAt: email.received_at ? new Date(email.received_at) : new Date(),
-                    bodySnippet: emailBodySnippet,
-                    bodyPlain: emailBodySnippet,
-                    bodyHtml: '',
-                    hasAttachments: false,
-                    attachments: [],
-                    labels: [],
-                  },
-                  email.id,
-                  userNeoId,
-                  userEmail
-                );
-              } catch (err) {
-                console.warn('Failed to process reconciled circular for events:', err);
+                // Process reconciled circular for Events, CTC, and Roles
+                try {
+                  const { processEmailForEventsAndStatus } = await import(
+                    '@/lib/sync/status-engine'
+                  );
+                  await processEmailForEventsAndStatus(
+                    supabase,
+                    userId,
+                    matchedCompanyId,
+                    {
+                      gmailMessageId: email.id,
+                      threadId: email.thread_id,
+                      sender: email.sender || '',
+                      senderEmail: email.sender?.match(/<([^>]+)>/)?.[1] || email.sender || '',
+                      subject: email.subject || '',
+                      receivedAt: email.received_at ? new Date(email.received_at) : new Date(),
+                      bodySnippet: emailBodySnippet,
+                      bodyPlain: emailBodySnippet,
+                      bodyHtml: '',
+                      hasAttachments: false,
+                      attachments: [],
+                      labels: [],
+                    },
+                    email.id,
+                    userNeoId,
+                    userEmail
+                  );
+                } catch (err) {
+                  console.warn('Failed to process reconciled circular for events:', err);
+                }
               }
             }
           }
         }
+      } catch (reconcileErr) {
+        console.warn('Post-sync circular reconciliation non-critical error:', reconcileErr);
       }
-    } catch (reconcileErr) {
-      console.warn('Post-sync circular reconciliation non-critical error:', reconcileErr);
-    }
 
-    // 5.4 Automatic Post-Sync Company Deduplication:
-    // Merges any duplicate company records caused by subtle naming differences or historical runs.
-    try {
-      const { deduplicateUserCompanies } = await import('@/lib/sync/dedup');
-      const dedupResult = await deduplicateUserCompanies(supabase, userId);
-      if (dedupResult.removedCompaniesCount > 0) {
-        console.log(`[SyncEngine] Deduplicated ${dedupResult.removedCompaniesCount} company record(s) for user ${userId}`);
+      // 5.4 Automatic Post-Sync Company Deduplication:
+      // Merges any duplicate company records caused by subtle naming differences or historical runs.
+      try {
+        const { deduplicateUserCompanies } = await import('@/lib/sync/dedup');
+        const dedupResult = await deduplicateUserCompanies(supabase, userId);
+        if (dedupResult.removedCompaniesCount > 0) {
+          console.log(`[SyncEngine] Deduplicated ${dedupResult.removedCompaniesCount} company record(s) for user ${userId}`);
+        }
+      } catch (dedupErr) {
+        console.warn('[Post-Sync Dedup] Non-critical error:', dedupErr);
       }
-    } catch (dedupErr) {
-      console.warn('[Post-Sync Dedup] Non-critical error:', dedupErr);
+
+      // 5.5 Holistic Status Recalculation:
+      // The incremental per-email status engine can produce wrong statuses because it only
+      // sees one email at a time. After all pages are done, re-run the full holistic
+      // analysis (same logic as reprocess Phase 4) to correct any status errors.
+      try {
+        const { recalculateApplicationStatuses } = await import('@/app/api/sync/reprocess/route');
+        await recalculateApplicationStatuses(userId);
+      } catch (statusRecalcErr) {
+        console.warn('[Post-Sync Status Recalc] Non-critical error:', statusRecalcErr);
+      }
+
+      // 6. Automatic Google Calendar reconciliation:
+      // Only runs if new emails or archive pages were processed
+      try {
+        const { reconcileUserGoogleCalendar } = await import('@/lib/calendar/google-sync');
+        const calResult = await reconcileUserGoogleCalendar(userId);
+        console.log(`[Google Calendar Auto-Sync] User ${userId}: ${calResult.message}`);
+      } catch (calErr) {
+        console.warn('[Google Calendar Auto-Sync] Non-critical reconciliation error:', calErr);
+      }
+
+      // Clean up completed initial sync pages so future idle cron runs don't re-trigger
+      if (hadCompletedInitialPages) {
+        await supabase.from('sync_pages').delete().eq('user_id', userId);
+      }
+    } else {
+      console.log(
+        `[SyncEngine] User ${userId} sync run idle: 0 new emails/companies. Skipped circular reconciliation, dedup, status recalculation, and calendar sync (0 egress).`
+      );
     }
 
-    // 5.5 Holistic Status Recalculation:
-    // The incremental per-email status engine can produce wrong statuses because it only
-    // sees one email at a time. After all pages are done, re-run the full holistic
-    // analysis (same logic as reprocess Phase 4) to correct any status errors.
+    return result;
+  } finally {
+    activeSyncLocks.delete(userId);
+    activeSyncMap.delete(userId);
     try {
-      const { recalculateApplicationStatuses } = await import('@/app/api/sync/reprocess/route');
-      await recalculateApplicationStatuses(userId);
-    } catch (statusRecalcErr) {
-      console.warn('[Post-Sync Status Recalc] Non-critical error:', statusRecalcErr);
+      await dbWriteChain;
+      const isError = result.errors.length > 0 && result.totalEmailsProcessed === 0;
+      const isComplete = !result.hasMorePagesPending;
+      await supabase.from('sync_state').upsert({
+        user_id: userId,
+        is_syncing: false,
+        phase: isError ? 'error' : (isComplete ? 'complete' : 'pending'),
+        total_messages: latestProgress.totalMessages,
+        processed_messages: latestProgress.processedMessages,
+        new_emails: result.newEmails,
+        new_companies: result.newCompanies,
+        skipped_duplicates: result.skippedDuplicates,
+        is_initial_sync: isInitialSync,
+        current_page_index: latestProgress.currentPageIndex ?? 0,
+        total_pages: latestProgress.totalPagesCount ?? 1,
+        completed_at: isComplete ? new Date().toISOString() : null,
+        updated_at: new Date().toISOString(),
+        last_error: result.errors.length > 0 ? result.errors[result.errors.length - 1] : null,
+      });
+    } catch {
+      // Ignore if sync_state table not yet created
     }
-
-    // 6. Automatic Google Calendar reconciliation:
-    // Only runs if new emails or archive pages were processed
-    try {
-      const { reconcileUserGoogleCalendar } = await import('@/lib/calendar/google-sync');
-      const calResult = await reconcileUserGoogleCalendar(userId);
-      console.log(`[Google Calendar Auto-Sync] User ${userId}: ${calResult.message}`);
-    } catch (calErr) {
-      console.warn('[Google Calendar Auto-Sync] Non-critical reconciliation error:', calErr);
-    }
-
-    // Clean up completed initial sync pages so future idle cron runs don't re-trigger
-    if (hadCompletedInitialPages) {
-      await supabase.from('sync_pages').delete().eq('user_id', userId);
-    }
-  } else {
-    console.log(
-      `[SyncEngine] User ${userId} sync run idle: 0 new emails/companies. Skipped circular reconciliation, dedup, status recalculation, and calendar sync (0 egress).`
-    );
   }
-
-  return result;
-} finally {
-  activeSyncLocks.delete(userId);
-  activeSyncMap.delete(userId);
-  try {
-    await dbWriteChain;
-    const isError = result.errors.length > 0 && result.totalEmailsProcessed === 0;
-    const isComplete = !result.hasMorePagesPending;
-    await supabase.from('sync_state').upsert({
-      user_id: userId,
-      is_syncing: false,
-      phase: isError ? 'error' : (isComplete ? 'complete' : 'pending'),
-      total_messages: latestProgress.totalMessages,
-      processed_messages: latestProgress.processedMessages,
-      new_emails: result.newEmails,
-      new_companies: result.newCompanies,
-      skipped_duplicates: result.skippedDuplicates,
-      is_initial_sync: isInitialSync,
-      current_page_index: latestProgress.currentPageIndex ?? 0,
-      total_pages: latestProgress.totalPagesCount ?? 1,
-      completed_at: isComplete ? new Date().toISOString() : null,
-      updated_at: new Date().toISOString(),
-      last_error: result.errors.length > 0 ? result.errors[result.errors.length - 1] : null,
-    });
-  } catch {
-    // Ignore if sync_state table not yet created
-  }
-}
 }
 
 // ============================================

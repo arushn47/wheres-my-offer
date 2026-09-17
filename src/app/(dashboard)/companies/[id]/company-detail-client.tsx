@@ -630,15 +630,19 @@ export default function CompanyDetailClient({
         className="rounded-2xl border border-zinc-800 bg-bg-surface p-6"
       >
         <div className="mb-5 flex items-center justify-between">
-          <h2 className="font-mono text-[10px] uppercase tracking-widest text-zinc-500">Recruitment Stage</h2>
-          <span
-            className={cn(
-              'font-mono text-[10px]',
-              effective.eliminatedStage !== -1 ? 'text-rose-400 font-semibold' : 'text-zinc-500'
-            )}
-          >
-            {effective.statusSubtitle}
-          </span>
+          <h2 className="font-mono text-[10px] uppercase tracking-widest text-zinc-500">
+            {effective.effectiveStatus === 'registration_open' ? 'Registration Window' : 'Recruitment Stage'}
+          </h2>
+          {effective.effectiveStatus !== 'registration_open' && (
+            <span
+              className={cn(
+                'font-mono text-[10px]',
+                effective.eliminatedStage !== -1 ? 'text-rose-400 font-semibold' : 'text-zinc-500'
+              )}
+            >
+              {effective.statusSubtitle}
+            </span>
+          )}
         </div>
         <StageStepper status={status} events={company.events} notes={notesStr} manualOverride={isManual} />
       </motion.div>

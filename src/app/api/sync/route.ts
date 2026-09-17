@@ -87,6 +87,15 @@ export async function POST() {
           newEmails: result.newEmails,
           newCompanies: result.newCompanies,
         });
+
+        // Trigger notifications for live events and approaching registration deadlines
+        try {
+          const { checkAndNotifyLiveEvents, checkAndNotifyRegistrationDeadlines } = await import('@/lib/notifications/service');
+          await checkAndNotifyLiveEvents(session.userId);
+          await checkAndNotifyRegistrationDeadlines(session.userId);
+        } catch (notifErr) {
+          console.warn('[Sync API] Post-sync notification check error:', notifErr);
+        }
       } catch (err) {
         const errorMessage =
           err instanceof Error ? err.message : 'Unknown error';
@@ -100,6 +109,15 @@ export async function POST() {
       } finally {
         clearInterval(keepAliveTimer);
         controller.close();
+
+        // Fire notification checks AFTER stream is closed — don't block UI completion signal
+        try {
+          const { checkAndNotifyLiveEvents, checkAndNotifyRegistrationDeadlines } = await import('@/lib/notifications/service');
+          await checkAndNotifyLiveEvents(session.userId);
+          await checkAndNotifyRegistrationDeadlines(session.userId);
+        } catch (notifErr) {
+          console.warn('[Sync API] Post-sync notification check error:', notifErr);
+        }
       }
     },
   });

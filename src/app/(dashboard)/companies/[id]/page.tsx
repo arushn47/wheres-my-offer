@@ -136,23 +136,43 @@ export default async function CompanyDetailPage({
           lastUpdated: application.last_updated,
         }
       : null,
-    events: (events || [])
-      .filter((e) => {
-        if (e.event_type === 'registration_deadline') {
-          const isRegistered = application && application.status !== 'not_applied';
-          const isPast = e.start_time && new Date(e.start_time).getTime() <= Date.now();
-          if (isRegistered || isPast) return false;
+    events: (() => {
+      const nowMs = Date.now();
+      const filtered = (events || [])
+        .filter((e) => {
+          if (e.event_type === 'registration_deadline') {
+            const isRegistered = application && application.status !== 'not_applied' && application.status !== 'unknown';
+            const isPast = e.start_time && new Date(e.start_time).getTime() <= nowMs;
+            if (isRegistered || isPast) return false;
+          }
+          return true;
+        })
+        .map((e) => ({
+          id: e.id,
+          eventType: e.event_type,
+          title: e.title,
+          startTime: e.start_time,
+          venue: e.venue,
+          mode: e.mode,
+        }));
+
+      const hasRegEvt = filtered.some((e) => e.eventType === 'registration_deadline');
+      if (!hasRegEvt && application?.registration_deadline) {
+        const regTime = new Date(application.registration_deadline).getTime();
+        const isNotRegistered = !application.status || application.status === 'not_applied' || application.status === 'unknown';
+        if (regTime > nowMs && isNotRegistered) {
+          filtered.push({
+            id: `reg_${company.id}`,
+            eventType: 'registration_deadline',
+            title: 'Registration Deadline',
+            startTime: application.registration_deadline,
+            venue: 'NeoPAT Portal / Online Form',
+            mode: 'online',
+          });
         }
-        return true;
-      })
-      .map((e) => ({
-        id: e.id,
-        eventType: e.event_type,
-        title: e.title,
-        startTime: e.start_time,
-        venue: e.venue,
-        mode: e.mode,
-      })),
+      }
+      return filtered;
+    })(),
     emails: (emails || []).map((em) => ({
       id: em.id,
       subject: em.subject || 'Campus Placement Notice',

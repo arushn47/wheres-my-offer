@@ -557,10 +557,18 @@ export async function processEmailForEventsAndStatus(
 
   let newStatus: string | null = null;
 
-  if (existingApp?.manual_override) {
-    // User has manually set their status — preserve it
+  if (existingApp?.manual_override && !isNeoMatched) {
+    // User has manually set their status — preserve it UNLESS there is fresh
+    // concrete positive evidence (found in an actual shortlist/interview/selection
+    // Excel or body match) that proves they are in a higher stage.
     newStatus = null;
-  } else if (isNeoMatched) {
+  } else if (existingApp?.manual_override && isNeoMatched) {
+    // Manual override exists, but a NeoPAT match confirms they are actively
+    // progressing — allow the engine to compute the correct new status below.
+    // Fall through to the isNeoMatched block.
+  }
+
+  if (isNeoMatched) {
     // Candidate is confirmed in an actual shortlist / test / interview Excel, GSheet, or body match
     const isRejectionLanguage =
       emailClass === 'result' &&
@@ -573,7 +581,14 @@ export async function processEmailForEventsAndStatus(
       newStatus = 'rejected';
     } else if (/final\s*selection|offer\s*(?:letter|release)|congratulations.*(?:final|offer)/i.test(subjLower) || (/selection\s*list/i.test(subjLower) && !/interview|ppt|test/i.test(subjLower))) {
       newStatus = 'selected';
-    } else if (/interview/i.test(subjLower) || (/next\s+round/i.test(subjLower) && !/test|assessment|coding|exam|shl|mettl|hackerrank|aptitude/i.test(subjLower + ' ' + fullText))) {
+    } else if (
+      /interview/i.test(subjLower) || 
+      /next\s+round\s+of\s+(?:the\s+)?(?:selection\s+process|selection|process|hiring)|selection\s+process\s+is\s+scheduled|physical\s+selection/i.test(subjLower) ||
+      (/next\s+round/i.test(subjLower) && (
+        /attend\s+(?:the\s+)?interview|interview\s+(?:process|schedule|round)|shortlisted\s+for\s+interview/i.test(fullText) ||
+        !/(?:online\s+)?test|assessment\s*\d|coding\s+test|\bshl\b|\bmettl\b|\bhackerrank\b/i.test(subjLower)
+      ))
+    ) {
       newStatus = 'interview_scheduled';
     } else if (isTestCompletedShortlist) {
       // The test round is already complete! Candidate completed the test and is in the post-test form / preference stage.
@@ -618,8 +633,11 @@ export async function processEmailForEventsAndStatus(
       // Check if this is a post-test round announcement (interview, next round, selection list)
       const isPostTestRound =
         emailClass === 'interview' ||
-        /interview\s+(?:is\s+)?scheduled|technical\s+interview|hr\s+interview|final\s+interview/i.test(subjLower) ||
-        (/next\s+round/i.test(subjLower) && !/test|assessment|coding|exam|shl|mettl|hackerrank|aptitude/i.test(fullText)) ||
+        /interview\s+(?:is\s+)?scheduled|technical\s+interview|hr\s+interview|final\s+interview|next\s+round\s+of\s+(?:the\s+)?(?:selection\s+process|selection|process|hiring)|selection\s+process\s+is\s+scheduled|physical\s+selection/i.test(subjLower) ||
+        (/next\s+round/i.test(subjLower) && (
+          /interview|in[\s-]*person|f2f|resumes?|formal\s+dress|blacklisted/i.test(fullText) ||
+          !/(?:online\s+)?test|assessment\s*\d|coding\s+test|\bshl\b|\bmettl\b|\bhackerrank\b/i.test(subjLower)
+        )) ||
         /selection\s+list|final\s+shortlist|congratulations.*(?:selection\s+list|selects)/i.test(subjLower) ||
         /interview\s+shortlist|shortlist\s+for\s+interview|next\s+round\s+shortlist|shortlisted\s+for\s+next\s+round/i.test(fullText);
 
@@ -627,9 +645,9 @@ export async function processEmailForEventsAndStatus(
         // Check if user had an actual confirmed shortlist match in the database
         const { data: compMatches } = await supabase
           .from('candidate_matches')
-          .select('id, email_id, emails(received_at)')
+          .select('id, email_id, emails!inner(received_at, company_id)')
           .eq('user_id', userId)
-          .eq('company_id', companyId);
+          .eq('emails.company_id', companyId);
 
         const hasConfirmedMatch = compMatches && compMatches.length > 0;
 
@@ -762,10 +780,15 @@ export async function processEmailForEventsAndStatus(
   const appUpdate: Record<string, unknown> = {
     user_id: userId,
     company_id: companyId,
-    last_updated: existingApp?.manual_override && existingApp?.last_updated ? existingApp.last_updated : new Date().toISOString(),
+    // If manual_override was cleared by a neoMatch, refresh last_updated
+    last_updated: (existingApp?.manual_override && !isNeoMatched && existingApp?.last_updated) ? existingApp.last_updated : new Date().toISOString(),
   };
-  if (existingApp?.manual_override) {
+  if (existingApp?.manual_override && !isNeoMatched) {
+    // Preserve manual override only when neoMatch did NOT compute a new status
     appUpdate.manual_override = true;
+  } else if (existingApp?.manual_override && isNeoMatched && newStatus) {
+    // neoMatch found concrete evidence — clear the manual override so future syncs work normally
+    appUpdate.manual_override = false;
   }
 
   const { extractTravelRequirement } = await import('@/lib/sync/events');
@@ -882,6 +905,39 @@ export async function processEmailForEventsAndStatus(
         sourceEmailId: emailDbId,
       });
     }
+  }
+
+  // Extract and populate registration deadline on application
+  const regDeadlineEvt = extractedEvents.find((e) => e.eventType === 'registration_deadline' && e.startTime);
+  if (regDeadlineEvt && regDeadlineEvt.startTime) {
+    appUpdate.registration_deadline = regDeadlineEvt.startTime.toISOString();
+  }
+
+  // If this is a newly discovered company drive from a recent email, notify the candidate
+  const emailAgeMs = email.receivedAt ? Date.now() - new Date(email.receivedAt).getTime() : 0;
+  const isRecentEmail = emailAgeMs <= 48 * 60 * 60 * 1000;
+  const isDriveDiscoveryEmail =
+    ['registration', 'job_announcement', 'drive_announcement'].includes(emailClass) ||
+    Boolean(regDeadlineEvt) ||
+    Boolean(jobDetails.ctc || jobDetails.role);
+  const isInitialApplication = !existingApp || existingApp.status === 'not_applied';
+
+  if (isRecentEmail && isDriveDiscoveryEmail && isInitialApplication) {
+    const { notifyNewDrive } = await import('@/lib/notifications/service');
+    const { getDriveMode } = await import('@/lib/utils');
+    const driveMode = getDriveMode(appUpdate.notes as string);
+    await notifyNewDrive({
+      userId,
+      companyId,
+      companyName: compRecord?.name || 'New Placement Drive',
+      role: (appUpdate.role as string) || jobDetails.role || null,
+      ctc: (appUpdate.ctc as string) || jobDetails.ctc || null,
+      stipend: (appUpdate.stipend as string) || jobDetails.stipend || null,
+      location: (appUpdate.location as string) || resolvedLocation || null,
+      driveMode,
+      category: (appUpdate.category as string) || null,
+      sourceEmailId: emailDbId,
+    });
   }
 
   // Upsert application

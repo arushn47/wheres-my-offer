@@ -516,6 +516,8 @@ const NON_COMPANY_WORDS = [
   'mock test', 'top coders', 'nerd season', 'codeathon', 'course',
   'learning contents', 'reminder', 'q2', 'q2 software', '2027 batch', '2026 batch', 'batch',
   'date change', 'date change for sabre', 'date change for squadstack', 'schedule change', 'venue change',
+  // Generic placement terminology
+  'dream', 'super dream', 'placement', 'drive', 'finance', 'hiring', 'recruitment', 'offer', 'ppo', 'selection', 'shortlist',
   // Role titles / profiles that are never company names
   'ps associate software engineer', 'associate software engineer', 'ps associate engineer',
   'associate engineer', 'software engineer', 'software development engineer',

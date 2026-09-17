@@ -118,6 +118,7 @@ export default function NotificationBell({
           const latest = brandNew[0];
           globalToastedNotificationIds.add(latest.id);
           appToast.notification(latest, (url) => routerRef.current.push(url));
+          routerRef.current.refresh();
         }
       } else {
         globalHasLoadedInitial = true;
@@ -266,6 +267,8 @@ export default function NotificationBell({
         return <Award className="w-4 h-4 text-purple-400" />;
       case 'ppt_scheduled':
         return <Calendar className="w-4 h-4 text-blue-400" />;
+      case 'deadline_approaching':
+        return <Clock className="w-4 h-4 text-amber-400" />;
       case 'status_change':
         return <CheckCircle2 className="w-4 h-4 text-cyan-400" />;
       case 'new_company':

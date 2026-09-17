@@ -47,6 +47,24 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Failed to save subscription' }, { status: 500 });
     }
 
+    // Auto-enable browser push in their global settings if it's currently disabled
+    const { data: settings } = await supabase
+      .from('user_settings')
+      .select('notification_preferences')
+      .eq('user_id', session.userId)
+      .single();
+
+    if (settings) {
+      const prefs = settings.notification_preferences || {};
+      if (!prefs.browserPushEnabled) {
+        prefs.browserPushEnabled = true;
+        await supabase
+          .from('user_settings')
+          .update({ notification_preferences: prefs })
+          .eq('user_id', session.userId);
+      }
+    }
+
     return NextResponse.json({ success: true });
   } catch (err) {
     console.error('[API Push Subscribe] Request error:', err);

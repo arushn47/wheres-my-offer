@@ -219,6 +219,65 @@ export async function notifyShortlistMatch(params: {
 }
 
 /**
+ * Notifies user when a new placement drive / JD is scanned and created.
+ */
+export async function notifyNewDrive(params: {
+  userId: string;
+  companyId: string;
+  companyName: string;
+  role?: string | null;
+  ctc?: string | null;
+  stipend?: string | null;
+  location?: string | null;
+  driveMode?: string | null;
+  category?: string | null;
+  sourceEmailId?: string;
+}) {
+  const {
+    userId,
+    companyId,
+    companyName,
+    role,
+    ctc,
+    stipend,
+    location,
+    driveMode,
+    category,
+    sourceEmailId,
+  } = params;
+
+  const dedupeKey = `new_drive:${userId}:${companyId}`;
+
+  const compCompensation = ctc || stipend || 'Compensation TBA';
+  const roleDisplay = role ? `${role} · ` : '';
+  const categoryTag = category ? `[${category}] ` : '';
+  const modeDisplay = driveMode && driveMode !== 'unknown' ? ` · Mode: ${driveMode}` : '';
+  const locationDisplay = location && location !== 'Not Specified' ? ` · Location: ${location}` : '';
+
+  const title = `🚀 ${categoryTag}New Drive: ${companyName}`;
+  const body = `${roleDisplay}${compCompensation}${modeDisplay}${locationDisplay}`;
+
+  return sendNotification({
+    userId,
+    type: 'new_company',
+    title,
+    body,
+    companyId,
+    link: `/companies/${companyId}`,
+    dedupeKey,
+    pushPayload: {
+      title,
+      body,
+      data: {
+        url: `/companies/${companyId}`,
+        type: 'new_company',
+        companyId,
+      },
+    },
+  });
+}
+
+/**
  * Notifies user when a new test, PPT, or interview event is scheduled.
  */
 export async function notifyEventScheduled(params: {
@@ -231,6 +290,21 @@ export async function notifyEventScheduled(params: {
   eventId?: string;
 }) {
   const { userId, companyId, companyName, eventType, startTime, venue, eventId } = params;
+
+  // Suppress scheduling notifications if candidate is eliminated or opted out
+  const supabase = createAdminClient();
+  const { data: app } = await supabase
+    .from('applications')
+    .select('status')
+    .eq('user_id', userId)
+    .eq('company_id', companyId)
+    .maybeSingle();
+
+  const appStatus = (app?.status || '').toLowerCase();
+  const isEliminated = ['not_shortlisted', 'rejected', 'rejected_test', 'rejected_interview', 'withdrawn', 'declined'].includes(appStatus);
+  if (isEliminated) {
+    return;
+  }
 
   const dateStr = startTime
     ? startTime.toLocaleString('en-IN', {
@@ -261,6 +335,10 @@ export async function notifyEventScheduled(params: {
     title = `📢 ${companyName} — PPT Scheduled`;
     body = `Pre-Placement Talk scheduled for ${dateStr}${venue ? ` at ${venue}` : ''}.`;
     notifType = 'ppt_scheduled';
+  } else if (eventType === 'registration_deadline') {
+    title = `⏰ ${companyName} — Registration Deadline`;
+    body = `Registration closes ${dateStr}. Apply on NeoPAT before the deadline.`;
+    notifType = 'deadline_approaching';
   }
 
   return sendNotification({
@@ -270,7 +348,7 @@ export async function notifyEventScheduled(params: {
     body,
     companyId,
     eventId,
-    link: `/calendar`,
+    link: eventType === 'registration_deadline' ? `/companies/${companyId}` : `/calendar`,
     dedupeKey,
   });
 }
@@ -282,38 +360,70 @@ export async function checkAndNotifyRegistrationDeadlines(userId: string) {
 
     const supabase = createAdminClient();
     const now = Date.now();
-    const { data: deadlines } = await supabase
+    const { data: deadlines, error: deadlinesError } = await supabase
       .from('events')
-      .select('id, company_id, start_time, companies(name), applications!inner(status)')
+      .select('id, company_id, start_time, companies(name)')
       .eq('user_id', userId)
       .eq('event_type', 'registration_deadline')
       .gt('start_time', new Date(now).toISOString());
 
-    for (const event of deadlines || []) {
-      const application = Array.isArray(event.applications) ? event.applications[0] : event.applications;
-      if (application?.status && application.status !== 'not_applied') continue;
+    if (deadlinesError || !deadlines || deadlines.length === 0) return;
+
+    const companyIds = Array.from(new Set(deadlines.map((d) => d.company_id).filter(Boolean)));
+    const { data: apps } = await supabase
+      .from('applications')
+      .select('company_id, status')
+      .eq('user_id', userId)
+      .in('company_id', companyIds);
+
+    const appStatusMap = new Map((apps || []).map((a) => [a.company_id, a.status]));
+    const sortedLeadTimes = [...prefs.reminderLeadTimeMins].sort((a, b) => a - b);
+
+    for (const event of deadlines) {
+      const appStatus = appStatusMap.get(event.company_id);
+      // Only remind if candidate has not applied yet
+      if (appStatus && appStatus !== 'not_applied') continue;
 
       const deadlineTime = new Date(event.start_time).getTime();
+      const remainingMs = deadlineTime - now;
+      if (remainingMs <= 0) continue;
+
+      const remainingMins = remainingMs / (60 * 1000);
       const company = Array.isArray(event.companies) ? event.companies[0] : event.companies;
       const companyName = company?.name || 'Placement Drive';
 
-      for (const leadMinutes of prefs.reminderLeadTimeMins) {
-        const deltaMinutes = (deadlineTime - now) / 60000;
-        if (deltaMinutes > leadMinutes || deltaMinutes < leadMinutes - 15) continue;
+      for (const leadMinutes of sortedLeadTimes) {
+        if (remainingMins <= leadMinutes) {
+          const dedupeKey = `deadline:${userId}:${event.id}:${leadMinutes}`;
+          const approxTimeStr =
+            remainingMins < 60
+              ? `${Math.max(1, Math.round(remainingMins))} min`
+              : remainingMins < 120
+              ? `~1 hour`
+              : `~${Math.round(remainingMins / 60)} hours`;
 
-        const dateStr = new Date(event.start_time).toLocaleString('en-IN', {
-          month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true,
-        });
-        await sendNotification({
-          userId,
-          type: 'deadline_approaching',
-          title: `${companyName} — Registration Deadline Approaching`,
-          body: `Registration closes ${dateStr}. Apply on NeoPAT before the deadline.`,
-          companyId: event.company_id,
-          eventId: event.id,
-          link: `/companies/${event.company_id}`,
-          dedupeKey: `deadline:${userId}:${event.company_id}:${event.start_time}:${leadMinutes}`,
-        });
+          const dateStr = new Date(event.start_time).toLocaleDateString('en-IN', {
+            month: 'short',
+            day: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: true,
+          });
+
+          await sendNotification({
+            userId,
+            type: 'deadline_approaching',
+            title: `⏰ ${companyName} — Registration Deadline Approaching`,
+            body: `Registration closes ${dateStr} (in ${approxTimeStr}). Apply on NeoPAT before the deadline.`,
+            companyId: event.company_id,
+            eventId: event.id,
+            link: `/companies/${event.company_id}`,
+            dedupeKey,
+          });
+
+          // Break to trigger only the closest applicable reminder bucket on this tick
+          break;
+        }
       }
     }
   } catch (err: any) {
@@ -371,7 +481,34 @@ export async function checkAndNotifyLiveEvents(userId: string) {
 
     if (!liveEvents || liveEvents.length === 0) return;
 
+    // Fetch application statuses for these companies to check candidate participation
+    const companyIds = [...new Set(liveEvents.map((e) => e.company_id))];
+    const { data: apps } = await supabase
+      .from('applications')
+      .select('company_id, status')
+      .eq('user_id', userId)
+      .in('company_id', companyIds);
+
+    const appStatusMap = new Map((apps || []).map((a) => [a.company_id, (a.status || '').toLowerCase()]));
+
     for (const ev of liveEvents) {
+      const appStatus = appStatusMap.get(ev.company_id) || 'not_applied';
+
+      // Suppress live notifications if the user was eliminated, opted out, or not applied
+      const isEliminatedOrOptedOut = [
+        'not_shortlisted',
+        'rejected',
+        'rejected_test',
+        'rejected_interview',
+        'withdrawn',
+        'declined',
+        'not_applied',
+      ].includes(appStatus);
+
+      if (isEliminatedOrOptedOut) {
+        continue;
+      }
+
       const compName = (ev as any).companies?.name || 'Company';
       const dedupeKey = `live_event:${userId}:${ev.id}`;
       let title = `🔴 ${compName} — Placement Round Starting Now`;

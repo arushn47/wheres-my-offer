@@ -188,8 +188,8 @@ export function parseDateTimeWithConfidence(
   }
 
   const timeMatch =
-    timeText.match(/(?:by|at|@|from|is\s+at)?\s*(\d{1,2})(?::|\.)?(\d{2})?\s*(am|pm|a\.m\.|p\.m\.|p\b|a\b)/i) ||
-    timeText.match(/(?:by|at|@|from|is\s+at)\s*(\d{1,2})(?::|\.)(\d{2})\s*(?:hours|hrs|sharp)?/i);
+    timeText.match(/(?:by|at|@|from|is\s+at)?\s*\(?\s*(\d{1,2})(?::|\.)?(\d{2})?\s*(am|pm|a\.m\.|p\.m\.|p\b|a\b)/i) ||
+    timeText.match(/(?:by|at|@|from|is\s+at)\s*\(?\s*(\d{1,2})(?::|\.)(\d{2})\s*(?:hours|hrs|sharp)?/i);
 
   if (timeMatch) {
     let h = parseInt(timeMatch[1], 10);
@@ -266,14 +266,18 @@ export function extractEvents(email: ParsedEmail): ExtractedEvent[] {
   const refDate = email.receivedAt ? new Date(email.receivedAt) : new Date();
 
   // 0. Check for Registration Deadline or Form/Preference Submission Deadline
-  const formOrRegDeadlineMatch = cleanNormalizedText.match(
-    /(?:fill\s*(?:out|in)?\s*(?:the\s*)?(?:google\s*form|form|preference\s*form|survey)|submit\s*(?:the\s*)?(?:google\s*form|form|preference\s*form)|location\s*preference[\s\S]{0,50}?google\s*form)[\s\S]{0,100}?(?:on\s+or\s+before|by|before)\s*[:\-–—\t]*\s*([\d\.\-/\s\w]+?(?:am|pm|\d{4}))/i
-  ) || cleanNormalizedText.match(
-    /(?:last\s+date\s+for\s+registration|registration\s+deadline|register\s+(?:in\s+the\s+neo\s*pat\s+)?on\s+or\s+before)\s*[:\-–—\t]*\s*([\d\.\-/\s\w]+?(?:am|pm|\d{4}))(?:\s+(?:website|job|eligibility|jd|note|mandatory)|$)/i
-  );
+  const formOrRegDeadlineMatch =
+    cleanNormalizedText.match(
+      /(?:fill\s*(?:out|in)?\s*(?:the\s*)?(?:google\s*form|form|preference\s*form|survey)|submit\s*(?:the\s*)?(?:google\s*form|form|preference\s*form)|location\s*preference[\s\S]{0,50}?google\s*form)[\s\S]{0,100}?(?:on\s+or\s+before|by|before)\s*[:\-–—\t]*\s*([^\n\r]{1,80})/i
+    ) ||
+    cleanNormalizedText.match(
+      /(?:last\s+date\s+for\s+registration|registration\s+deadline|register\s+(?:in\s+the\s+neo\s*pat\s+)?on\s+or\s+before|apply\s+before)\s*[:\-–—\t]*\s*([^\n\r]{1,80})/i
+    );
 
   if (formOrRegDeadlineMatch && formOrRegDeadlineMatch[1]) {
-    const parsed = parseDateTimeWithConfidence(formOrRegDeadlineMatch[1].trim(), refDate);
+    const rawCandidate = formOrRegDeadlineMatch[1].replace(/[*_`>#]/g, ' ').trim();
+    const cleanCandidate = rawCandidate.split(/\b(?:website|job|eligibility|jd|note|mandatory|no\s+manual)\b/i)[0].trim();
+    const parsed = parseDateTimeWithConfidence(cleanCandidate, refDate);
     if (parsed.date) {
       const isLocPref = /location\s*preference|preference\s*form/i.test(cleanNormalizedText);
       const isGForm = /google\s*form|survey/i.test(cleanNormalizedText);
@@ -447,7 +451,7 @@ export function extractEvents(email: ParsedEmail): ExtractedEvent[] {
     const isTech = /technical/i.test(cleanNormalizedText);
     const isHr = /\bhr\b|human\s+resource/i.test(cleanNormalizedText);
     const interviewMatch = cleanNormalizedText.match(
-      /(?:interview|personal\s+discussion)\s*(?:is\s+scheduled)?\s*[:\-–—]?\s*(?:on\s+)?\(?(.{1,120})/i
+      /(?:interview|personal\s+discussion|next\s+round\s+of\s+(?:the\s+)?(?:selection\s+process|selection|process)|physical\s+selection\s+process|selection\s+process)\s*(?:is\s+scheduled)?\s*[:\-–—]?\s*(?:from|on)?\s*\(?(.{1,120})/i
     );
     const snippetForInterview = interviewMatch ? interviewMatch[0] : cleanNormalizedText;
     const parsed = parseDateTimeWithConfidence(snippetForInterview, refDate);
@@ -455,7 +459,7 @@ export function extractEvents(email: ParsedEmail): ExtractedEvent[] {
     const hasExplicitDateInText =
       parsed.hasExplicitTime ||
       /\b(?:\d{1,2}(?:st|nd|rd|th)?\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)|\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}|tomm|tomorrow|tmrw)\b/i.test(snippetForInterview);
-    const isExplicitlyScheduled = /(?:interview)\s+(?:is\s+)?scheduled\s+on/i.test(cleanNormalizedText);
+    const isExplicitlyScheduled = /(?:interview|selection\s+process|next\s+round)\s+(?:is\s+)?scheduled/i.test(cleanNormalizedText);
 
     if (parsed.date && (hasExplicitDateInText || isExplicitlyScheduled)) {
       const venue = extractVenue(cleanNormalizedText);
@@ -604,18 +608,21 @@ export function extractTravelRequirement(text: string): TravelRequirement {
   const scheduleMatch = clean.match(/(?:Date\s+of\s+Visit|Process\s+details|Process\s+schedule|Hiring\s+process)[\s\S]{1,600}?(?=(?:Eligible|Eligibility|CTC|Stipend|Selection|Website|Last\s+date)|$)/i);
   const targetText = scheduleMatch ? scheduleMatch[0] : clean;
 
-  // 2. Bhopal exemption / deferred schedule check:
+  // 2. Bhopal exemption / deferred schedule / virtual mode check:
   // e.g. "Virtual Interview : 31st August 2026 (AP & Bhopal Campus Students)"
+  // or "Interview Date: ... @ VIT Vellore campus (** VIT AP & VIT Bhopal shortlist in virtual mode)"
   // or "Amaravati and Bhopal campus students test dates will be confirmed shortly"
-  const isBhopalExemptOrDeferred =
+  const isBhopalVirtualOrExempt =
     /virtual\s+interview[^(]*?\(\s*(?:ap\s*&?\s*)?bhopal/i.test(targetText) ||
+    /(?:vit\s+ap\s*(?:&|and)\s*)?vit\s+bhopal[^\n)]*?(?:in\s+virtual\s+mode|virtual|online)/i.test(targetText) ||
+    /bhopal[^\n)]*?(?:shortlist\s+in\s+virtual\s+mode|in\s+virtual\s+mode)/i.test(targetText) ||
     /(?:amaravati\s+and\s+)?bhopal\s+campus\s+students\s+test\s+dates?\s+will\s+be\s+confirmed\s+shortly/i.test(clean) ||
     /bhopal\s+campus\s+students[^.\n]*?(?:confirmed\s+shortly|wait\s+for\s+the\s+update|separate\s+schedule|dates?\s+will\s+be\s+announced)/i.test(clean);
 
-  if (isBhopalExemptOrDeferred) {
+  if (isBhopalVirtualOrExempt) {
+    if (/@\s*respective\s+campus\s+(?:venues|labs|campuses)|in\s+campus\s+lab|conducted\s+on-campus/i.test(clean)) return 'bhopal';
     if (/virtual|online/i.test(targetText)) return 'online';
-    if (/@\s*respective\s+campus\s+labs|in\s+campus\s+lab|conducted\s+on-campus/i.test(clean)) return 'bhopal';
-    return null;
+    return 'bhopal';
   }
 
   // 3. Explicit Travel to Vellore check (e.g. "Interview : @ Physical VIT Vellore campus", "24th Sep Physical process - at VIT Vellore")
