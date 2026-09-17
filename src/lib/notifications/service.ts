@@ -111,8 +111,10 @@ export async function sendNotification(
 
     if (insertError) {
       if (insertError.code === '23505') {
-        // Unique constraint violation on dedupe_key -> In-app was already recorded, continue to push!
+        // The notification was already delivered for this dedupe key.
+        // Do not send another push on the next cron tick.
         inAppCreated = false;
+        return { inAppCreated: false, pushSent: false };
       } else {
         console.error('[Notification Service] In-app insert error:', insertError);
       }

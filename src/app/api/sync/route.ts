@@ -109,15 +109,6 @@ export async function POST() {
       } finally {
         clearInterval(keepAliveTimer);
         controller.close();
-
-        // Fire notification checks AFTER stream is closed — don't block UI completion signal
-        try {
-          const { checkAndNotifyLiveEvents, checkAndNotifyRegistrationDeadlines } = await import('@/lib/notifications/service');
-          await checkAndNotifyLiveEvents(session.userId);
-          await checkAndNotifyRegistrationDeadlines(session.userId);
-        } catch (notifErr) {
-          console.warn('[Sync API] Post-sync notification check error:', notifErr);
-        }
       }
     },
   });
