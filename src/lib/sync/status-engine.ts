@@ -450,6 +450,7 @@ export async function processEmailForEventsAndStatus(
             startTime: event.startTime,
             venue: event.venue,
             eventId: insertedEvt.id,
+            candidateConfirmed: isNeoMatched,
           });
         }
       }

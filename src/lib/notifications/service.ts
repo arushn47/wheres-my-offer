@@ -290,8 +290,18 @@ export async function notifyEventScheduled(params: {
   startTime: Date | null;
   venue?: string | null;
   eventId?: string;
+  candidateConfirmed?: boolean;
 }) {
-  const { userId, companyId, companyName, eventType, startTime, venue, eventId } = params;
+  const {
+    userId,
+    companyId,
+    companyName,
+    eventType,
+    startTime,
+    venue,
+    eventId,
+    candidateConfirmed = false,
+  } = params;
 
   // Suppress scheduling notifications if candidate is eliminated or opted out
   const supabase = createAdminClient();
@@ -304,7 +314,14 @@ export async function notifyEventScheduled(params: {
 
   const appStatus = (app?.status || '').toLowerCase();
   const isEliminated = ['not_shortlisted', 'rejected', 'rejected_test', 'rejected_interview', 'withdrawn', 'declined'].includes(appStatus);
-  if (isEliminated) {
+  const isTestOrInterview = ['online_test', 'coding_test', 'technical_interview', 'hr_interview', 'final_interview'].includes(eventType);
+  const hasEligibleStage = eventType === 'ppt'
+    ? ['applied', 'ppt_scheduled', 'shortlisted', 'test_scheduled', 'interview_scheduled'].includes(appStatus)
+    : ['shortlisted', 'test_scheduled', 'test_ongoing', 'test_completed', 'interview_scheduled', 'interview_completed', 'selected', 'offer_received'].includes(appStatus);
+
+  // A test/interview announcement is not proof that this candidate qualified.
+  // Require either a confirmed shortlist match or an already advanced status.
+  if (isEliminated || (isTestOrInterview && !candidateConfirmed && !hasEligibleStage)) {
     return;
   }
 
@@ -511,12 +528,24 @@ export async function checkAndNotifyLiveEvents(userId: string) {
         continue;
       }
 
+      const evType = (ev.event_type || '').toLowerCase();
+      const isTestEvent = ['online_test', 'coding_test'].includes(evType);
+      const isInterviewEvent = ['technical_interview', 'hr_interview', 'final_interview'].includes(evType);
+      const hasEligibleStage = isTestEvent
+        ? ['shortlisted', 'test_scheduled', 'test_ongoing', 'test_completed'].includes(appStatus)
+        : isInterviewEvent
+        ? ['interview_scheduled', 'interview_completed', 'selected', 'offer_received'].includes(appStatus)
+        : true;
+
+      if (!hasEligibleStage) {
+        continue;
+      }
+
       const compName = (ev as any).companies?.name || 'Company';
       const dedupeKey = `live_event:${userId}:${ev.id}`;
       let title = `🔴 ${compName} — Placement Round Starting Now`;
       let body = `Your event for ${compName} has commenced. Best of luck!`;
 
-      const evType = (ev.event_type || '').toLowerCase();
       if (/test|coding|assessment|hackerearth|mettl|shl/i.test(evType)) {
         title = `📝 ${compName} — Assessment Live Now`;
         body = `Your online test for ${compName} is live. Check your test platform link and begin.`;
