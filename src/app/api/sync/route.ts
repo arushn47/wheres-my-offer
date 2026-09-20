@@ -10,7 +10,7 @@ export const maxDuration = 60; // 60s — maximum allowed on Vercel Hobby plan (
  * Triggers a manual email sync for the authenticated user.
  * Returns a Server-Sent Events (SSE) stream with real-time progress updates.
  */
-export async function POST() {
+export async function POST(req: Request) {
   const session = await getSession();
   if (!session) {
     return new Response(
@@ -19,30 +19,61 @@ export async function POST() {
     );
   }
 
-  // Create a readable stream for SSE
+  // Create a readable stream for SSE with explicit lifecycle cleanup
   const encoder = new TextEncoder();
+  let isClosed = false;
+  let keepAliveTimer: NodeJS.Timeout | null = null;
+  let streamController: ReadableStreamDefaultController | null = null;
+
+  const cleanup = () => {
+    if (isClosed) return;
+    isClosed = true;
+    if (keepAliveTimer) {
+      clearInterval(keepAliveTimer);
+      keepAliveTimer = null;
+    }
+    if (streamController) {
+      try {
+        streamController.close();
+      } catch {
+        // Stream may already be closed or errored
+      }
+      streamController = null;
+    }
+  };
+
+  // Explicitly listen to client disconnection/abort to teardown resources immediately
+  if (req.signal.aborted) {
+    cleanup();
+  } else {
+    req.signal.addEventListener('abort', cleanup, { once: true });
+  }
+
   const stream = new ReadableStream({
     async start(controller) {
-      let isClosed = false;
+      streamController = controller;
+
       const sendEvent = (event: string, data: unknown) => {
-        if (isClosed) return;
+        if (isClosed || req.signal.aborted) return;
         try {
           const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
           controller.enqueue(encoder.encode(payload));
         } catch {
-          // Stream was closed by the client (timeout / disconnect) — keep sync running silently
-          isClosed = true;
+          // Stream was closed by the client (timeout / disconnect)
+          cleanup();
         }
       };
 
       // Keep-alive heartbeat ping every 2s so Vercel edge proxy never drops the SSE stream
-      const keepAliveTimer = setInterval(() => {
-        if (isClosed) return;
+      keepAliveTimer = setInterval(() => {
+        if (isClosed || req.signal.aborted) {
+          cleanup();
+          return;
+        }
         try {
           controller.enqueue(encoder.encode(': keep-alive\n\n'));
         } catch {
-          isClosed = true;
-          clearInterval(keepAliveTimer);
+          cleanup();
         }
       }, 2000);
 
@@ -107,17 +138,22 @@ export async function POST() {
           message: errorMessage,
         });
       } finally {
-        clearInterval(keepAliveTimer);
-        controller.close();
+        cleanup();
       }
+    },
+    cancel() {
+      // Invoked when consumer cancels/aborts the readable stream
+      cleanup();
     },
   });
 
   return new Response(stream, {
     headers: {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
       Connection: 'keep-alive',
+      'Content-Encoding': 'none',
+      'X-Accel-Buffering': 'no',
     },
   });
 }

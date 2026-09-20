@@ -17,9 +17,9 @@ export default async function DashboardPage() {
   const session = await requireSession();
   const supabase = createAdminClient();
 
-  // Fetch stats and active applications
+  // Fetch stats, drives, applications, events, and user context
   const [
-    { count: totalCompanies },
+    { data: placementDrives },
     { data: applications },
     { data: rawUpcomingEvents },
     { data: accounts },
@@ -27,17 +27,17 @@ export default async function DashboardPage() {
     { data: candidateMatches },
   ] = await Promise.all([
     supabase
-      .from('companies')
-      .select('*', { count: 'exact', head: true })
+      .from('placement_drives')
+      .select('id, company_id, drive_number, drive_name, role, category, ctc, stipend, location, companies(id, name)')
       .eq('user_id', session.userId),
     supabase
       .from('applications')
-      .select('id, status, role, category, ctc, stipend, location, notes, manual_override, last_updated, company_id, registration_deadline, companies(id, name)')
+      .select('id, status, role, category, ctc, stipend, location, notes, manual_override, last_updated, placement_drive_id, registration_deadline')
       .eq('user_id', session.userId)
       .order('last_updated', { ascending: false }),
     supabase
       .from('events')
-      .select('id, company_id, event_type, title, start_time, end_time, venue, mode')
+      .select('id, placement_drive_id, event_type, title, start_time, end_time, venue, mode')
       .eq('user_id', session.userId)
       .order('start_time', { ascending: true }),
     supabase
@@ -51,19 +51,29 @@ export default async function DashboardPage() {
       .single(),
     supabase
       .from('candidate_matches')
-      .select('email_id, emails(company_id)')
+      .select('id, email_id, placement_drive_id')
       .eq('user_id', session.userId)
       .neq('match_type', 'xlsx_applied_list'),
   ]);
 
   const nowIso = new Date().toISOString();
 
+  const driveMap = new Map((placementDrives || []).map((d: any) => [d.id, d]));
+  const companyNameMap = new Map<string, string>();
+  for (const d of (placementDrives || []) as any[]) {
+    if (d.companies?.name) {
+      companyNameMap.set(d.id, d.companies.name);
+    }
+  }
+
   const stats = {
-    total_companies: totalCompanies || 0,
+    total_companies: placementDrives?.length || 0,
     active_applications: 0,
     total_applied: 0,
     applied: 0,
     shortlisted: 0,
+    total_shortlisted: 0,
+    active_shortlisted: 0,
     not_shortlisted: 0,
     upcoming_tests: 0,
     upcoming_interviews: 0,
@@ -75,28 +85,73 @@ export default async function DashboardPage() {
   const nonAppliedStatuses = ['not_applied', 'withdrawn', 'declined'];
   const appStatusMap = new Map<string, string>();
 
-  if (applications) {
-    for (const app of applications as any[]) {
-      appStatusMap.set(app.company_id, app.status);
-      if (!nonAppliedStatuses.includes(app.status)) stats.total_applied++;
-      // Count as "active" if in an active status OR if it has a future registration deadline (registration_open)
-      const hasRegistrationOpen = (app.status === 'not_applied' || !app.status) &&
-        app.registration_deadline && app.registration_deadline > nowIso;
-      if (!isInactiveStatus(app.status) || hasRegistrationOpen) stats.active_applications++;
-      if (app.status === 'applied') stats.applied++;
-      if (['shortlisted', 'test_scheduled', 'test_completed', 'interview_scheduled', 'interview_completed'].includes(app.status)) stats.shortlisted++;
-      if (app.status === 'not_shortlisted') stats.not_shortlisted++;
-      if (isEliminatedStatus(app.status)) stats.rejected++;
-      if (app.status === 'withdrawn' || app.status === 'declined') stats.withdrawn++;
-      if (['selected', 'offer', 'offer_received'].includes(app.status)) stats.selected++;
-    }
-  }
-
   const shortlistedCompanyIds = new Set(
     (candidateMatches || [])
-      .map((cm: any) => cm.emails?.company_id)
+      .map((cm: any) => cm.placement_drive_id)
       .filter(Boolean)
   );
+
+  const testOrInterviewCompanyIds = new Set(
+    (rawUpcomingEvents || [])
+      .filter((e: any) => /test|coding|assessment|interview/i.test(e.event_type || ''))
+      .map((e: any) => e.placement_drive_id)
+  );
+
+  if (applications) {
+    for (const app of applications as any[]) {
+      const s = (app.status || '').toLowerCase();
+      const notes = app.notes || '';
+      appStatusMap.set(app.placement_drive_id, app.status);
+
+      const isApplied = !nonAppliedStatuses.includes(s);
+      if (isApplied) stats.total_applied++;
+
+      // Count as "active" if in an active status OR if it has a future registration deadline (registration_open)
+      const hasRegistrationOpen = (s === 'not_applied' || !s) &&
+        app.registration_deadline && app.registration_deadline > nowIso;
+      if (!isInactiveStatus(s) || hasRegistrationOpen) stats.active_applications++;
+
+      if (s === 'applied') stats.applied++;
+
+      const isShortlistStage = [
+        'shortlisted',
+        'test',
+        'test_scheduled',
+        'test_ongoing',
+        'test_completed',
+        'interview',
+        'interview_scheduled',
+        'interview_ongoing',
+        'interview_completed',
+        'selected',
+        'offer',
+        'offer_received',
+      ].includes(s);
+
+      const hasRoundEvent = testOrInterviewCompanyIds.has(app.placement_drive_id);
+      const hasEliminatedRoundNote = /eliminated in (test|interview|assessment)/i.test(notes) ||
+        s === 'rejected_test' || s === 'rejected_interview' || s === 'test_eliminated' || s === 'interview_eliminated';
+
+      // Candidate cracked shortlist if they progressed into test/interview rounds (or got matched in shortlist)
+      const identity = app.placement_drive_id;
+      const isCracked = (isShortlistStage || hasEliminatedRoundNote || (isApplied && (shortlistedCompanyIds.has(identity) || hasRoundEvent))) && isApplied;
+
+      if (isCracked) {
+        stats.total_shortlisted++;
+        const isActiveInRound = isShortlistStage && !isEliminatedStatus(s);
+        if (isActiveInRound) {
+          stats.active_shortlisted++;
+        }
+      }
+
+      if (s === 'not_shortlisted' || (s === 'rejected' && !isCracked)) stats.not_shortlisted++;
+      if (isEliminatedStatus(s)) stats.rejected++;
+      if (s === 'withdrawn' || s === 'declined') stats.withdrawn++;
+      if (['selected', 'offer', 'offer_received'].includes(s)) stats.selected++;
+    }
+
+    stats.shortlisted = stats.total_shortlisted;
+  }
 
   // Define what event types belong to which pipeline stage (in order)
   const EVENT_STAGE: Record<string, number> = {
@@ -127,16 +182,15 @@ export default async function DashboardPage() {
     withdrawn: 0,
   };
 
-  // Deduplicate upcoming events by (company_id, event_type, date) and filter out eliminated companies
+  // Deduplicate upcoming events by (placement_drive_id, event_type, date) and filter out eliminated companies
   const uniqueUpcomingEvents: NonNullable<typeof rawUpcomingEvents> = [];
   const seenEventKeys = new Set<string>();
-
 
   if (rawUpcomingEvents) {
     for (const event of rawUpcomingEvents) {
       if (event.start_time && event.start_time < nowIso) continue;
 
-      const companyStatus = appStatusMap.get(event.company_id) || 'unknown';
+      const companyStatus = appStatusMap.get(event.placement_drive_id) || 'unknown';
 
       // Registration Deadline rule:
       // Keep it in upcoming events only if user hasn't applied yet
@@ -160,7 +214,7 @@ export default async function DashboardPage() {
       }
 
       // Deduplicate: 1 single timing per event stage
-      const key = `${event.company_id}:${event.event_type}`;
+      const key = `${event.placement_drive_id}:${event.event_type}`;
       if (!seenEventKeys.has(key)) {
         seenEventKeys.add(key);
         uniqueUpcomingEvents.push(event);
@@ -175,12 +229,12 @@ export default async function DashboardPage() {
   if (applications) {
     for (const a of applications as any[]) {
       if (a.registration_deadline && a.registration_deadline > nowIso && (a.status === 'not_applied' || a.status === 'unknown')) {
-        const key = `${a.company_id}:registration_deadline`;
+        const key = `${a.placement_drive_id}:registration_deadline`;
         if (!seenEventKeys.has(key)) {
           seenEventKeys.add(key);
           uniqueUpcomingEvents.push({
-            id: `reg_${a.company_id}`,
-            company_id: a.company_id,
+            id: `reg_${a.placement_drive_id}`,
+            placement_drive_id: a.placement_drive_id,
             event_type: 'registration_deadline',
             title: 'Registration Deadline',
             start_time: a.registration_deadline,
@@ -199,25 +253,18 @@ export default async function DashboardPage() {
     return tA - tB;
   });
 
-  const companyNameMap = new Map<string, string>();
-  if (applications) {
-    for (const a of applications as any[]) {
-      if (a.companies?.name) companyNameMap.set(a.company_id, a.companies.name);
-    }
-  }
-
   // Only pass top 6 to DashboardClient to avoid UI clutter, enriched with companyName
   const topUpcomingEvents = uniqueUpcomingEvents.slice(0, 6).map((e) => ({
     ...e,
-    companyName: companyNameMap.get(e.company_id) || 'Campus Drive',
+    companyName: companyNameMap.get(e.placement_drive_id) || 'Campus Drive',
   }));
 
   const eventsByCompany = new Map<string, any[]>();
   if (rawUpcomingEvents) {
     for (const ev of rawUpcomingEvents) {
-      const list = eventsByCompany.get(ev.company_id) || [];
+      const list = eventsByCompany.get(ev.placement_drive_id) || [];
       list.push(ev);
-      eventsByCompany.set(ev.company_id, list);
+      eventsByCompany.set(ev.placement_drive_id, list);
     }
   }
 
@@ -233,22 +280,25 @@ export default async function DashboardPage() {
   const branch = detectBranch(collegeEmail);
 
   const allAppsList = (applications || []).map((a: any) => {
-    const compEvents = eventsByCompany.get(a.company_id) || [];
+    const compEvents = eventsByCompany.get(a.placement_drive_id) || [];
     const latestEvent = compEvents[compEvents.length - 1] || null;
     const { effectiveStatus, statusSubtitle } = getEffectiveStage(a.status, latestEvent, compEvents, a.notes, a.manual_override);
+    const drive = driveMap.get(a.placement_drive_id);
+    const companyId = drive?.company_id || a.placement_drive_id;
+    const companyName = drive?.companies?.name || 'Company';
 
     return {
       id: a.id,
-      companyId: a.company_id,
-      companyName: a.companies?.name || 'Company',
+      companyId,
+      companyName,
       companyLogo: null,
       status: effectiveStatus,
       statusSubtitle,
-      role: a.role,
-      ctc: a.ctc,
-      stipend: a.stipend,
-      location: a.location,
-      category: a.category,
+      role: a.role || drive?.role || null,
+      ctc: a.ctc || drive?.ctc || null,
+      stipend: a.stipend || drive?.stipend || null,
+      location: a.location || drive?.location || null,
+      category: a.category || drive?.category || null,
       notes: a.notes,
       driveMode: getDriveMode(a.notes, campus),
       lastUpdated: a.last_updated,

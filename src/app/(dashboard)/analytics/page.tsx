@@ -21,6 +21,7 @@ export default async function AnalyticsPage() {
     { data: applications },
     { data: events },
     { data: companies },
+    { data: placementDrives },
     { count: emailsCount },
     { data: candidateMatches },
     { data: userProfile },
@@ -28,16 +29,20 @@ export default async function AnalyticsPage() {
   ] = await Promise.all([
     supabase
       .from('applications')
-      .select('id, company_id, status, notes, ctc, stipend, category, applied_at, last_updated')
+      .select('id, placement_drive_id, status, notes, ctc, stipend, category, applied_at, last_updated')
       .eq('user_id', session.userId),
     supabase
       .from('events')
-      .select('id, company_id, event_type, start_time')
+      .select('id, placement_drive_id, event_type, start_time')
       .eq('user_id', session.userId)
       .order('start_time', { ascending: true }),
     supabase
       .from('companies')
       .select('id, name')
+      .eq('user_id', session.userId),
+    supabase
+      .from('placement_drives')
+      .select('id')
       .eq('user_id', session.userId),
     supabase
       .from('emails')
@@ -66,12 +71,12 @@ export default async function AnalyticsPage() {
     if (matchedEmailIds.length > 0) {
       const { data: matchedEmails } = await supabase
         .from('emails')
-        .select('company_id')
+        .select('placement_drive_id')
         .in('id', matchedEmailIds);
-      const uniqueCompanyIds = new Set(
-        (matchedEmails || []).map((e) => e.company_id).filter(Boolean)
+      const uniqueMatchIds = new Set(
+        (matchedEmails || []).map((e) => e.placement_drive_id).filter(Boolean)
       );
-      uniqueMatchesCount = uniqueCompanyIds.size;
+      uniqueMatchesCount = uniqueMatchIds.size;
     }
   }
 
@@ -79,13 +84,19 @@ export default async function AnalyticsPage() {
   const personalEmail = accounts?.find((a) => a.account_type === 'personal')?.email || session.email;
   const campus = detectCampus(collegeEmail || personalEmail);
   const branch = detectBranch(collegeEmail);
+  const driveEntityCount = new Set([
+    ...(placementDrives || []).map((drive) => `drive:${drive.id}`),
+    ...(applications || [])
+      .filter((application) => !application.placement_drive_id)
+      .map((application) => `legacy:${application.placement_drive_id}`),
+  ]).size;
 
   return (
     <div className="mx-auto max-w-6xl w-full">
       <AnalyticsClient
         applications={applications || []}
         events={events || []}
-        companiesCount={companies?.length || 0}
+        companiesCount={driveEntityCount}
         emailsCount={emailsCount || 0}
         matchesCount={candidateMatches?.length || 0}
         uniqueMatchesCount={uniqueMatchesCount}

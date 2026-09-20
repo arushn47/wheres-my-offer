@@ -1,4 +1,5 @@
 import type { ParsedEmail } from '@/lib/gmail/client';
+import { stripQuotedContent } from '@/lib/sync/body';
 
 export interface ExtractedEvent {
   eventType:
@@ -27,6 +28,14 @@ export interface ExtractedJobDetails {
   ctc: string | null;
   stipend: string | null;
   location: string | null;
+  eligibility: string | null;
+  branches: string[] | null;
+  cgpaRequirement: string | null;
+  tenthRequirement: string | null;
+  twelfthRequirement: string | null;
+  ugRequirement: string | null;
+  pgRequirement: string | null;
+  backlogRequirement: string | null;
   neoIdMatched: boolean;
   matchedNeoIdValue: string | null;
 }
@@ -36,9 +45,10 @@ export interface ExtractedJobDetails {
  */
 export function extractDriveNumber(text: string): string | null {
   if (!text) return null;
+  const currentText = stripQuotedContent(text);
   const m =
-    text.match(/\b(pat-[A-Za-z0-9]+-\d{4}-\d{3,6})\b/i) ||
-    text.match(/drive\s+number\s*[:\-–—\t]?\s*([a-z0-9\-_]+)/i);
+    currentText.match(/\b(pat-[A-Za-z0-9]+-\d{4}-\d{1,6})\b/i) ||
+    currentText.match(/drive\s+number\s*[:\-–—\t]?\s*([a-z0-9\-_]+)/i);
   return m ? m[1].trim() : null;
 }
 
@@ -49,16 +59,17 @@ export function extractDriveNumber(text: string): string | null {
  */
 export function extractAllDriveNumbers(text: string): string[] {
   if (!text) return [];
+  const currentText = stripQuotedContent(text);
   const results: string[] = [];
   // Match all pat-* style drive IDs
-  const patPattern = /\b(pat-[A-Za-z0-9]+-\d{4}-\d{3,6})\b/gi;
+  const patPattern = /\b(pat-[A-Za-z0-9]+-\d{4}-\d{1,6})\b/gi;
   let m: RegExpExecArray | null;
-  while ((m = patPattern.exec(text)) !== null) {
+  while ((m = patPattern.exec(currentText)) !== null) {
     results.push(m[1].trim().toLowerCase());
   }
   // Match "drive number: <token>" style references
   const driveNumPattern = /drive\s+number\s*[:\-–—\t]?\s*([a-z0-9\-_]+)/gi;
-  while ((m = driveNumPattern.exec(text)) !== null) {
+  while ((m = driveNumPattern.exec(currentText)) !== null) {
     const candidate = m[1].trim().toLowerCase();
     if (!results.includes(candidate)) results.push(candidate);
   }
@@ -188,27 +199,26 @@ export function parseDateTimeWithConfidence(
   }
 
   const timeMatch =
-    timeText.match(/(?:by|at|@|from|is\s+at)?\s*\(?\s*(\d{1,2})(?::|\.)?(\d{2})?\s*(am|pm|a\.m\.|p\.m\.|p\b|a\b)/i) ||
+    timeText.match(/(?:by|at|@|from|is\s+at)?\s*\(?\s*(\d{1,2})(?::|\.)?(\d{2})?\s*(am|pm|a\.m\.|p\.m\.|noon|p\b|a\b)/i) ||
     timeText.match(/(?:by|at|@|from|is\s+at)\s*\(?\s*(\d{1,2})(?::|\.)(\d{2})\s*(?:hours|hrs|sharp)?/i);
 
   if (timeMatch) {
     let h = parseInt(timeMatch[1], 10);
     const indicator = timeMatch[3] ? timeMatch[3].toLowerCase() : '';
-    const isPm = indicator.startsWith('p');
+    const isPm = indicator.startsWith('p') || indicator === 'noon';
     if (isPm && h < 12) h += 12;
-    if (!isPm && indicator && h === 12) h = 0;
+    if (!isPm && indicator && indicator !== 'noon' && h === 12) h = 0;
     hours = h;
     if (timeMatch[2]) minutes = parseInt(timeMatch[2], 10);
     hasExplicitTime = true;
   }
 
-  // 4. If no explicit calendar date was found, check relative words or fallback to email received date
+  // 4. If no explicit calendar date was found, only resolve supported relative dates.
   if (day === null || month === null) {
-    if (fallbackDate) {
+    const hasRecognizedRelativeDate = /tomm|tomorrow|tmrw|next\s+day/i.test(text);
+    if (fallbackDate && hasRecognizedRelativeDate) {
       const ref = new Date(fallbackDate);
-      if (/tomm|tomorrow|tmrw|next\s+day/i.test(text)) {
-        ref.setDate(ref.getDate() + 1);
-      }
+      ref.setDate(ref.getDate() + 1);
       day = ref.getDate();
       month = ref.getMonth();
       year = ref.getFullYear();
@@ -254,16 +264,22 @@ export function extractEvents(email: ParsedEmail): ExtractedEvent[] {
 
   // Strip email thread reply attributions (e.g. "On Tue, Sep 15, 2026 at 11:40 AM ... wrote:")
   // and quoted lines beginning with > so reply timestamps are NEVER parsed as event dates!
-  const unquotedBody = (email.bodyPlain || email.bodySnippet || '')
-    .replace(/On\s+[A-Za-z]{3},\s+[A-Za-z]{3}\s+\d{1,2},\s+\d{4}\s+at\s+[\d:apm\s.]+(?:[^\n\r]*?)wrote:?/gi, ' ')
-    .replace(/On\s+\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}\s+at\s+[\d:apm\s.]+(?:[^\n\r]*?)wrote:?/gi, ' ')
-    .replace(/^>+.*$/gm, ' ')
-    .replace(/Warm\s+regards[\s\S]*?(?:Dr\.?V\.?Samuel\s+Rajkumar|Director\(Career\s+Development\s+Centre\))[\s\S]*$/i, ' ')
+  const rawBody =
+    email.bodyPlain ||
+    email.bodySnippet ||
+    (email as any).body_plain ||
+    (email as any).body_snippet ||
+    '';
+  const unquotedBody = stripQuotedContent(rawBody)
     .replace(/\*?Disclaimer:\*?[\s\S]*$/i, ' ');
 
   const fullText = `${email.subject}\n${unquotedBody}`;
   const cleanNormalizedText = fullText.replace(/[*_`>#]/g, ' ').replace(/\s+/g, ' ');
-  const refDate = email.receivedAt ? new Date(email.receivedAt) : new Date();
+  const refDate = email.receivedAt
+    ? new Date(email.receivedAt)
+    : (email as any).received_at
+    ? new Date((email as any).received_at)
+    : new Date();
 
   // 0. Check for Registration Deadline or Form/Preference Submission Deadline
   const formOrRegDeadlineMatch =
@@ -604,9 +620,15 @@ export function extractTravelRequirement(text: string): TravelRequirement {
     .replace(/&amp;/gi, '&')
     .replace(/\s+/g, ' ');
 
+  // Strip signature block / disclaimer footer so "Director CDC, VIT Vellore" or
+  // "Vellore Institute of Technology" boilerplate doesn't cause false positive Vellore detection
+  const cleanBody = clean
+    .replace(/(?:warm\s+regards|best\s+regards|thanks\s+&?\s*regards|director\s*\(\s*career\s+development\s+centre\s*\))[\s\S]*$/i, '')
+    .replace(/disclaimer\s*:[\s\S]*$/i, '');
+
   // 1. Isolate the "Date of Visit" / Process Schedule section if present
-  const scheduleMatch = clean.match(/(?:Date\s+of\s+Visit|Process\s+details|Process\s+schedule|Hiring\s+process)[\s\S]{1,600}?(?=(?:Eligible|Eligibility|CTC|Stipend|Selection|Website|Last\s+date)|$)/i);
-  const targetText = scheduleMatch ? scheduleMatch[0] : clean;
+  const scheduleMatch = cleanBody.match(/(?:Date\s+of\s+Visit|Process\s+details|Process\s+schedule|Hiring\s+process)[\s\S]{1,600}?(?=(?:Eligible|Eligibility|CTC|Stipend|Selection|Website|Last\s+date)|$)/i);
+  const targetText = scheduleMatch ? scheduleMatch[0] : cleanBody;
 
   // 2. Bhopal exemption / deferred schedule / virtual mode check:
   // e.g. "Virtual Interview : 31st August 2026 (AP & Bhopal Campus Students)"
@@ -616,16 +638,26 @@ export function extractTravelRequirement(text: string): TravelRequirement {
     /virtual\s+interview[^(]*?\(\s*(?:ap\s*&?\s*)?bhopal/i.test(targetText) ||
     /(?:vit\s+ap\s*(?:&|and)\s*)?vit\s+bhopal[^\n)]*?(?:in\s+virtual\s+mode|virtual|online)/i.test(targetText) ||
     /bhopal[^\n)]*?(?:shortlist\s+in\s+virtual\s+mode|in\s+virtual\s+mode)/i.test(targetText) ||
-    /(?:amaravati\s+and\s+)?bhopal\s+campus\s+students\s+test\s+dates?\s+will\s+be\s+confirmed\s+shortly/i.test(clean) ||
-    /bhopal\s+campus\s+students[^.\n]*?(?:confirmed\s+shortly|wait\s+for\s+the\s+update|separate\s+schedule|dates?\s+will\s+be\s+announced)/i.test(clean);
+    /(?:amaravati\s+and\s+)?bhopal\s+campus\s+students\s+test\s+dates?\s+will\s+be\s+confirmed\s+shortly/i.test(cleanBody) ||
+    /bhopal\s+campus\s+students[^.\n]*?(?:confirmed\s+shortly|wait\s+for\s+the\s+update|separate\s+schedule|dates?\s+will\s+be\s+announced)/i.test(cleanBody);
 
   if (isBhopalVirtualOrExempt) {
-    if (/@\s*respective\s+campus\s+(?:venues|labs|campuses)|in\s+campus\s+lab|conducted\s+on-campus/i.test(clean)) return 'bhopal';
+    if (/@\s*respective\s+campus\s+(?:venues|labs|campuses)|in\s+campus\s+lab|conducted\s+on-campus/i.test(cleanBody)) return 'bhopal';
     if (/virtual|online/i.test(targetText)) return 'online';
     return 'bhopal';
   }
 
-  // 3. Explicit Travel to Vellore check (e.g. "Interview : @ Physical VIT Vellore campus", "24th Sep Physical process - at VIT Vellore")
+  // 3. Campus travel regexes with full parity across Vellore, Chennai, and AP
+  const chennaiRegexes = [
+    /(?:physical\s+process|physical\s+interview|interview|process|selection|round|drive|physical)[\s\S]{0,80}?(?:at|@)\s*(?:physical\s+)?(?:vit\s+)?chennai/i,
+    /(?:at|@)\s*(?:physical\s+)?vit\s+chennai/i,
+    /(?:at|@)\s*chennai\s+campus/i,
+    /physical\s+process[^.\n]*?chennai/i,
+    /bhopal[\s\S]{0,80}?travel[\s\S]{0,40}?chennai/i,
+    /travel\s+to\s+chennai/i,
+    /@\s*vit\s+chennai\s+campus/i,
+  ];
+
   const velloreRegexes = [
     /(?:physical\s+process|physical\s+interview|interview|process|selection|round|drive|physical)[\s\S]{0,80}?(?:at|@)\s*(?:physical\s+)?(?:vit\s+)?vellore/i,
     /(?:at|@)\s*(?:physical\s+)?vit\s+vellore/i,
@@ -635,29 +667,31 @@ export function extractTravelRequirement(text: string): TravelRequirement {
     /travel\s+to\s+vellore/i,
     /@\s*vit\s+vellore\s+campus\s*\(\s*entire\s+physical/i,
   ];
-  if (velloreRegexes.some((r) => r.test(targetText) || r.test(clean))) {
-    return 'vellore';
-  }
 
-  // 4. Explicit Travel to Chennai check (Must be explicit travel for Bhopal students, not branch test schedules)
-  const chennaiRegexes = [
-    /bhopal[\s\S]{0,80}?travel[\s\S]{0,40}?chennai/i,
-    /travel\s+to\s+chennai/i,
-    /(?:physical\s+process|physical\s+interview)[\s\S]{0,50}?(?:at|@)\s*(?:physical\s+)?(?:vit\s+)?chennai/i,
-  ];
-  if (chennaiRegexes.some((r) => r.test(targetText) || r.test(clean))) {
-    return 'chennai';
-  }
-
-  // 5. Explicit Travel to AP / Amaravati check
   const apRegexes = [
+    /(?:physical\s+process|physical\s+interview|interview|process|selection|round|drive|physical)[\s\S]{0,80}?(?:at|@)\s*(?:physical\s+)?(?:vit\s+)?(?:ap|amaravati)/i,
+    /(?:at|@)\s*(?:physical\s+)?vit\s+(?:ap|amaravati)/i,
+    /(?:at|@)\s*(?:ap|amaravati)\s+campus/i,
+    /physical\s+process[^.\n]*?(?:ap|amaravati)/i,
     /bhopal[\s\S]{0,80}?travel[\s\S]{0,40}?(?:ap|amaravati)/i,
     /travel\s+to\s+(?:ap|amaravati)/i,
-    /(?:physical\s+process|physical\s+interview)[\s\S]{0,50}?(?:at|@)\s*(?:physical\s+)?(?:vit\s+)?(?:ap|amaravati)/i,
+    /@\s*vit\s+(?:ap|amaravati)\s+campus/i,
   ];
-  if (apRegexes.some((r) => r.test(targetText) || r.test(clean))) {
-    return 'ap';
-  }
+
+  // Check the explicit Date of Visit / schedule section first if present
+  const checkVenue = (sample: string): TravelRequirement => {
+    if (chennaiRegexes.some((r) => r.test(sample))) return 'chennai';
+    if (velloreRegexes.some((r) => r.test(sample))) return 'vellore';
+    if (apRegexes.some((r) => r.test(sample))) return 'ap';
+    return null;
+  };
+
+  const scheduleVenue = checkVenue(targetText);
+  if (scheduleVenue) return scheduleVenue;
+
+  // Otherwise check the rest of the cleaned email body (without signature)
+  const bodyVenue = checkVenue(cleanBody);
+  if (bodyVenue) return bodyVenue;
 
   // 6. Respective Campus Labs (All stages in campus labs / venues at Bhopal)
   if (
@@ -682,6 +716,419 @@ export function extractTravelRequirement(text: string): TravelRequirement {
   }
 
   return null;
+}
+
+export interface ExtractedEligibility {
+  tenthTwelfth: string | null;
+  tenth: string | null;
+  twelfth: string | null;
+  ug: string | null;
+  pg: string | null;
+  cgpa: string | null;
+  cgpaNumeric: number | null;
+  backlogs: string | null;
+  branches: string[] | null;
+  branchesText: string | null;
+  summary: string | null;
+  badges: string[];
+}
+
+function cleanCriterionValue(val: string): string | null {
+  let cleaned = val
+    .replace(/^[*_`>#:\-–—\s]+/, '')
+    .replace(/[*_`>#:\-–—\s]+$/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  // If it doesn't contain digits, or contains narrative phrases, it's garbled text (e.g. "within the stipulated duration")
+  if (!/\d/.test(cleaned) || /stipulated\s+duration|academic\s+program|candidates?\s+must|without\s+any|gap\s+of\s+up\s+to|branches?\s+only|at\s+the\s+time\s+of/i.test(cleaned)) {
+    return null;
+  }
+
+  // If there's a specific pattern like "60% or 6.0 CGPA" at the start, extract just that:
+  const valMatch = cleaned.match(/^(\d+(?:\.\d+)?\s*(?:%|CGPA|GPA)?(?:\s*(?:or|\/)\s*\d+(?:\.\d+)?\s*(?:%|CGPA|GPA)?)?)/i);
+  if (valMatch && valMatch[1] && valMatch[1].length >= 2) {
+    return valMatch[1].trim();
+  }
+
+  // Otherwise strip any bleeding into subsequent criteria keywords
+  cleaned = cleaned.replace(/\s*(?:in\s+Pursuing\s+Degree|Pursuing\s+Degree|in\s+UG|in\s+PG|\(for\s+PG|for\s+PG|No\s+Standing\s+Arrear|No\s+Arrear|Eligible\s+Branch|Branches).*$/i, '');
+
+  return cleaned.trim() || null;
+}
+
+/**
+ * Extracts structured Academic Eligibility (10th/12th, Degree CGPA, Backlogs, Eligible Branches)
+ * directly from official CDC circulars.
+ */
+export function extractEligibilityDetails(text: string): ExtractedEligibility {
+  if (!text) {
+    return {
+      tenthTwelfth: null,
+      tenth: null,
+      twelfth: null,
+      ug: null,
+      pg: null,
+      cgpa: null,
+      cgpaNumeric: null,
+      backlogs: null,
+      branches: null,
+      branchesText: null,
+      summary: null,
+      badges: [],
+    };
+  }
+
+  // Pre-process text: convert line-breaking HTML tags to newlines, strip style/script/tags
+  const textWithLines = text
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<(?:br|\/p|\/div|\/tr|\/li|\/h\d)[^>]*>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&');
+
+  // 1. Extract Eligible Branches block
+  let branchesText: string | null = null;
+  let branches: string[] = [];
+
+  const branchBlockMatch = textWithLines.match(
+    /\b(?:Eligible\s+Branches|Eligible\s+Programs?|Eligible\s+Courses?|Eligibility\s+Branches|Target\s+Branches|Branch(?:\s+Eligible)?|Branches\s+Eligible)\b\s*[:\-–—\t*|=]*\s*([\s\S]{1,800}?)(?=(?:\b(?:Eligibility\s+Criteria|Eligibility|Selection\s+Process|Selection|CTC|Stipend|Date\s+of\s+Visit|Website|Last\s+date|Job\s+Location|Registration)\b|\r?\n\s*\r?\n\s*\r?\n|$))/i
+  );
+
+  if (branchBlockMatch && branchBlockMatch[1]) {
+    const rawBranchLines = branchBlockMatch[1]
+      .split(/\r?\n/)
+      .map((l) => l.replace(/^[*_`>#Ø•·\-\t\s]+/, '').replace(/[*_`>#\t\s]+$/, '').trim())
+      .filter((l) => l.length > 2 && !/^(?:nil|none|na|n\/a|eligible\s+branches|branches?)$/i.test(l));
+
+    if (rawBranchLines.length > 0) {
+      branchesText = rawBranchLines.join(', ');
+      branches = rawBranchLines;
+    }
+  }
+
+  // 2. Extract Eligibility Criteria block
+  const eligBlockMatch = textWithLines.match(
+    /\b(?:Eligibility\s+Criteria|Academic\s+Criteria|Criteria)\b\s*[:\-–—\t*|=]*\s*([\s\S]{1,1200}?)(?=(?:\b(?:CTC|Stipend|Last\s+date|Website|Date\s+of\s+Visit|Selection\s+Process|Selection|Job\s+Location|Job\s+Description|JD|Registration|Mandatory\s+Note|About\s+Company)\b|\r?\n\s*\r?\n\s*\r?\n|$))/i
+  );
+  const eligBlock = eligBlockMatch ? eligBlockMatch[1] : textWithLines;
+
+  // Split eligibility into lines to parse line by line (preserving line boundaries!)
+  const lines = eligBlock
+    .split(/\r?\n/)
+    .map((l) => l.replace(/[*_`>#]/g, ' ').trim())
+    .filter((l) => l.length > 0 && !/^(?:eligibility\s+criteria|academic\s+criteria|criteria)$/i.test(l));
+
+  let tenthTwelfth: string | null = null;
+  let tenth: string | null = null;
+  let twelfth: string | null = null;
+  let ug: string | null = null;
+  let pg: string | null = null;
+  let backlogs: string | null = null;
+
+  for (const line of lines) {
+    // 10th and 12th combined
+    if (/(?:X\s*(?:and|&)\s*XII|10th\s*(?:and|&)\s*12th|10th\s*,\s*12th|10th\s*[\/&]\s*12th|throughout\s*in\s*10th[,\s]*12th|ssc\s*(?:and|&)\s*hsc)/i.test(line)) {
+      const m = line.match(/(?:X\s*(?:and|&)\s*XII|10th\s*(?:and|&)\s*12th|10th\s*,\s*12th|10th\s*[\/&]\s*12th|throughout\s*in\s*10th[,\s]*12th|ssc\s*(?:and|&)\s*hsc)\s*[:\-–—\s]*([^\n\r]+)/i);
+      if (m) {
+        tenthTwelfth = cleanCriterionValue(m[1]);
+      } else {
+        const valMatch = line.match(/(\d+(?:\.\d+)?\s*(?:%|CGPA|GPA)?(?:\s*or\s*\d+(?:\.\d+)?\s*(?:%|CGPA|GPA)?)?)/i);
+        if (valMatch) tenthTwelfth = cleanCriterionValue(valMatch[1]);
+      }
+      continue;
+    }
+
+    // 10th separate
+    if (/(?:in\s+X\b|in\s+10th\b|10th\s*std|10th\s*grade)/i.test(line) && !/XII|12th/i.test(line)) {
+      const m = line.match(/(?:in\s+X\b|in\s+10th\b|10th\s*std|10th\s*grade)\s*[:\-–—\s]*([^\n\r]+)/i);
+      if (m) {
+        tenth = cleanCriterionValue(m[1]);
+      } else {
+        const valMatch = line.match(/(\d+(?:\.\d+)?\s*(?:%|CGPA|GPA)?(?:\s*or\s*\d+(?:\.\d+)?\s*(?:%|CGPA|GPA)?)?)/i);
+        if (valMatch) tenth = cleanCriterionValue(valMatch[1]);
+      }
+      continue;
+    }
+
+    // 12th separate
+    if (/(?:in\s+XII\b|in\s+12th\b|12th\s*std|12th\s*grade|diploma)/i.test(line) && !/\bX\b|10th/i.test(line)) {
+      const m = line.match(/(?:in\s+XII\b|in\s+12th\b|12th\s*std|12th\s*grade|diploma)\s*[:\-–—\s]*([^\n\r]+)/i);
+      if (m) {
+        twelfth = cleanCriterionValue(m[1]);
+      } else {
+        const valMatch = line.match(/(\d+(?:\.\d+)?\s*(?:%|CGPA|GPA)?(?:\s*or\s*\d+(?:\.\d+)?\s*(?:%|CGPA|GPA)?)?)/i);
+        if (valMatch) twelfth = cleanCriterionValue(valMatch[1]);
+      }
+      continue;
+    }
+
+    // PG (check PG before general degree!)
+    if (/(?:\(for\s+PGs?\)|for\s+PGs?\b|in\s+PG\b|Post\s*Graduation|\bPG\b)/i.test(line) && !/B\.?Tech|Pursuing\s+Degree/i.test(line)) {
+      const m = line.match(/(?:for\s+PGs?\)?|in\s+PG\b|Post\s*Graduation|\bPG\b)\s*[:\-–—\s]*([^\n\r]+)/i);
+      if (m) {
+        pg = cleanCriterionValue(m[1]);
+      } else {
+        const valMatch = line.match(/(\d+(?:\.\d+)?\s*(?:%|CGPA|GPA)?(?:\s*or\s*\d+(?:\.\d+)?\s*(?:%|CGPA|GPA)?)?)/i);
+        if (valMatch) pg = cleanCriterionValue(valMatch[1]);
+      }
+      continue;
+    }
+
+    // UG / Pursuing Degree
+    if (/(?:Pursuing\s+Degree|Current\s+Degree|(?:in\s+)?UG\b|UG\s+CGPA|\bDegree\b|Graduation|B\.?Tech)/i.test(line) && !/for\s+PG/i.test(line)) {
+      const m = line.match(/(?:Pursuing\s+Degree|Current\s+Degree|(?:in\s+)?UG\b|UG\s+CGPA|\bDegree\b|Graduation|B\.?Tech)\s*[:\-–—\s]*([^\n\r]+)/i);
+      if (m) {
+        ug = cleanCriterionValue(m[1]);
+      } else {
+        const valMatch = line.match(/(\d+(?:\.\d+)?\s*(?:%|CGPA|GPA)?(?:\s*or\s*\d+(?:\.\d+)?\s*(?:%|CGPA|GPA)?)?)/i);
+        if (valMatch) ug = cleanCriterionValue(valMatch[1]);
+      }
+      continue;
+    }
+
+    // Backlogs / Arrears
+    if (/arrear/i.test(line)) {
+      if (/no\s*(?:standing)?\s*arrears\s*(?:and|&)\s*no\s*academic\s*gap/i.test(line)) {
+        backlogs = 'No standing arrears & no academic gap';
+      } else if (/no\s*(?:standing|current|active)?\s*arrears|0\s*standing\s*arrears?|zero\s*standing\s*arrears?/i.test(line)) {
+        backlogs = 'No standing arrears';
+      } else if (/no\s*(?:history\s*of\s*)?arrears|0\s*arrears?|zero\s*arrears?/i.test(line)) {
+        backlogs = 'No history of arrears';
+      } else {
+        const arrearAllowedMatch = line.match(/(?:up\s*to\s*)?(\d+)\s*(?:standing|active)?\s*arrears?\s*(?:allowed|permitted)?/i);
+        if (arrearAllowedMatch) {
+          backlogs = `Up to ${arrearAllowedMatch[1]} standing arrear allowed`;
+        }
+      }
+      continue;
+    }
+  }
+
+  // Fallback if line-by-line didn't catch (e.g. inline text)
+  if (!tenthTwelfth && !tenth) {
+    const m = eligBlock.match(/(?:%\s*in\s*)?(?:X\s*and\s*XII|10th\s*and\s*12th)\s*[:\-–—\s]*([^\n\r*]{3,40})/i);
+    if (m) tenthTwelfth = cleanCriterionValue(m[1]);
+  }
+  if (!ug) {
+    const m = eligBlock.match(/(?:in\s+)?(?:Pursuing\s+Degree|Current\s+Degree|UG\s+CGPA)\s*[:\-–—\s]*([^\n\r*]{3,40})/i);
+    if (m) ug = cleanCriterionValue(m[1]);
+  }
+  if (!pg) {
+    const m = eligBlock.match(/(?:in\s+UG\s*)?\(for\s+PGs?\)\s*[:\-–—\s]*([^\n\r*]{3,40})/i);
+    if (m) pg = cleanCriterionValue(m[1]);
+  }
+  if (!backlogs) {
+    if (/no\s*(?:standing)?\s*arrears\s*(?:and|&)\s*no\s*academic\s*gap/i.test(eligBlock)) {
+      backlogs = 'No standing arrears & no academic gap';
+    } else if (/no\s*(?:standing|current|active)?\s*arrears|0\s*standing\s*arrears?/i.test(eligBlock)) {
+      backlogs = 'No standing arrears';
+    }
+  }
+
+  // General CGPA fallback
+  let cgpa = ug || tenthTwelfth || null;
+  let cgpaNumeric: number | null = null;
+  if (ug) {
+    const numMatch = ug.match(/(\d+\.\d+)\s*(?:CGPA|GPA)?|(\d{2})%/i);
+    if (numMatch) {
+      cgpaNumeric = numMatch[1] ? parseFloat(numMatch[1]) : parseFloat(numMatch[2]) / 10;
+    }
+  }
+
+  // Build clean badges
+  const badges: string[] = [];
+
+  // 1. 10th & 12th
+  if (tenthTwelfth) {
+    badges.push(`10th & 12th: ${tenthTwelfth}`);
+  } else {
+    if (tenth) badges.push(`10th: ${tenth}`);
+    if (twelfth) badges.push(`12th: ${twelfth}`);
+  }
+
+  // 2. UG
+  if (ug) {
+    badges.push(`UG: ${ug}`);
+  }
+
+  // 3. PG (only if mentioned)
+  if (pg) {
+    badges.push(`PG: ${pg}`);
+  }
+
+  // 4. Arrears
+  if (backlogs) {
+    badges.push(backlogs);
+  }
+
+  // 5. Branches
+  if (branchesText) {
+    const cleanBranch = branchesText.length > 50 ? branchesText.slice(0, 47) + '...' : branchesText;
+    badges.push(`Branches: ${cleanBranch}`);
+  }
+
+  return {
+    tenthTwelfth,
+    tenth,
+    twelfth,
+    ug,
+    pg,
+    cgpa,
+    cgpaNumeric,
+    backlogs,
+    branches: branches.length > 0 ? branches : null,
+    branchesText,
+    summary: badges.length > 0 ? badges.join(' | ') : null,
+    badges,
+  };
+}
+
+/**
+ * Sanitizes and validates job roles extracted from CDC emails.
+ * Strips prefixes (like "Designation : "), discards attachment references (like "Below attachment"),
+ * discards procedural prose (like "to complete applications..."), and returns a clean role or null.
+ */
+export function cleanRoleTitle(rawRole: string | null | undefined): string | null {
+  if (!rawRole) return null;
+  let role = rawRole.trim();
+
+  // 1. Strip all leading punctuation including brackets, parenthesis, colons, bullets, dashes
+  role = role.replace(/^[()\[\]{}*,\.\s>\-–—:;_\\/|#?!=+]+/, '').trim();
+
+  // 2. Strip repeated leading labels like "Designation : ", "Job Role : ", "Role - ", "Job Profile: "
+  role = role.replace(/^(?:(?:Job\s+)?(?:Designation|Role|Position|Profile|Title)\s*[:\-–—\t]\s*)+/gi, '').trim();
+
+  // 3. Strip leading narrative phrases like "in the role of ", "role of ", "position of "
+  role = role.replace(/^(?:(?:in\s+)?the\s+role\s+of|role\s+of|position\s+of)\s+/i, '').trim();
+
+  // 4. Strip leading punctuation again if a label was removed
+  role = role.replace(/^[()\[\]{}*,\.\s>\-–—:;_\\/|#?!=+]+/, '').trim();
+
+  // 5. Strip parenthetical notes like "(JD Attached)", "(Jan 2027 to June 2027)", "(only applicable for...)"
+  role = role.replace(/\s*\([^\)]*\)/g, '').replace(/[\(\[\{]/g, '').trim();
+
+  // 6. Strip trailing suffixes like " - Full Time" or " / Full Time" or apprenticeship notes
+  role = role.replace(/(?:\s*\/)?\s*[-–—]?\s*(?:Full\s+Time|Internship\b|\d+\s*(?:months?|weeks?)\s+Apprenticeship).*$/i, '').trim();
+
+  // 7. Strip trailing label boundaries or trailing punctuation
+  role = role.replace(/\s*(?:[-–—]\s*)?(?:JD|Location|Eligible|Eligibility|Selection|CTC|Stipend|Process|Note|Registration|Date|Duration|As\s+part|We\s+would)\b.*$/i, '').trim();
+  role = role.replace(/[()\[\]{}*,\.\s>\-–—:;_\\/|#?!=+]+$/, '').trim();
+
+  if (role.length < 2) return null;
+
+  // 8. Single generic header words alone (e.g. "Details", "Skill", "Skills", "Note")
+  if (/^(?:details|skill|skills|note|notes|role|roles|position|positions|title|profile|job|jobs|description|qualification|qualifications|requirement|requirements|experience|criteria|eligibility|overview|summary|responsibilities|duties|tasks|information|important|mandatory|general|category|type)$/i.test(role)) {
+    return null;
+  }
+
+  // 9. Branch / Degree / Academic strings mistaken for roles (e.g. "All B", "All B.Tech", "B.Tech CSE")
+  if (
+    /^(?:all\s+)?(?:b\.?tech|m\.?tech|b\.?e\.?|mca|b\.?sc|m\.?sc|branches?|arrears?|cgpa)\b/i.test(role) ||
+    /^[A-Za-z]+\s+[A-Za-z]$/i.test(role) ||
+    /^(?:all\s+b)$/i.test(role)
+  ) {
+    return null;
+  }
+
+  // 10. Explicit attachment pointers / referral phrases -> MUST return null (displays as Campus Placement Drive)
+  if (
+    /^(?:refer|check|see|below|as\s+per|in|view)?\s*(?:the\s+)?(?:attached|attachment|jd|email|circular)\b/i.test(role) ||
+    /^(?:below|refer|check|see)\s+attachment/i.test(role) ||
+    /\b(?:check|refer|below|see)\s+(?:the\s+)?(?:attached|attachment|jd)\b/i.test(role) ||
+    /^(?:attached|attachment|jd\s+attached|attached\s+jd)$/i.test(role) ||
+    /\battachment\b/i.test(role)
+  ) {
+    return null;
+  }
+
+  // 11. Reject prose / sentence fragments starting with prepositions, conjunctions, pronouns, or auxiliary verbs
+  if (/^(?:to|of|for|in|on|at|by|from|with|about|as|the|a|an|and|or|is|are|was|were|will|be|have|has|had|please|kindly|all|any)\s+/i.test(role)) {
+    return null;
+  }
+
+  // 12. Reject sentences starting with verbs like "focuses on", "includes", "looking for", "preference"
+  if (/^(?:focuses|including|includes|consists|comprises|involves|working|looking\s+for|seeking|hiring\s+for|open\s+for|responsible\s+for|mandated|required|preference)\b/i.test(role)) {
+    return null;
+  }
+
+  // 13. Shortlist snippets containing Neo IDs (e.g. "Offered X6V7N5T4 BTSA", "P1V4A1V9 AI X3L4M9Q3 AI")
+  if (/\b[A-Z][0-9][A-Z][0-9][A-Z][0-9][A-Z][0-9]\b/i.test(role) || /\boffered\s+[A-Z0-9]{4,}/i.test(role)) {
+    return null;
+  }
+
+  // 14. Administrative / deadline / portal phrases
+  if (/on\s+or\s+before|\bneopat\b|\bdeadline\b|\bapply\s+by\b|\b\d{1,2}[-/]\d{1,2}[-/]\d{2,4}\b/i.test(role)) {
+    return null;
+  }
+
+  // 15. Reject blacklisted procedural, administrative, or email prose phrases
+  if (
+    /\byou\b|\bwe\b|\bi\b|dear\s|greetings|hi\s+|hello\s|upcoming|forwarded|scheduled|eligible|please|kindly|hereby|\binform(?:ing|ed|s)?\b|congratulat|registr|passout|batch|drive\b|placement|interview|assessment|\btest\b|portal\b|career\s+portal|complete\s+application|\bhiring\b|\brecruitment\b|shared\s+at\s+the\s+earliest|further\s+details|reserve\s+a\s+position|expect\s+them|next\s+round|depends\s+on/i.test(role)
+  ) {
+    return null;
+  }
+
+  // 16. Generic placement tier names alone (e.g. "Super Dream Internship", "Dream Offer")
+  if (/^(?:super\s+dream|dream|regular)(?:\s+(?:internship|offer|placement|drive))?$/i.test(role)) {
+    return null;
+  }
+
+  // 17. TBA / TBD / Not Disclosed
+  if (/^(?:tba|tbd|to\s+be\s+announced|not\s+disclosed|n\/a|na)$/i.test(role)) {
+    return null;
+  }
+
+  return role;
+}
+
+/**
+ * Cleans an event title by stripping repeated company names and redundant delimiters.
+ * Prevents titles like "Chargebee — Chargebee - Pre-Placement Talk (PPT)" or
+ * modal subtitles like "Chargebee - Pre-Placement Talk (PPT)" directly under the "Chargebee" heading.
+ *
+ * Example:
+ *   cleanEventTitle("Chargebee - Pre-Placement Talk (PPT)", "Chargebee") => "Pre-Placement Talk (PPT)"
+ *   cleanEventTitle("Chargebee — Chargebee - PPT", "Chargebee") => "PPT"
+ *   cleanEventTitle("Aptitude Test", "Goldman Sachs") => "Aptitude Test"
+ */
+export function cleanEventTitle(
+  title: string | null | undefined,
+  companyName?: string | null,
+  fallback?: string
+): string {
+  if (!title || !title.trim()) return fallback || '';
+
+  let cleaned = title.trim();
+
+  if (companyName && companyName.trim()) {
+    const trimmedComp = companyName.trim();
+    const escaped = trimmedComp.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+    // 1. Strip repeated leading patterns like "CompanyName - ", "CompanyName — ", "CompanyName : "
+    const prefixRegex = new RegExp(`^${escaped}\\s*[-—–:|•/]\\s*`, 'i');
+    while (prefixRegex.test(cleaned)) {
+      cleaned = cleaned.replace(prefixRegex, '').trim();
+    }
+
+    // 2. Also strip "CompanyName " if followed immediately by common event keywords
+    const keywordPrefixRegex = new RegExp(
+      `^${escaped}\\s+(?=(?:pre[-\\s]?placement|ppt|online|assessment|coding|test|interview|round|hackathon|presentation|orientation|shortlist|hiring)\\b)`,
+      'i'
+    );
+    cleaned = cleaned.replace(keywordPrefixRegex, '').trim();
+
+    // 3. If exact match with company name, discard and use fallback
+    if (cleaned.toLowerCase() === trimmedComp.toLowerCase()) {
+      return fallback || '';
+    }
+  }
+
+  // Strip any leftover leading/trailing punctuation
+  cleaned = cleaned.replace(/^[-—–:|•/\s]+/, '').replace(/[-—–:|•/\s]+$/, '').trim();
+
+  return cleaned || fallback || '';
 }
 
 /**
@@ -710,7 +1157,23 @@ export function extractJobDetails(text: string): ExtractedJobDetails {
 
   // 0. CSE Branch Eligibility Guard
   if (/other\s+than\s+(?:cse|computer)|(?:cse|computer|it)[^.\n]*?not\s+eligible|except\s+cse/i.test(cleanText)) {
-    return { role: null, category: null, ctc: null, stipend: null, location: null, neoIdMatched: false, matchedNeoIdValue: null };
+    return {
+      role: null,
+      category: null,
+      ctc: null,
+      stipend: null,
+      location: null,
+      eligibility: null,
+      branches: null,
+      cgpaRequirement: null,
+      tenthRequirement: null,
+      twelfthRequirement: null,
+      ugRequirement: null,
+      pgRequirement: null,
+      backlogRequirement: null,
+      neoIdMatched: false,
+      matchedNeoIdValue: null,
+    };
   }
 
   // 1. CTC Extraction — handles single LPA, ranges (e.g. "8.5 - 10 LPA", "30 _ 31 LPA"), PPO formulas, and additions ("14+1 LPA")
@@ -986,47 +1449,41 @@ export function extractJobDetails(text: string): ExtractedJobDetails {
 
   const explicitIstRole = cleanWithLines.match(/\bIS&T\s+((?:SDET|SRE)\s+Intern)\b/i);
   if (explicitIstRole) {
-    role = `IS&T ${explicitIstRole[1].replace(/\s+/g, ' ').trim()}`;
+    role = cleanRoleTitle(`IS&T ${explicitIstRole[1]}`);
   }
 
   // 1. Explicit headers: Designation, Job Role, Job Profile, Role, Position, Job Designation Offered, Title
-  const roleMatch = cleanWithLines.match(
-    /\b(?:Job\s+Designation\s+Offered|Designation\s+Offered|Designation|Job\s+Role|Job\s+Profile|Role|Position|Job\s+Title|Title)\b\s*[:\-–—\t]?\s*([^\r\n]{2,100}(?:\r?\n[ \t]*[A-Za-z0-9\/\,\& \t\-]{2,80})?)/i
-  );
+  // Requires mandatory delimiter (colon, dash, or tab) and supports multiline bullet lists (e.g. Role:\n- Dev\n- Analyst)
+  if (!role) {
+    const roleRegex = /(?:^[ \t]*|[•*\-–—][ \t]*|\b)(?:Job\s+Designation(?:\s+Offered)?|Designation(?:\s+Offered)?|Job\s+Role|Job\s+Profile|Role|Position|Job\s+Title|Title)\s*[:\-–—\t]\s*(?:\r?\n[ \t]*[-•*]?[ \t]*)?([^\r\n]{2,100}(?:\r?\n[ \t]*[-•*]?[ \t]*[A-Za-z0-9\/\,\& \t\-]{2,80})*)/gim;
 
-  if (roleMatch) {
-    let raw = roleMatch[1].replace(/\r?\n[ \t]*/g, ' ').trim();
-    // Strip sub-headers like "Service line - Position Title:"
-    raw = raw.replace(/^(?:Service\s+line\s*[-–—]\s*)?Position\s+Title\s*[:\-–—\t]\s*/i, '');
-    // Stop at trailing label boundaries like "JD", "Location", "Note", "Duration", etc.
-    raw = raw.replace(/\s*(?:JD|Location|Eligible|Eligibility|Selection|CTC|Stipend|Process|Note|Registration|Date|Duration|As\s+part|We\s+would)\b.*$/i, '');
-    // Strip parenthetical notes like "(JD Attached)"
-    raw = raw.replace(/\s*\([^\)]*\)/g, '').replace(/[\(\[\{]/g, '');
-    // Strip trailing prose suffixes like " position", " role", " profile", " job", " Work", " internship"
-    raw = raw.replace(/\s+(?:position|role|profile|job|work|internship)\b/gi, '');
-    raw = raw.replace(/^[*,\.\s>\-]+/, '').replace(/[*,\.\s>\-]+$/, '').trim().slice(0, 100);
-
-    if (
-      raw &&
-      raw.length >= 2 &&
-      !/\byou\b|\bwe\b|\bi\b|dear\s|greetings|hi\s+|hello\s|upcoming|forwarded|scheduled|not japanese|eligible|please|kindly|hereby|inform|congratulat|registr|passout|batch|drive|internship\s+registration|for the candidate|reserve a position|expect them|next\s+round|depends on the function|^[>,\.\*\s]+$/i.test(raw) &&
-      !/^(?:super\s+dream|dream|regular)(?:\s+(?:internship|offer|placement))?$/i.test(raw)
-    ) {
-      role = raw;
+    const matches = [...cleanWithLines.matchAll(roleRegex)];
+    for (const m of matches) {
+      const lines = m[1].split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+      const validRoles: string[] = [];
+      for (const line of lines) {
+        const cleaned = cleanRoleTitle(line);
+        if (cleaned) {
+          validRoles.push(cleaned);
+        } else if (validRoles.length > 0) {
+          break;
+        }
+      }
+      if (validRoles.length > 0) {
+        role = validRoles.join(' / ');
+        break;
+      }
     }
   }
 
   // 2. Also match PPO offer role formats like "Internship Upon PPO offer Sr. Analyst, Data Science"
   if (!role) {
     const ppoMatch = cleanWithLines.match(
-      /(?:Internship\s+Upon\s+PPO\s+offer|Upon\s+PPO\s+offer)\s*[:\-–—\t]?\s*([^\r\n]{2,100})/i
+      /(?:Internship\s+Upon\s+PPO\s+offer|Upon\s+PPO\s+offer)\s*[:\-–—\t]\s*([^\r\n]{2,100})/i
     );
     if (ppoMatch) {
-      let raw = ppoMatch[1].replace(/\s*(?:Job\s+location|Location|CTC|Stipend|All\s+the|Mandatory|Website)\b.*$/i, '').trim();
-      raw = raw.replace(/^[*,\.\s>\-]+/, '').replace(/[*,\.\s>\-]+$/, '').trim().slice(0, 100);
-      if (raw && raw.length >= 2) {
-        role = raw;
-      }
+      const cleaned = cleanRoleTitle(ppoMatch[1]);
+      if (cleaned) role = cleaned;
     }
   }
 
@@ -1036,18 +1493,9 @@ export function extractJobDetails(text: string): ExtractedJobDetails {
       /(?:^|\n|\r)[ \t]*(?:[•*\-–—][ \t]*)?([A-Za-z0-9 \t–—\-&/]+?(?:Analyst|Engineer|Developer|Consultant|Scientist|Trainee|Specialist|Associate)(?:[ \t–—\-&/][A-Za-z0-9 \t–—\-&/]{0,50})?)(?:\r?\n|$)/i
     );
     if (titleMatch && titleMatch[1]) {
-      const candidateRole = titleMatch[1]
-        .replace(/^[*,\.\s>\-]+/, '')
-        .replace(/[*,\.\s>\-]+$/, '')
-        .replace(/\s+/g, ' ')
-        .trim();
-      if (
-        candidateRole.length >= 4 &&
-        candidateRole.length <= 80 &&
-        !/\byou\b|\bwe\b|\beligible\b|\bcongratulat\b|\bplacement\b|\bdrive\b|\binterview\b/i.test(candidateRole)
-      ) {
-        role = candidateRole;
-      }
+      const candidateRole = titleMatch[1].replace(/\s+/g, ' ').trim();
+      const cleaned = cleanRoleTitle(candidateRole);
+      if (cleaned) role = cleaned;
     }
   }
 
@@ -1059,7 +1507,12 @@ export function extractJobDetails(text: string): ExtractedJobDetails {
   // 4. Job Location Extraction (extracts clean cities, states, and countries without internship/drive noise)
   // Must NOT match test venue phrases like "@ Own location You can write from LC 103"
   // Supports Office Location, Work Location, Job Location, Tentative Location, Place of Posting, with or without colons/markdown asterisks
-  const locMatch = cleanText.match(
+  const explicitWorkLocationMatch = cleanText.match(
+    /\b(?:Work|Job|Office)\s+Location(?:s)?\b\s*[:\-–—\t|=]?\s*([^\n\r]{2,160})/i
+  ) || cleanText.match(
+    /\bLocation\b\s*[:\-–—\t|=]\s*([^\n\r]{2,160})/i
+  );
+  const locMatch = explicitWorkLocationMatch || cleanText.match(
     /(?<!@\s*|own\s+)\b(?:Office|Work|Job|Posting|Hiring|Base|Tentative|Placement|Expected|Preferred|Internship)?\s*Locations?\b\s*[:\-–—\t|=]?\s*(?:will\s+be\s*[:\-–—]?|is\s*[:\-–—]?|is\s+at\s*[:\-–—]?)?\s*[*_~`\s]*([^\n\r<>{}_]{2,120})/i
   ) || cleanText.match(
     /\b(?:Place\s+of\s+(?:Posting|Work))\b\s*[:\-–—\t|]?\s*[*_~`\s]*([^\n\r<>{}_]{2,120})/i
@@ -1067,7 +1520,8 @@ export function extractJobDetails(text: string): ExtractedJobDetails {
 
   if (locMatch) {
     let rawLoc = locMatch[1]
-      .replace(/\s*(?:(?:\d+\.?\s*)?(?:Start\s+Date|Note|Eligibility|Criteria|Requirements?|Registration|CTC|Stipend|Internship\s+Duration|Joining\s+Date|Joining|Graduation\s+Year|Graduation|Batch|Timeline|Internship|Placement|Offer|Process|Website|Warm|Kind|Selection|Designation|Role|Job|JD|Position|Skills|Service|All\s+the|Work\s+Mode|Economy|On\s+Wed|For\s+more|PPO|About|Mandatory|depending\s+on|Fluent\s+English|Communication|You\s+can|Write\s+from|Forwarded|Queries|LC\s*\d|PRP|SJT|Anna|Lab|Hall|Venue|---)|[•*]).*$/i, '')
+      .replace(/\s*(?:(?:\d+\.?\s*)?(?:Start\s+Date|Note|Eligibility|Criteria|Requirements?|Registration|CTC|Stipend|Internship\s+Duration|Joining\s+Date|Joining|Graduation\s+Year|Graduation|Batch|Timeline|Internship|Placement|Offer|Process|Website|Warm|Kind|Selection|Designation|Role|Job|JD|Position|Skills|Service|All\s+the|Work\s+Mode|Economy|On\s+Wed|For\s+more|PPO|About|Mandatory|depending\s+on|Fluent\s+English|Communication|You\s+can|Write\s+from|Forwarded|Queries|LC\s*\d|PRP|SJT|Anna|Lab|Hall|Venue|Whether|Academic\s+gap|Gap\s+allowed|Allowed|Backlog|Standing\s+arrear|History\s+of\s+arrear|---)|[•*]).*$/i, '')
+      .replace(/\b(?:whether|academic\s+gap|gap\s+allowed|backlogs?|standing\s+arrears?|history\s+of\s+arrears?|allowed\s*:|allowed\b).*$/i, '')
       .replace(/\s*\(?(?:work\s+from\s+office|wfo|in\s+person|on\s*site|remote|hybrid|in\s+office)\)?/gi, '')
       .replace(/\b(?:internship|placement|drive|hiring|offer|job|role|any\s+honeywell\s+site|only|based|preferred|fluent\s+english|communication)\b/gi, '')
       .replace(/^\s*(?:\(Core\):?|Core\):?)\s*/i, '')
@@ -1126,12 +1580,22 @@ export function extractJobDetails(text: string): ExtractedJobDetails {
     location = 'Pan India';
   }
 
+  const eligDetails = extractEligibilityDetails(noHtml);
+
   return {
     role,
     category,
     ctc,
     stipend,
     location,
+    eligibility: eligDetails.summary,
+    branches: eligDetails.branches,
+    cgpaRequirement: eligDetails.cgpa,
+    tenthRequirement: eligDetails.tenthTwelfth || eligDetails.tenth,
+    twelfthRequirement: eligDetails.tenthTwelfth || eligDetails.twelfth,
+    ugRequirement: eligDetails.ug,
+    pgRequirement: eligDetails.pg,
+    backlogRequirement: eligDetails.backlogs,
     neoIdMatched: false,
     matchedNeoIdValue: null,
   };

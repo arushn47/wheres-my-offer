@@ -32,4 +32,10 @@ npm-debug.log*
 
 # typescript
 *.tsbuildinfo
+tsconfig.tsbuildinfo
 next-env.d.ts
+
+# temporary buffers & tooling caches
+.freebuff/
+supabase/.temp/
+.tempmediaStorage/

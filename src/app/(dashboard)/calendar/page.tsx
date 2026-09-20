@@ -16,15 +16,16 @@ export default async function CalendarPage() {
   const session = await requireSession();
   const supabase = createAdminClient();
 
-  // Fetch all user events, companies, and applications
+  // Fetch all user events, companies, placement drives, and applications
   const [
     { data: events },
     { data: companies },
+    { data: placementDrives },
     { data: applications },
   ] = await Promise.all([
     supabase
       .from('events')
-      .select('id, company_id, event_type, title, start_time, end_time, venue, mode, manual_override')
+      .select('id, placement_drive_id, event_type, title, start_time, end_time, venue, mode, manual_override')
       .eq('user_id', session.userId)
       .order('start_time', { ascending: true }),
 
@@ -34,8 +35,13 @@ export default async function CalendarPage() {
       .eq('user_id', session.userId),
 
     supabase
+      .from('placement_drives')
+      .select('id, company_id, drive_name, drive_number')
+      .eq('user_id', session.userId),
+
+    supabase
       .from('applications')
-      .select('company_id, status, registration_deadline')
+      .select('placement_drive_id, status, registration_deadline')
       .eq('user_id', session.userId),
   ]);
 
@@ -70,7 +76,8 @@ export default async function CalendarPage() {
   };
 
   const companyMap = new Map((companies || []).map((c) => [c.id, c.name]));
-  const appStatusMap = new Map((applications || []).map((a) => [a.company_id, a.status]));
+  const driveMap = new Map((placementDrives || []).map((d) => [d.id, d]));
+  const appStatusMap = new Map((applications || []).map((a) => [a.placement_drive_id, a.status]));
 
   const seenCalendarKeys = new Set<string>();
   const calendarEvents: CalendarEvent[] = [];
@@ -78,7 +85,7 @@ export default async function CalendarPage() {
   if (events) {
     const now = Date.now();
     for (const evt of events) {
-      const status = appStatusMap.get(evt.company_id) || 'not_applied';
+      const status = appStatusMap.get(evt.placement_drive_id) || 'not_applied';
       const isManual = (evt as any).manual_override;
 
       // Registration Deadline rule:
@@ -106,13 +113,17 @@ export default async function CalendarPage() {
       }
 
       // Deduplicate: 1 single timing per company stage (e.g. 1 PPT, 1 Assessment)
-      const key = `${evt.company_id}:${evt.event_type}`;
+      const key = `${evt.placement_drive_id}:${evt.event_type}`;
       if (!seenCalendarKeys.has(key)) {
         seenCalendarKeys.add(key);
+        const drive = driveMap.get(evt.placement_drive_id);
+        const companyName = drive ? companyMap.get(drive.company_id) || 'Placement Drive' : 'Placement Drive';
+        const companyId = drive?.company_id || evt.placement_drive_id;
+
         calendarEvents.push({
           id: evt.id,
-          companyId: evt.company_id,
-          companyName: companyMap.get(evt.company_id) || 'Placement Drive',
+          companyId,
+          companyName,
           eventType: evt.event_type,
           title: evt.title,
           startTime: evt.start_time,
@@ -131,13 +142,17 @@ export default async function CalendarPage() {
       if (app.registration_deadline && (!app.status || app.status === 'not_applied' || app.status === 'unknown')) {
         const isFuture = new Date(app.registration_deadline).getTime() > now;
         if (isFuture) {
-          const key = `${app.company_id}:registration_deadline`;
+          const key = `${app.placement_drive_id}:registration_deadline`;
           if (!seenCalendarKeys.has(key)) {
             seenCalendarKeys.add(key);
+            const drive = driveMap.get(app.placement_drive_id);
+            const companyName = drive ? companyMap.get(drive.company_id) || 'Placement Drive' : 'Placement Drive';
+            const companyId = drive?.company_id || app.placement_drive_id;
+
             calendarEvents.push({
-              id: `reg_${app.company_id}`,
-              companyId: app.company_id,
-              companyName: companyMap.get(app.company_id) || 'Placement Drive',
+              id: `reg_${app.placement_drive_id}`,
+              companyId,
+              companyName,
               eventType: 'registration_deadline',
               title: 'Registration Deadline',
               startTime: app.registration_deadline,

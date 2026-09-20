@@ -64,6 +64,7 @@ export function SyncProvider({
   const chainedTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const hasMountedAutoSyncRef = useRef(false);
+  const activeAbortControllerRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     if (initialLastSyncAt) {
@@ -79,10 +80,14 @@ export function SyncProvider({
     }
   }, []);
 
+  // Fallback polling (60s) used ONLY when an external/background sync is active and SSE is NOT streaming
   const startPolling = useCallback((immediate: boolean = false) => {
-    if (pollIntervalRef.current) return;
+    if (pollIntervalRef.current || isSseActiveRef.current) return;
 
     const poll = async () => {
+      // Do not poll if tab is hidden or SSE stream has taken over
+      if (document.visibilityState === 'hidden' || isSseActiveRef.current) return;
+
       try {
         const res = await fetch('/api/sync/status');
         if (!res.ok) return;
@@ -140,16 +145,21 @@ export function SyncProvider({
     if (immediate) {
       poll();
     }
-    pollIntervalRef.current = setInterval(poll, 2500);
+    // 60-second fallback polling interval (reduced from 2.5s to minimize Supabase egress and Vercel CPU)
+    pollIntervalRef.current = setInterval(poll, 60000);
   }, [router, stopPolling]);
 
-  // Clean up polling interval and chained timeouts on unmount
+  // Clean up polling interval, chained timeouts, and active fetch on unmount
   useEffect(() => {
     return () => {
       stopPolling();
       if (chainedTimeoutRef.current) {
         clearTimeout(chainedTimeoutRef.current);
         chainedTimeoutRef.current = null;
+      }
+      if (activeAbortControllerRef.current) {
+        activeAbortControllerRef.current.abort();
+        activeAbortControllerRef.current = null;
       }
     };
   }, [stopPolling]);
@@ -177,8 +187,19 @@ export function SyncProvider({
         });
       }
 
+      if (activeAbortControllerRef.current) {
+        activeAbortControllerRef.current.abort();
+        activeAbortControllerRef.current = null;
+      }
+
+      const abortController = new AbortController();
+      activeAbortControllerRef.current = abortController;
+
       try {
-        const response = await fetch('/api/sync', { method: 'POST' });
+        const response = await fetch('/api/sync', {
+          method: 'POST',
+          signal: abortController.signal,
+        });
 
         if (!response.ok) {
           throw new Error('Sync request failed');
@@ -303,6 +324,16 @@ export function SyncProvider({
           }
         } finally {
           isSseActiveRef.current = false;
+          try {
+            await reader.cancel();
+          } catch {
+            // Stream already finished or cancelled
+          }
+          try {
+            reader.releaseLock();
+          } catch {
+            // Lock already released
+          }
         }
 
         if (isSyncingRef.current && !receivedComplete) {
@@ -321,7 +352,11 @@ export function SyncProvider({
           } catch {}
           setSyncProgress(null);
         }
-      } catch (err) {
+      } catch (err: unknown) {
+        // If aborted deliberately (e.g. navigation or next chunk), exit cleanly without error toast
+        if (err instanceof Error && err.name === 'AbortError') {
+          return;
+        }
         stopPolling();
         setSyncProgress(null);
         const errorMsg = err instanceof Error ? err.message : 'Sync failed';
@@ -335,6 +370,9 @@ export function SyncProvider({
         appToast.error('Sync failed', errorMsg);
         setTimeout(() => setSyncResult(null), 8000);
       } finally {
+        if (activeAbortControllerRef.current === abortController) {
+          activeAbortControllerRef.current = null;
+        }
         if (!willAdvanceNextChunk) {
           isSyncingRef.current = false;
           setIsSyncing(false);
@@ -367,13 +405,12 @@ export function SyncProvider({
       .catch(() => {});
   }, [startPolling]);
 
-  // Page Visibility guard
+  // Page Visibility guard: pause polling when tab is hidden, check once when visible
   useEffect(() => {
     const handleVisibilityChange = async () => {
       if (document.visibilityState === 'hidden') {
-        if (isSyncingRef.current && !isSseActiveRef.current) {
-          startPolling();
-        }
+        // Immediately halt fallback polling when user minimizes or switches tabs
+        stopPolling();
       } else if (document.visibilityState === 'visible') {
         if (isSseActiveRef.current) return;
 
@@ -410,44 +447,6 @@ export function SyncProvider({
     return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
   }, [router, startPolling, stopPolling]);
 
-  // Idle background polling every 30s for external cron job
-  useEffect(() => {
-    const idleInterval = setInterval(async () => {
-      if (isSyncingRef.current || document.visibilityState === 'hidden') return;
-
-      try {
-        const res = await fetch('/api/sync/status');
-        if (!res.ok) return;
-        const data = await res.json();
-
-        if (data.lastSyncAt) {
-          if (lastSyncAtRef.current && data.lastSyncAt !== lastSyncAtRef.current) {
-            lastSyncAtRef.current = data.lastSyncAt;
-            setLastSyncAt(data.lastSyncAt);
-            if (typeof window !== 'undefined') {
-              window.dispatchEvent(new CustomEvent('wmo:refresh_notifications'));
-            }
-            router.refresh();
-          } else {
-            lastSyncAtRef.current = data.lastSyncAt;
-            setLastSyncAt(data.lastSyncAt);
-          }
-        }
-
-        if (data.isSyncing) {
-          setIsSyncing(true);
-          isSyncingRef.current = true;
-          if (data.progress) {
-            setSyncProgress(data.progress);
-          }
-          startPolling();
-        }
-      } catch {}
-    }, 30000);
-
-    return () => clearInterval(idleInterval);
-  }, [startPolling]);
-
   // Listen for custom event 'start-placement-sync'
   useEffect(() => {
     const handleTriggerSync = () => {
@@ -457,7 +456,7 @@ export function SyncProvider({
     return () => window.removeEventListener('start-placement-sync', handleTriggerSync);
   }, [handleSync]);
 
-  // Supabase Realtime listener: instant updates when applications or notifications change
+  // Supabase Realtime listener: instant updates when applications change
   useEffect(() => {
     let refreshDebounceTimer: NodeJS.Timeout | null = null;
 
@@ -466,12 +465,11 @@ export function SyncProvider({
       // (the sync's own complete handler calls router.refresh())
       if (isSyncingRef.current) return;
       if (refreshDebounceTimer) clearTimeout(refreshDebounceTimer);
-      // Debounce 2s — batch DB writes (e.g. during cron) produce many events;
-      // coalesce them into a single refresh
+      // Debounce 5s — coalesces batch DB writes (e.g. during background sync) into a single refresh
       refreshDebounceTimer = setTimeout(() => {
         refreshDebounceTimer = null;
         router.refresh();
-      }, 2000);
+      }, 5000);
     };
 
     try {
@@ -487,10 +485,10 @@ export function SyncProvider({
           'postgres_changes',
           { event: 'INSERT', schema: 'public', table: 'in_app_notifications' },
           () => {
+            // Notify bell component directly via client event; avoid triggering full Server Component reload
             if (typeof window !== 'undefined') {
               window.dispatchEvent(new CustomEvent('wmo:refresh_notifications'));
             }
-            scheduleRefresh();
           }
         )
         .subscribe();

@@ -14,12 +14,15 @@
  */
 export function cleanLocationString(raw: string | null | undefined): string {
   if (!raw) return 'Not Specified';
+  if (/^\s*(?:remote|work\s+from\s+home|wfh)\s*$/i.test(raw)) return 'Remote';
+  if (/^\s*hybrid\s*$/i.test(raw)) return 'Hybrid';
 
   let cleaned = raw
     .replace(/<[^>]+>/g, ' ')
-    .replace(/\s*(?:Criteria|Eligibility|Requirements?|Note|Job\s+Description|JD|Mandatory|Fluent\s+English|Communication|Service\s+Agreement|Bond|Selection|Process|Registration|CTC|Stipend|Designation|Role|PPO|About)\b.*$/i, '')
+    .replace(/\s*(?:Criteria|Eligibility|Requirements?|Note|Job\s+Description|JD|Mandatory|Fluent\s+English|Communication|Service\s+Agreement|Bond|Selection|Process|Registration|CTC|Stipend|Designation|Role|PPO|About|Whether|Academic\s+gap|Gap\s+allowed|Allowed|Backlogs?|Standing\s+arrears?|History\s+of\s+arrears?|Cut-?off|Aggregate|CGPA|Branch(?:es)?\s+eligible|Eligible\s+branch(?:es)?|Gender|Batch|Tentative|Internship\s+duration|Joining|Duration|Mode\s+of\s+selection|Assessment|Test\s+date|Interview|Venue|Date\s+of\s+visit)\b.*$/i, '')
     .replace(/\b(?:fluent\s+english|english\s+communication|communication\s+skills?|good\s+communication)\b.*$/i, '')
-    .replace(/\s*\(?(?:work\s+from\s+office|wfo|in\s+person|on\s*site|remote|hybrid|in\s+office)\)?/gi, '')
+    .replace(/\b(?:whether|academic\s+gap|gap\s+allowed|backlogs?|standing\s+arrears?|history\s+of\s+arrears?|allowed\s*:|allowed\b).*$/i, '')
+    .replace(/\s*\(?(?:work\s+from\s+office|wfo|in\s+person|on\s*site|in\s+office)\)?/gi, '')
     .replace(/[*_~`]+/g, '')
     .replace(/[:\-–—\s*]+$/, '')
     .replace(/^[:\-–—\s*]+/, '')
@@ -32,6 +35,18 @@ export function cleanLocationString(raw: string | null | undefined): string {
   if (cleaned.includes('(') && !cleaned.includes(')')) {
     cleaned = cleaned + ')';
   }
+
+  // Normalize multi-city separators: "|", "/", "&", and "and" (between words) to clean commas
+  cleaned = cleaned
+    .replace(/\s+(?:&|and)\s+/gi, ', ')
+    .replace(/\s*(?:\||\/)\s*/g, ', ')
+    .replace(/\s*,\s*/g, ', ')
+    .replace(/(?:,\s*)+/g, ', ')
+    .replace(/^[\s,]+|[\s,]+$/g, '')
+    .trim();
+
+  // Strip enclosing parentheses (e.g. "(Gurgaon, Bangalore)" -> "Gurgaon, Bangalore")
+  cleaned = cleaned.replace(/^\((.*)\)$/, '$1').trim();
 
   if (!cleaned || /^(?:tba|tbd|not\s+specified|not\s+mentioned|to\s+be\s+announced)$/i.test(cleaned)) {
     return 'Not Specified';

@@ -20,7 +20,7 @@ export async function DELETE(
 
   const { error } = await supabase
     .from('notifications')
-    .delete()
+    .update({ type: 'deleted' })
     .eq('id', id)
     .eq('user_id', session.userId);
 

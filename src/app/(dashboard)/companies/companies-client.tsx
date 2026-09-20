@@ -33,9 +33,12 @@ import {
   isInactiveStatus,
 } from '@/components/companies/stage-stepper';
 import { cleanLocationString } from '@/lib/sync/locations';
+import { cleanRoleTitle } from '@/lib/sync/events';
 
 export interface CompanyWithDetails {
   id: string;
+  appId?: string;
+  driveId?: string;
   name: string;
   legal_name: string | null;
   aliases: string[] | null;
@@ -84,8 +87,7 @@ interface CompaniesClientProps {
 
 const FILTERS = [
   { id: 'active', label: 'Active' },
-  { id: 'shortlisted', label: 'Shortlisted' },
-  { id: 'scheduled', label: 'Scheduled' },
+  { id: 'eliminated', label: 'Eliminated' },
   { id: 'not_shortlisted', label: 'Not Shortlisted' },
   { id: 'withdrawn', label: 'Withdrawn' },
   { id: 'not_applied', label: 'Not Applied' },
@@ -128,49 +130,62 @@ const matchFilter = (status: string, filter: string, company?: CompanyWithDetail
   const s = status.toLowerCase();
   if (filter === 'all') return true;
   if (filter === 'active') {
-    // Active = everything currently in progress (applied, scheduled, completed, shortlisted, offers, registration_open)
-    // Terminal rejections across ANY stage, non-registrations, and withdrawals are excluded
+    // Active = everything currently in progress (applied, PPT, test, interview, offer, open registration deadlines)
+    // Terminal rejections, non-registrations, and withdrawals are excluded
     if (s === 'registration_open') return true;
     return !isInactiveStatus(s) || (s === 'not_applied' && Boolean(company && hasFutureRegistrationDeadline(company)));
   }
-  if (filter === 'shortlisted') {
-    // Only active shortlists for upcoming rounds, selections, or offers (NOT completed rounds awaiting results, and NOT eliminated)
-    if (s.includes('completed') || isEliminatedStatus(s)) return false;
-    return [
-      'shortlisted',
-      'test_scheduled',
-      'test_ongoing',
-      'interview_scheduled',
-      'interview_ongoing',
-      'interview',
-      'test',
-      'selected',
-      'offer',
-      'offer_received',
-    ].includes(s);
-  }
-  if (filter === 'scheduled') {
-    // Only upcoming scheduled events (NOT completed events, NOT eliminated)
-    if (s.includes('completed') || isEliminatedStatus(s)) return false;
-    return [
-      'test_scheduled',
-      'test_ongoing',
-      'interview_scheduled',
-      'interview_ongoing',
-      'ppt_scheduled',
-      'ppt_ongoing',
-      'test',
-      'ppt',
-      'interview',
-    ].includes(s);
-  }
   if (filter === 'not_shortlisted') {
-    // All forms of elimination across all rounds (screening, test round, or interview round)
+    // Pre-test screening eliminations only (screened out before tests, did not make initial shortlist)
+    const notes = company?.application?.notes || '';
+    const isPostShortlistElimination =
+      ['rejected_test', 'rejected_interview', 'test_eliminated', 'interview_eliminated'].includes(s) ||
+      /eliminated in (test|interview|assessment)/i.test(notes);
+    if (isPostShortlistElimination) return false;
     return isEliminatedStatus(s);
+  }
+  if (filter === 'eliminated') {
+    // Post-shortlist eliminations: candidate cracked shortlist / took test or interview, but eliminated in test or interview round
+    const notes = company?.application?.notes || '';
+    const isPostShortlistElimination =
+      ['rejected_test', 'rejected_interview', 'test_eliminated', 'interview_eliminated'].includes(s) ||
+      /eliminated in (test|interview|assessment)/i.test(notes);
+    return isPostShortlistElimination;
   }
   if (filter === 'withdrawn') return ['withdrawn', 'declined'].includes(s);
   if (filter === 'not_applied') return s === 'not_applied' || s === 'registration_open';
+
+  // Legacy compatibility aliases kept for URL bookmarks
+  if (filter === 'shortlisted') {
+    return (
+      [
+        'shortlisted', 'test_scheduled', 'test_ongoing', 'test_completed',
+        'interview_scheduled', 'interview_ongoing', 'interview_completed',
+        'interview', 'test', 'selected', 'offer', 'offer_received',
+        'rejected_test', 'rejected_interview', 'test_eliminated', 'interview_eliminated',
+      ].includes(s) || /eliminated in (test|interview|assessment)/i.test(company?.application?.notes || '')
+    );
+  }
+  if (filter === 'scheduled') {
+    if (s.includes('completed') || isEliminatedStatus(s)) return false;
+    return [
+      'test_scheduled', 'test_ongoing', 'interview_scheduled', 'interview_ongoing',
+      'ppt_scheduled', 'ppt_ongoing', 'test', 'ppt', 'interview'
+    ].includes(s);
+  }
   return true;
+};
+
+// Extract numeric part of drive number for descending sort (e.g. pat-PL-2026-1324 -> 1324)
+const getDriveNum = (c: CompanyWithDetails): number => {
+  const str = c.drive_number || c.drive_name || '';
+  const m = str.match(/pat-PL-\d{4}-(\d+)/i) || str.match(/(\d+)$/);
+  if (m) return parseInt(m[1], 10);
+  const anyDigits = str.match(/\d+/g);
+  if (anyDigits && anyDigits.length > 0) {
+    return parseInt(anyDigits[anyDigits.length - 1], 10);
+  }
+  return 0;
 };
 
 const NEXT_EVENT_CLS: Record<string, string> = {
@@ -196,6 +211,15 @@ function getHue(name: string) {
   let hash = 0;
   for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) >>> 0;
   return HUES[hash % HUES.length];
+}
+
+function formatShortCategory(cat?: string | null): string {
+  if (!cat) return '';
+  const cleaned = cat
+    .replace(/\b(internship|offer|placement|drive)\b/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return cleaned || cat.trim();
 }
 
 function formatEventTime(dateStr: string | null) {
@@ -324,9 +348,9 @@ export default function CompaniesClient({
           if (s === 'selected' || s === 'offer' || s === 'offer_received') return 100;
           if (s === 'interview_completed') return 90;
           if (s === 'interview_scheduled' || s === 'interview') return 80;
-          if (s === 'test_completed') return 70; // e.g. Goldman Sachs, EY GDS, Cummins
-          if (s === 'test_scheduled' || s === 'test') return 60; // e.g. Playsimple Games
-          if (s === 'ppt_completed') return 50; // e.g. Unilever, EY SAP
+          if (s === 'test_completed') return 70;
+          if (s === 'test_scheduled' || s === 'test') return 60;
+          if (s === 'ppt_completed') return 50;
           if (s === 'ppt_scheduled' || s === 'ppt') return 40;
           if (s === 'registration_open') return 35;
           return 10; // applied
@@ -336,7 +360,10 @@ export default function CompaniesClient({
         const rankB = getRank(b);
         if (rankB !== rankA) return rankB - rankA;
 
-        // 3. Secondary sort: prioritize manual/bot updates, else latest email circular / applied_at
+        // 3. Secondary: drive number descending, then most recent email / applied date
+        const numDiff = getDriveNum(b) - getDriveNum(a);
+        if (numDiff !== 0) return numDiff;
+
         const isManualA = a.application?.manual_override && a.application?.last_updated;
         const isManualB = b.application?.manual_override && b.application?.last_updated;
         const dateA = new Date(isManualA ? a.application!.last_updated : a.latestEmailDate || a.application?.applied_at || a.updated_at || 0).getTime();
@@ -345,40 +372,47 @@ export default function CompaniesClient({
       });
     }
 
-    if (filter === 'not_shortlisted') {
+    if (filter === 'eliminated') {
+      // Sort by furthest progression first (interview round eliminated > test round eliminated)
       return [...list].sort((a, b) => {
         const getRank = (comp: CompanyWithDetails) => {
           const rawStatus = comp.application?.status || 'applied';
           const eff = getEffectiveStage(rawStatus, comp.latestEvent, comp.events, comp.application?.notes, comp.application?.manual_override);
-          if (eff.eliminatedStage === 3) return 4; // Interview round eliminated
-          if (eff.effectiveStatus === 'rejected' && eff.eliminatedStage === 2) return 3; // Eliminated in test round
-          if (eff.eliminatedStage === 2) return 2; // Not shortlisted for test (after PPT)
-          return 1; // Screened out in initial screening (stage 0)
+          if (eff.eliminatedStage === 4) return 5; // interview round eliminated
+          if (eff.eliminatedStage === 3) return 4; // interview shortlist eliminated
+          if (eff.eliminatedStage === 2 && ['rejected_test', 'test_eliminated'].includes(eff.effectiveStatus)) return 3;
+          return 2;
         };
-
         const rankA = getRank(a);
         const rankB = getRank(b);
-        if (rankB !== rankA) {
-          return rankB - rankA; // Higher progression first (test/interview eliminated at top)
-        }
+        if (rankB !== rankA) return rankB - rankA;
 
-        // Secondary sort: most recent email/update first
+        const numDiff = getDriveNum(b) - getDriveNum(a);
+        if (numDiff !== 0) return numDiff;
+
         const dateA = new Date(a.latestEmailDate || a.updated_at || 0).getTime();
         const dateB = new Date(b.latestEmailDate || b.updated_at || 0).getTime();
         return dateB - dateA;
       });
     }
 
-    return list;
+    // Default for 'all', 'not_shortlisted', 'withdrawn', 'not_applied':
+    // Sort according to descending order of drive numbers (highest drive number first, e.g. 1324 > 1320...)
+    return [...list].sort((a, b) => {
+      const numDiff = getDriveNum(b) - getDriveNum(a);
+      if (numDiff !== 0) return numDiff;
+      const dateA = new Date(a.latestEmailDate || a.updated_at || 0).getTime();
+      const dateB = new Date(b.latestEmailDate || b.updated_at || 0).getTime();
+      return dateB - dateA;
+    });
   }, [companies, filter, q]);
 
   const filterCounts = useMemo(() => {
     const counts: Record<string, number> = {
       all: companies.length,
       active: 0,
-      shortlisted: 0,
-      scheduled: 0,
       not_shortlisted: 0,
+      eliminated: 0,
       withdrawn: 0,
       not_applied: 0,
     };
@@ -387,11 +421,19 @@ export default function CompaniesClient({
       const eff = getEffectiveStage(rawStatus, c.latestEvent, c.events, c.application?.notes, c.application?.manual_override);
       const st = eff.effectiveStatus;
       if (matchFilter(st, 'active', c)) counts.active++;
-      if (matchFilter(st, 'shortlisted')) counts.shortlisted++;
-      if (matchFilter(st, 'scheduled')) counts.scheduled++;
-      if (matchFilter(st, 'not_shortlisted')) counts.not_shortlisted++;
-      if (matchFilter(st, 'withdrawn')) counts.withdrawn++;
-      if (matchFilter(st, 'not_applied')) counts.not_applied++;
+      if (matchFilter(st, 'not_shortlisted', c)) counts.not_shortlisted++;
+      if (matchFilter(st, 'eliminated', c)) counts.eliminated++;
+      if (matchFilter(st, 'withdrawn', c)) counts.withdrawn++;
+      if (matchFilter(st, 'not_applied', c)) counts.not_applied++;
+    }
+    return counts;
+  }, [companies]);
+
+  const companyCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const c of companies) {
+      const key = c.name.toLowerCase().trim();
+      counts.set(key, (counts.get(key) || 0) + 1);
     }
     return counts;
   }, [companies]);
@@ -468,18 +510,25 @@ export default function CompaniesClient({
       {/* 2-Column Company Cards Grid (Emergent Style) */}
       <div className="mt-4 sm:mt-5 grid grid-cols-1 lg:grid-cols-2 gap-3.5 sm:gap-4.5 w-full min-w-0 max-w-full">
         {filteredCompanies.map((c, i) => {
-          const nextEv =
-            c.latestEvent ||
-            (c.events || []).find((e) => e.start_time && new Date(e.start_time).getTime() >= Date.now());
+          const potentialEvs = [
+            ...(c.latestEvent ? [c.latestEvent] : []),
+            ...(c.events || [])
+          ];
+          const nextEv = potentialEvs.find(
+            (e) => e.start_time && new Date(e.start_time).getTime() >= Date.now() && e.event_type !== 'registration_deadline'
+          );
           const rawStatus = c.application?.status || 'applied';
           const effectiveResult = getEffectiveStage(rawStatus, nextEv, c.events, c.application?.notes, c.application?.manual_override);
           const status = effectiveResult.effectiveStatus;
           const futureDeadline = getFutureRegistrationDeadline(c);
           const stageIndex = effectiveResult.stageIndex;
-          const role = c.application?.role || 'Campus Placement Drive';
-          const category = c.application?.category || (/1[0-9]\s*lpa|[2-9][0-9]\s*lpa/i.test(c.application?.ctc || '') ? 'Super Dream' : 'Dream');
+          const cleanedRole = cleanRoleTitle(c.application?.role);
+          const role = cleanedRole || 'Campus Placement Drive';
+          const rawCategory = c.application?.category || (/1[0-9]\s*lpa|[2-9][0-9]\s*lpa/i.test(c.application?.ctc || '') ? 'Super Dream' : 'Dream');
+          const shortCategory = formatShortCategory(rawCategory);
           const initials = c.name.slice(0, 2).toUpperCase();
           const hue = getHue(c.name);
+          const isMultiDrive = (companyCounts.get(c.name.toLowerCase().trim()) || 0) > 1;
 
           const driveMode = getDriveMode(c.application?.notes, userCampus);
 
@@ -490,20 +539,19 @@ export default function CompaniesClient({
 
           return (
             <motion.div
-              key={c.id}
+              key={`${c.id}-${c.appId || ''}-${c.driveId || ''}`}
               data-testid={`company-card-${c.id}`}
               initial={{ opacity: 0, y: 16 }}
               animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.4, delay: Math.min(i * 0.04, 0.4) }}
-              whileHover={{ y: -3 }}
+              transition={{ delay: i * 0.03, duration: 0.3 }}
               className="w-full min-w-0 max-w-full h-full"
             >
               <Link
-                href={`/companies/${c.id}`}
-                className={`group flex flex-col justify-between h-full w-full min-w-0 max-w-full overflow-hidden rounded-xl border border-zinc-800 bg-bg-surface p-3.5 sm:p-4 text-left transition-colors duration-200 hover:border-zinc-600 ${status === 'selected' || status === 'offer'
+                href={`/companies/${c.id}?${new URLSearchParams(Object.entries({ appId: c.appId || '', driveId: c.driveId || '' }).filter(([_, v]) => v !== '')).toString()}`}
+                className={cn(`group flex flex-col justify-between h-full w-full min-w-0 max-w-full overflow-hidden rounded-xl border border-zinc-800 bg-bg-surface p-3.5 sm:p-4 text-left transition-colors duration-200 hover:border-zinc-600 ${status === 'selected' || status === 'offer'
                   ? 'border-emerald-500/30 shadow-[0_0_40px_rgba(16,185,129,0.08)]'
                   : ''
-                  }`}
+                  }`)}
               >
                 {/* Top Content Area */}
                 <div className="flex-1 flex flex-col min-w-0">
@@ -517,6 +565,17 @@ export default function CompaniesClient({
                       <div className="flex items-center justify-between gap-2 min-w-0">
                         <h3 className="truncate min-w-0 flex-1 font-display text-sm sm:text-base font-bold tracking-tight text-zinc-100 group-hover:text-emerald-300 transition-colors">
                           {c.name}
+                          {isMultiDrive && (
+                            <span
+                              title={`Placement Drive Number: ${c.drive_number || 'Drive'}`}
+                              className="ml-2 rounded-md bg-zinc-800/90 px-1.5 py-0.5 font-mono text-[10px] font-medium text-emerald-400 border border-emerald-500/20 cursor-help"
+                            >
+                              {(() => {
+                                const m = c.drive_number?.match(/\d+$/);
+                                return m ? `#${m[0]}` : (c.drive_number || 'Drive');
+                              })()}
+                            </span>
+                          )}
                         </h3>
                         <StatusChip
                           status={status}
@@ -524,28 +583,28 @@ export default function CompaniesClient({
                         />
                       </div>
                       <div className="mt-1 flex items-center gap-1.5 min-w-0 text-xs text-zinc-400">
-                        <span className="truncate">{role}</span>
-                        {category && (
+                        <span className="truncate max-w-[200px] sm:max-w-[280px]" title={role}>{role}</span>
+                        {shortCategory && (
                           <>
                             <span className="text-zinc-600 shrink-0">·</span>
-                            <span className="shrink-0 text-zinc-500">{category}</span>
+                            <span className="shrink-0 text-zinc-500 font-medium">{shortCategory}</span>
                           </>
                         )}
                       </div>
                     </div>
                   </div>
 
-                  <div className="mt-3 flex flex-wrap items-center gap-x-3 sm:gap-x-4 gap-y-1 text-[11px] text-zinc-500 min-w-0">
-                    <span className="font-tabular font-mono text-xs sm:text-sm font-bold text-zinc-200 shrink-0">
+                  {/* Compensation, Location (plain text with icon), Drive Mode, and Recency */}
+                  <div className="mt-3 flex flex-wrap items-center gap-x-2.5 sm:gap-x-3.5 gap-y-1.5 text-[11px] text-zinc-500 min-w-0">
+                    <span className="font-tabular font-mono text-xs sm:text-sm font-bold text-zinc-100 shrink-0">
                       {ctcDisplay}
                     </span>
-                    {/* Work Location: Neutral/Gray Pin + Text (Only show if specified) */}
                     {(() => {
                       const loc = cleanLocationString(c.application?.location);
                       if (!loc || loc === 'Not Specified') return null;
                       return (
                         <span
-                          className="flex items-center gap-1 min-w-0 max-w-33.75 sm:max-w-none truncate shrink-0 text-zinc-400"
+                          className="flex items-center gap-1 sm:gap-1.5 min-w-0 max-w-[150px] sm:max-w-[210px] truncate shrink-0 text-zinc-400"
                           title={`Work Location: ${loc}`}
                         >
                           <MapPin className="h-3.5 w-3.5 shrink-0 text-zinc-400" />
@@ -571,7 +630,7 @@ export default function CompaniesClient({
                         <span
                           suppressHydrationWarning
                           title={titleText}
-                          className="ml-auto font-mono text-[10px] text-zinc-600 shrink-0 cursor-default"
+                          className="ml-auto font-mono text-[10px] sm:text-[10.5px] text-zinc-500 shrink-0 cursor-default"
                         >
                           {displayDate ? timeAgo(displayDate) : 'Active'}
                         </span>
@@ -581,49 +640,58 @@ export default function CompaniesClient({
 
                   {/* Recruitment Stage Stepper */}
                   <div className="mt-3.5 pt-3 border-t border-zinc-800/80">
-                    <div className="mb-2 flex items-center justify-between min-w-0 gap-2">
-                      <span className="font-mono text-[10px] uppercase tracking-widest text-zinc-500 shrink-0">
-                        {status === 'registration_open'
-                          ? 'Registration'
-                          : ['withdrawn', 'declined', 'not_applied'].includes(status)
-                            ? 'Participation Status'
-                            : 'Recruitment Stage'}
-                      </span>
-                      <div className="flex items-center gap-2 min-w-0 overflow-hidden">
-                        {nextEv?.start_time &&
-                          effectiveResult.eliminatedStage === -1 &&
-                          !['not_shortlisted', 'rejected', 'withdrawn', 'declined', 'not_applied', 'registration_open'].includes(status) && (
-                            <span
-                              suppressHydrationWarning
-                              className={cn(
-                                'font-mono text-[10px] flex items-center gap-1 font-semibold px-1.5 py-0.5 rounded border shrink-0',
-                                NEXT_EVENT_CLS[nextEv.event_type] || NEXT_EVENT_CLS.test
-                              )}
-                              title={nextEv.title || nextEv.event_type}
-                            >
-                              <Clock className="h-2.5 w-2.5 shrink-0" />
-                              <span>{formatEventTime(nextEv.start_time)}</span>
-                            </span>
-                          )}
-                        {status !== 'registration_open' && (
-                          <span
-                            className={cn(
-                              'font-mono text-[10px] truncate',
-                              effectiveResult.eliminatedStage !== -1
-                                ? 'text-rose-400 font-semibold'
-                                : 'text-zinc-500'
+                    {(() => {
+                      const hasUpcomingEvent = Boolean(
+                        nextEv?.start_time &&
+                        effectiveResult.eliminatedStage === -1 &&
+                        !['not_shortlisted', 'rejected', 'withdrawn', 'declined', 'not_applied', 'registration_open'].includes(status)
+                      );
+
+                      return (
+                        <div className="mb-2 flex items-center justify-between min-w-0 gap-2">
+                          <span className="font-mono text-[10px] uppercase tracking-widest text-zinc-500 shrink-0">
+                            {status === 'registration_open'
+                              ? 'Registration'
+                              : ['withdrawn', 'declined', 'not_applied'].includes(status)
+                                ? 'Participation Status'
+                                : 'Recruitment Stage'}
+                          </span>
+                          <div className="flex items-center gap-2 min-w-0 overflow-hidden">
+                            {hasUpcomingEvent && (
+                              <span
+                                suppressHydrationWarning
+                                className={cn(
+                                  'font-mono text-[10px] flex items-center gap-1 font-semibold px-1.5 py-0.5 rounded border shrink-0',
+                                  NEXT_EVENT_CLS[nextEv!.event_type] || NEXT_EVENT_CLS.test
+                                )}
+                                title={nextEv!.title || nextEv!.event_type}
+                              >
+                                <Clock className="h-2.5 w-2.5 shrink-0" />
+                                <span>{formatEventTime(nextEv!.start_time)}</span>
+                              </span>
                             )}
-                          >
-                            {effectiveResult.statusSubtitle}
-                          </span>
-                        )}
-                        {status === 'registration_open' && (
-                          <span className="font-mono text-[10px] truncate text-zinc-500">
-                            Not Applied • Awaiting Registration
-                          </span>
-                        )}
-                      </div>
-                    </div>
+                            {status !== 'registration_open' && (
+                              <span
+                                className={cn(
+                                  'font-mono text-[10px] truncate',
+                                  hasUpcomingEvent ? 'hidden sm:inline' : 'inline',
+                                  effectiveResult.eliminatedStage !== -1
+                                    ? 'text-rose-400 font-semibold'
+                                    : 'text-zinc-500'
+                                )}
+                              >
+                                {effectiveResult.statusSubtitle}
+                              </span>
+                            )}
+                            {status === 'registration_open' && (
+                              <span className="font-mono text-[10px] truncate text-zinc-500">
+                                Awaiting Registration
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })()}
                     <StageStepper
                       status={rawStatus}
                       latestEvent={nextEv}
@@ -633,8 +701,8 @@ export default function CompaniesClient({
                   </div>
                 </div>
 
-                {/* Bottom Section: Minimal Open timeline action */}
-                <div className="mt-2.5 flex items-center justify-end">
+                {/* Bottom Section: Minimal Open timeline action (Desktop only to prevent mobile clutter & FAB overlap) */}
+                <div className="mt-2.5 hidden sm:flex items-center justify-end">
                   <div className="flex items-center gap-1 text-[11px] font-semibold text-zinc-500 transition-colors group-hover:text-emerald-400">
                     <span>Open timeline</span> <ArrowUpRight className="h-3.5 w-3.5" />
                   </div>

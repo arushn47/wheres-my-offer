@@ -257,7 +257,7 @@ export function StageStepper({
                 title={s.label}
                 className={cn(
                   'truncate max-w-full text-center transition-colors',
-                  compact ? 'text-[9px] mt-1' : 'text-[10px] mt-1.5 hidden sm:block',
+                  compact ? 'text-[8px] sm:text-[8.5px] tracking-tighter sm:tracking-normal mt-1' : 'text-[10px] mt-1.5 hidden sm:block',
                   isEliminated
                     ? 'text-rose-400 font-bold'
                     : isCurrent

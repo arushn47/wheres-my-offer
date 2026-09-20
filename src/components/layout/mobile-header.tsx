@@ -90,11 +90,11 @@ export default function MobileHeader({ userName, userAvatar }: MobileHeaderProps
   return (
     <>
       <header className="relative lg:hidden flex items-center justify-between h-12 px-3.5 sm:px-6 md:px-12 bg-[#09090b]/90 backdrop-blur-xl border-b border-zinc-800/80 sticky top-0 z-50 w-full min-w-0 max-w-full">
-        {/* Left: Mobile logo */}
+        {/* Left: Mobile logo — show only clean logo mark on mobile phones, full title on sm+ */}
         <div className="flex items-center gap-2 lg:hidden min-w-0 shrink-0">
           <Link href="/" className="flex items-center gap-2 min-w-0 group" title="Where's My Offer?">
-            <AppLogoMark size={26} className="shrink-0 transition-transform group-hover:scale-105" />
-            <span className="font-display text-xs sm:text-sm font-bold tracking-tight text-zinc-100 truncate">
+            <AppLogoMark size={28} className="shrink-0 transition-transform group-hover:scale-105" />
+            <span className="hidden sm:inline-flex font-display text-xs sm:text-sm font-bold tracking-tight text-zinc-100 truncate">
               Where&apos;s My Offer<span className="text-emerald-400 font-extrabold ml-0.5 drop-shadow-[0_0_6px_rgba(52,211,153,0.55)]">?</span>
             </span>
           </Link>

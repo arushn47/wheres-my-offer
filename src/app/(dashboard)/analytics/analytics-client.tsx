@@ -20,7 +20,8 @@ import { StatusChip } from '@/components/ui/status-chip';
 
 export interface AnalyticsApplication {
   id: string;
-  company_id: string;
+
+  placement_drive_id?: string | null;
   status: string;
   notes?: string | null;
   ctc: string | null;
@@ -32,7 +33,8 @@ export interface AnalyticsApplication {
 
 export interface AnalyticsEvent {
   id: string;
-  company_id: string;
+
+  placement_drive_id?: string | null;
   event_type: string;
   start_time: string | null;
 }
@@ -95,12 +97,13 @@ export default function AnalyticsClient({
     let maxCtc = 0;
     let maxCtcStr = 'TBA';
 
-    // Index events by company_id to verify stage participation
-    const eventsByCompany = new Map<string, AnalyticsEvent[]>();
+    // Index events by operational identity; legacy rows use an explicit key.
+    const eventsByDrive = new Map<string, AnalyticsEvent[]>();
     events.forEach((ev) => {
-      const list = eventsByCompany.get(ev.company_id) || [];
+      const key = ev.placement_drive_id || '';
+      const list = eventsByDrive.get(key) || [];
       list.push(ev);
-      eventsByCompany.set(ev.company_id, list);
+      eventsByDrive.set(key, list);
     });
 
     applications.forEach((app) => {
@@ -111,7 +114,7 @@ export default function AnalyticsClient({
       }
       applied++;
 
-      const compEvents = eventsByCompany.get(app.company_id) || [];
+      const compEvents = eventsByDrive.get(app.placement_drive_id || '') || [];
       const hasTestEvent = compEvents.some((e) =>
         /test|coding|assessment|hackerearth|mettl|shl/i.test(`${e.event_type || ''}`)
       );

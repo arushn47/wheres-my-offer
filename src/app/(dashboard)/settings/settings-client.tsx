@@ -369,8 +369,8 @@ export default function SettingsClient({
         >
           <div className="space-y-2.5">
             {/* Integrated app input row */}
-            <div className="flex items-center rounded-xl border border-white/[0.08] bg-zinc-900/60 p-1.5 focus-within:border-emerald-500/50 transition-colors">
-              <div className="pl-2 pr-1 text-emerald-400/80">
+            <div className="flex items-center w-full max-w-full rounded-xl border border-white/[0.08] bg-zinc-900/60 p-1.5 focus-within:border-emerald-500/50 transition-colors overflow-hidden">
+              <div className="pl-2 pr-1 text-emerald-400/80 shrink-0">
                 <Hash className="h-4 w-4" />
               </div>
               <input
@@ -379,13 +379,13 @@ export default function SettingsClient({
                 onChange={(e) => setRegId(e.target.value.toUpperCase())}
                 placeholder="e.g. 21BCE0492"
                 maxLength={12}
-                className="h-9 flex-1 bg-transparent px-2 font-mono text-sm tracking-widest text-zinc-100 placeholder:text-zinc-600 placeholder:font-sans placeholder:tracking-normal focus:outline-none uppercase"
+                className="h-9 flex-1 min-w-0 bg-transparent px-2 font-mono text-xs sm:text-sm tracking-widest text-zinc-100 placeholder:text-zinc-600 placeholder:font-sans placeholder:tracking-normal focus:outline-none uppercase"
               />
               <button
                 data-testid="regid-save-btn"
                 onClick={handleSaveRegId}
                 disabled={isSavingId}
-                className="h-9 rounded-lg bg-emerald-500 px-3.5 sm:px-4 text-xs font-bold text-zinc-950 transition-all hover:bg-emerald-400 active:scale-95 disabled:opacity-60 cursor-pointer shrink-0"
+                className="h-9 rounded-lg bg-emerald-500 px-3 sm:px-4 text-xs font-bold text-zinc-950 transition-all hover:bg-emerald-400 active:scale-95 disabled:opacity-60 cursor-pointer shrink-0 whitespace-nowrap"
               >
                 {isSavingId ? 'Saving…' : 'Save ID'}
               </button>

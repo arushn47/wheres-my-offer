@@ -9,7 +9,7 @@ import {
   isInvalidCompanyName,
   extractCompanyAliases,
 } from '@/lib/sync/classifier';
-import { extractDriveNumber, extractEvents, extractJobDetails, extractTravelRequirement } from '@/lib/sync/events';
+import { cleanRoleTitle, extractDriveNumber, extractEvents, extractJobDetails, extractTravelRequirement } from '@/lib/sync/events';
 import { isFuzzyCompanyMatch } from '@/lib/sync/engine';
 import {
   buildCircularCatalog,
@@ -67,7 +67,7 @@ export async function recalculateApplicationStatuses(
     sender: string | null;
     body_snippet: string | null;
     classification: string | null;
-    company_id: string | null;
+    placement_drive_id: string | null;
     received_at: string | null;
   }> = [];
 
@@ -76,7 +76,7 @@ export async function recalculateApplicationStatuses(
   while (true) {
     const { data: chunk, error: chunkErr } = await supabase
       .from('emails')
-      .select('id, subject, sender, body_snippet, classification, company_id, received_at')
+      .select('id, subject, sender, body_snippet, classification, placement_drive_id, received_at')
       .eq('user_id', userId)
       .order('received_at', { ascending: true })
       .range(page * pageSize, (page + 1) * pageSize - 1);
@@ -89,20 +89,50 @@ export async function recalculateApplicationStatuses(
 
   if (allEmails.length === 0) return { updatedCount: 0, results: [] };
 
-  // Run comprehensive company deduplication pass before status calculation
-  try {
-    const { deduplicateUserCompanies } = await import('@/lib/sync/dedup');
-    await deduplicateUserCompanies(supabase, userId);
-  } catch (dedupErr) {
-    console.warn('[recalculateApplicationStatuses] Pre-calculation dedup warning:', dedupErr);
-  }
 
-  const { data: remainingCompanies } = await supabase
-    .from('companies')
-    .select('id, name, drive_number')
-    .eq('user_id', userId);
+  const [{ data: remainingCompanies }, { data: placementDrives }, { data: driveLinks }] = await Promise.all([
+    supabase
+      .from('companies')
+      .select('id, name, aliases')
+      .eq('user_id', userId),
+    supabase
+      .from('placement_drives')
+      .select('id, company_id, drive_number, drive_name, role, created_at')
+      .eq('user_id', userId),
+    supabase
+      .from('email_drive_links')
+      .select('email_id, placement_drive_id'),
+  ]);
 
   if (!remainingCompanies || remainingCompanies.length === 0) return { updatedCount: 0, results: [] };
+
+  const companyMap = new Map((remainingCompanies || []).map((c) => [c.id, c]));
+  const drivesByCompanyId = new Map<string, any[]>();
+  for (const d of (placementDrives || [])) {
+    const list = drivesByCompanyId.get(d.company_id) || [];
+    list.push(d);
+    drivesByCompanyId.set(d.company_id, list);
+  }
+
+  // Ensure every company has at least one placement drive
+  const allDrives = [...(placementDrives || [])];
+  for (const c of remainingCompanies) {
+    if (!drivesByCompanyId.has(c.id) || drivesByCompanyId.get(c.id)!.length === 0) {
+      const { data: newDrive } = await supabase
+        .from('placement_drives')
+        .insert({
+          user_id: userId,
+          company_id: c.id,
+          drive_name: c.name,
+        })
+        .select('id, company_id, drive_number, drive_name, role, created_at')
+        .single();
+      if (newDrive) {
+        drivesByCompanyId.set(c.id, [newDrive]);
+        allDrives.push(newDrive);
+      }
+    }
+  }
 
   // Deduplicate rogue companies ending with UG/PG or duplicate names if base company exists
   for (const c of remainingCompanies) {
@@ -112,12 +142,20 @@ export async function recalculateApplicationStatuses(
         (other) => other.id !== c.id && other.name.toLowerCase() === baseName.toLowerCase()
       );
       if (baseComp) {
-        await supabase.from('emails').update({ company_id: baseComp.id }).eq('company_id', c.id);
-        await supabase.from('applications').delete().eq('company_id', c.id);
-        await supabase.from('events').delete().eq('company_id', c.id);
-        await supabase.from('notifications').delete().eq('company_id', c.id);
+        const cDrives = drivesByCompanyId.get(c.id) || [];
+        const baseDrives = drivesByCompanyId.get(baseComp.id) || [];
+        const targetDriveId = baseDrives[0]?.id;
+        for (const cd of cDrives) {
+          if (targetDriveId) {
+            await supabase.from('emails').update({ placement_drive_id: targetDriveId }).eq('placement_drive_id', cd.id);
+            await supabase.from('applications').delete().eq('placement_drive_id', cd.id);
+            await supabase.from('events').delete().eq('placement_drive_id', cd.id);
+            await supabase.from('notifications').delete().eq('placement_drive_id', cd.id);
+            await supabase.from('email_drive_links').delete().eq('placement_drive_id', cd.id);
+          }
+          await supabase.from('placement_drives').delete().eq('id', cd.id);
+        }
         await supabase.from('companies').delete().eq('id', c.id);
-        c.id = baseComp.id;
       }
     }
   }
@@ -136,33 +174,119 @@ export async function recalculateApplicationStatuses(
     .select('id, match_type, email_id, matched_value')
     .eq('user_id', userId);
 
-  const emailsByCompanyId = new Map<string, typeof allEmails>();
+  const emailsByDriveId = new Map<string, typeof allEmails>();
   for (const e of allEmails) {
-    if (e.company_id) {
-      const list = emailsByCompanyId.get(e.company_id) || [];
+    if (e.placement_drive_id) {
+      const list = emailsByDriveId.get(e.placement_drive_id) || [];
       list.push(e);
-      emailsByCompanyId.set(e.company_id, list);
+      emailsByDriveId.set(e.placement_drive_id, list);
+    }
+  }
+
+  const emailById = new Map(allEmails.map((e) => [e.id, e]));
+  for (const link of (driveLinks || [])) {
+    const linkedEmail = emailById.get(link.email_id);
+    if (linkedEmail) {
+      const list = emailsByDriveId.get(link.placement_drive_id) || [];
+      if (!list.some(e => e.id === linkedEmail.id)) {
+        list.push(linkedEmail);
+        emailsByDriveId.set(link.placement_drive_id, list);
+      }
     }
   }
 
   let updatedAppsCount = 0;
   const applicationResults: Array<{ company: string; status: string; role?: string | null; ctc?: string | null }> = [];
 
-  const uniqueCompanies = Array.from(new Map(remainingCompanies.map((c) => [c.id, c])).values());
+  const isPersonalNeoPatEmail = (e: { sender?: string | null }) =>
+    /noreply\.cdcinfo@vitstudent\.ac\.in/i.test(e.sender || '');
 
-  for (let cIdx = 0; cIdx < uniqueCompanies.length; cIdx++) {
-    const comp = uniqueCompanies[cIdx];
-    const companyEmails = emailsByCompanyId.get(comp.id) || [];
-    if (companyEmails.length === 0) continue;
+  const isRegistrationCircular = (e: { subject?: string | null; body_snippet?: string | null }) => {
+    const text = `${e.subject || ''}\n${e.body_snippet || ''}`;
+    return (
+      (/name\s+of\s+the\s+company/i.test(text) && /category/i.test(text)) ||
+      /super\s*dream.*registration|dream.*registration|placement\s+registration|internship\s+registration/i.test(
+        e.subject || ''
+      )
+    );
+  };
 
-    if (cIdx % 5 === 0 || cIdx === uniqueCompanies.length - 1) {
+  for (let dIdx = 0; dIdx < allDrives.length; dIdx++) {
+    const drive = allDrives[dIdx];
+    const comp = companyMap.get(drive.company_id);
+    if (!comp) continue;
+
+    const driveEmails = [...(emailsByDriveId.get(drive.id) || [])];
+
+    // Determine verified start date of this drive from its official assigned emails or drive creation
+    const verifiedPersonal = driveEmails.filter(isPersonalNeoPatEmail);
+    const verifiedCirculars = driveEmails.filter(isRegistrationCircular);
+    const verifiedTimes = [
+      ...verifiedPersonal.map((e) => new Date(e.received_at || 0).getTime()),
+      ...verifiedCirculars.map((e) => new Date(e.received_at || 0).getTime()),
+    ].filter((t) => t > 0);
+    const verifiedDriveStartTime = verifiedTimes.length > 0
+      ? Math.min(...verifiedTimes)
+      : (drive.created_at ? new Date(drive.created_at).getTime() : null);
+    const driveMinAllowedTime = verifiedDriveStartTime
+      ? verifiedDriveStartTime - 24 * 60 * 60 * 1000
+      : 0;
+
+    // Fallback: only pull unassigned college emails that match company name with strict word boundaries
+    // AND strictly arrived within this drive's active timeframe (never before the drive existed!)
+    const aliases = (comp.aliases || []).map((a: string) => a.toLowerCase().trim());
+    const compNameLower = comp.name.toLowerCase().trim();
+
+    const isCompanySubjectMatch = (subject: string): boolean => {
+      const sub = subject.toLowerCase();
+      // Match full company name with word boundary
+      if (compNameLower.length >= 3) {
+        const escaped = compNameLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        if (new RegExp(`\\b${escaped}\\b`, 'i').test(sub)) return true;
+      }
+      // Match drive number
+      if (drive.drive_number) {
+        const cleanDn = drive.drive_number.toLowerCase().replace(/[^a-z0-9]/g, '');
+        const cleanSub = sub.replace(/[^a-z0-9]/g, '');
+        if (cleanDn.length >= 4 && cleanSub.includes(cleanDn)) return true;
+      }
+      // Match substantive aliases (must be >= 4 chars, never short acronyms or generic words)
+      for (const a of aliases) {
+        if (!a || a.length < 4 || ['ngi', 'pan', 'work', 'part', 'pls', 'data', 'asia', 'tech'].includes(a)) continue;
+        const escaped = a.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        if (new RegExp(`\\b${escaped}\\b`, 'i').test(sub)) {
+          return true;
+        }
+      }
+      return false;
+    };
+
+    for (const e of allEmails) {
+      if (!e.placement_drive_id && e.subject && e.received_at) {
+        const eTime = new Date(e.received_at).getTime();
+        // RULE: Never check or include emails that arrived before this drive came!
+        if (driveMinAllowedTime > 0 && eTime < driveMinAllowedTime) {
+          continue;
+        }
+        if (isCompanySubjectMatch(e.subject)) {
+          if (!driveEmails.some(existing => existing.id === e.id)) {
+            driveEmails.push(e);
+          }
+        }
+      }
+    }
+
+    if (driveEmails.length === 0) continue;
+
+    if (dIdx % 5 === 0 || dIdx === allDrives.length - 1) {
       onProgress?.({
         step: 5,
         totalSteps: 5,
-        message: `Recalculating application stages, CTCs & calendar events (${cIdx + 1} / ${uniqueCompanies.length})…`,
+        message: `Recalculating application stages, CTCs & calendar events (${dIdx + 1} / ${allDrives.length})…`,
       });
     }
 
+    const companyEmails = driveEmails;
     const emailIds = new Set(companyEmails.map((e) => e.id));
     const matchedEmailIds = new Set(
       (candidateMatches || [])
@@ -250,33 +374,29 @@ export async function recalculateApplicationStatuses(
     const chronologicalCompanyEmails = [...companyEmails].sort(
       (a, b) => new Date(a.received_at || 0).getTime() - new Date(b.received_at || 0).getTime()
     );
-    const isPersonalNeoPatEmail = (e: { sender?: string | null }) =>
-      /noreply\.cdcinfo@vitstudent\.ac\.in/i.test(e.sender || '');
+    const personalCompanyEmails = chronologicalCompanyEmails.filter(isPersonalNeoPatEmail);
     const collegeCompanyEmails = chronologicalCompanyEmails.filter((e) => !isPersonalNeoPatEmail(e));
 
-    const isRegistrationCircular = (e: { subject?: string | null; body_snippet?: string | null }) => {
+    const fullCirculars = collegeCompanyEmails.filter((e) => {
       const text = `${e.subject || ''}\n${e.body_snippet || ''}`;
       return (
-        (/name\s+of\s+the\s+company/i.test(text) && /category/i.test(text)) ||
-        /super\s*dream.*registration|dream.*registration|placement\s+registration|internship\s+registration/i.test(
-          e.subject || ''
-        )
+        /name\s+of\s+the\s+company/i.test(text) &&
+        /eligibility\s+criteria/i.test(text) &&
+        /category/i.test(text)
       );
-    };
+    });
+
+    const updateCircular = [...fullCirculars].reverse().find((e) =>
+      /\b(?:update|updated|revised|reschedule|corrigendum)\b/i.test(e.subject || '')
+    );
 
     const mainCircularEmail =
-      collegeCompanyEmails.find((e) => {
-        const text = `${e.subject || ''}\n${e.body_snippet || ''}`;
-        return (
-          /name\s+of\s+the\s+company/i.test(text) &&
-          /eligibility\s+criteria/i.test(text) &&
-          /category/i.test(text)
-        );
-      }) ||
-      collegeCompanyEmails.find((e) =>
+      updateCircular ||
+      (fullCirculars.length > 0 ? fullCirculars[fullCirculars.length - 1] : null) ||
+      [...collegeCompanyEmails].reverse().find((e) =>
         /super\s*dream.*registration|dream.*registration|placement\s+registration|internship\s+registration|offer\s+registration/i.test(e.subject || '')
       ) ||
-      collegeCompanyEmails.find((e) =>
+      [...collegeCompanyEmails].reverse().find((e) =>
         /date\s+of\s+visit/i.test(e.body_snippet || '') || /registration/i.test(e.subject || '')
       ) ||
       collegeCompanyEmails[0] || chronologicalCompanyEmails[0];
@@ -286,17 +406,41 @@ export async function recalculateApplicationStatuses(
       (a, b) => new Date(a.received_at || 0).getTime() - new Date(b.received_at || 0).getTime()
     );
     const driveRegistrationEmail = registrationCirculars[0] || mainCircularEmail;
-    const driveStartDate = driveRegistrationEmail?.received_at
-      ? new Date(driveRegistrationEmail.received_at)
-      : null;
+    const personalDate = personalCompanyEmails[0]?.received_at ? new Date(personalCompanyEmails[0].received_at) : null;
+    const circularDate = driveRegistrationEmail?.received_at ? new Date(driveRegistrationEmail.received_at) : null;
+    let driveStartDate: Date | null = null;
+    if (personalDate && circularDate) {
+      driveStartDate = personalDate.getTime() < circularDate.getTime() ? personalDate : circularDate;
+    } else {
+      driveStartDate = personalDate || circularDate || null;
+    }
 
-    const activeDriveEmails = chronologicalCompanyEmails.filter((e) =>
-      !driveStartDate || new Date(e.received_at || 0).getTime() >= driveStartDate.getTime()
-    );
-    const personalCompanyEmails = chronologicalCompanyEmails.filter(isPersonalNeoPatEmail);
-    activeDriveEmails.push(...personalCompanyEmails);
+    // Find if there is a next drive for this company to avoid date bleed
+    const siblingDrives = allDrives.filter((d) => d.company_id === drive.company_id && d.id !== drive.id);
+    let nextDriveStartDate: Date | null = null;
+    if (driveStartDate && siblingDrives.length > 0) {
+      for (const sib of siblingDrives) {
+        const sibEmails = emailsByDriveId.get(sib.id) || [];
+        const sibPersonal = sibEmails.filter(isPersonalNeoPatEmail);
+        const sibStart = sibPersonal[0]?.received_at ? new Date(sibPersonal[0].received_at) : (sib.created_at ? new Date(sib.created_at) : null);
+        if (sibStart && sibStart.getTime() > driveStartDate.getTime()) {
+          if (!nextDriveStartDate || sibStart.getTime() < nextDriveStartDate.getTime()) {
+            nextDriveStartDate = sibStart;
+          }
+        }
+      }
+    }
 
-    const mainEmailText = `${mainCircularEmail.subject || ''}\n${mainCircularEmail.body_snippet || ''}`;
+    // Active emails for this drive: strictly scoped to this drive's emails, respecting start date and next drive boundary
+    const activeDriveEmails = chronologicalCompanyEmails.filter((e) => {
+      const eTime = new Date(e.received_at || 0).getTime();
+      // Allow circulars that arrived up to 24h before the drive announcement
+      if (driveStartDate && eTime < driveStartDate.getTime() - 24 * 60 * 60 * 1000) return false;
+      if (nextDriveStartDate && eTime >= nextDriveStartDate.getTime() - 5 * 60 * 1000) return false;
+      return true;
+    });
+
+    const mainEmailText = mainCircularEmail ? `${mainCircularEmail.subject || ''}\n${mainCircularEmail.body_snippet || ''}` : '';
     const mainJobDetails = extractJobDetails(mainEmailText);
 
     const combinedEmailText = activeDriveEmails
@@ -309,7 +453,24 @@ export async function recalculateApplicationStatuses(
       ctc: mainJobDetails.ctc,
       stipend: mainJobDetails.stipend,
       location: mainJobDetails.location,
+      eligibility: mainJobDetails.eligibility,
+      branches: mainJobDetails.branches,
+      cgpaRequirement: mainJobDetails.cgpaRequirement,
+      backlogRequirement: mainJobDetails.backlogRequirement,
     };
+
+    if (!extractedJob.ctc || !extractedJob.stipend || !extractedJob.location || !extractedJob.role || !extractedJob.eligibility) {
+      const combinedDetails = extractJobDetails(combinedEmailText);
+      if (!extractedJob.ctc && combinedDetails.ctc) extractedJob.ctc = combinedDetails.ctc;
+      if (!extractedJob.stipend && combinedDetails.stipend) extractedJob.stipend = combinedDetails.stipend;
+      if (!extractedJob.location && combinedDetails.location) extractedJob.location = combinedDetails.location;
+      if (!extractedJob.role && combinedDetails.role) extractedJob.role = combinedDetails.role;
+      if (!extractedJob.category && combinedDetails.category) extractedJob.category = combinedDetails.category;
+      if (!extractedJob.eligibility && combinedDetails.eligibility) extractedJob.eligibility = combinedDetails.eligibility;
+      if ((!extractedJob.branches || extractedJob.branches.length === 0) && combinedDetails.branches && combinedDetails.branches.length > 0) extractedJob.branches = combinedDetails.branches;
+      if (!extractedJob.cgpaRequirement && combinedDetails.cgpaRequirement) extractedJob.cgpaRequirement = combinedDetails.cgpaRequirement;
+      if (!extractedJob.backlogRequirement && combinedDetails.backlogRequirement) extractedJob.backlogRequirement = combinedDetails.backlogRequirement;
+    }
 
     // If critical job details (location, stipend, CTC) are missing because this company
     // is a role-specific record (e.g. "Zluri SDET", "Apple SDET", "Apple SRE") whose circular
@@ -345,7 +506,7 @@ export async function recalculateApplicationStatuses(
       }
     }
 
-    const withdrawalEmails = companyEmails.filter((e) => {
+    const withdrawalEmails = activeDriveEmails.filter((e) => {
       const full = `${e.subject || ''} ${e.body_snippet || ''}`.toLowerCase();
       if (
         /who\s+(?:wish|want)\s+to\s+opt|if\s+you\s+(?:wish|want)\s+to\s+opt|opt[\s-]*out\s+(?:form|link|google|portal)|voluntary\s+withdrawal\s+only|forms\.gle/i.test(
@@ -367,12 +528,13 @@ export async function recalculateApplicationStatuses(
       return Math.max(max, t);
     }, 0);
 
-    const registrationEmails = companyEmails.filter((e) => {
+    const registrationEmails = activeDriveEmails.filter((e) => {
       const subj = (e.subject || '').toLowerCase();
       const full = `${subj} ${e.body_snippet || ''}`.toLowerCase();
       const isPersonalNeoPat = /noreply\.cdcinfo@vitstudent\.ac\.in/i.test(e.sender || '');
+      const compDriveNum = (drive as any).drive_number;
       const driveMatches = !comp.name.match(/sdet|sre|sap|gds|aerospace/i) ||
-        !comp.drive_number || new RegExp(comp.drive_number.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i').test(`${e.subject || ''} ${e.body_snippet || ''}`);
+        !compDriveNum || new RegExp(compDriveNum.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i').test(`${e.subject || ''} ${e.body_snippet || ''}`);
       return (
         (isPersonalNeoPat && driveMatches && e.classification === 'registration_confirmation') ||
         /confirmed:\s*your\s+registration/i.test(subj) ||
@@ -721,10 +883,10 @@ export async function recalculateApplicationStatuses(
 
     const { data: existingApp } = await supabase
       .from('applications')
-      .select('status, manual_override, role, ctc, stipend, location, notes, applied_at, registration_deadline')
+      .select('id, status, manual_override, role, ctc, stipend, location, notes, applied_at, registration_deadline, eligibility, branches, cgpa_requirement, backlog_requirement')
       .eq('user_id', userId)
-      .eq('company_id', comp.id)
-      .single();
+      .eq('placement_drive_id', drive.id)
+      .maybeSingle();
 
     // GUARD: Reprocess only has access to email subjects + body snippets — it cannot
     // re-scan Excel attachments. The live sync (status-engine) CAN scan attachments and
@@ -746,15 +908,19 @@ export async function recalculateApplicationStatuses(
     const finalStatus = existingApp?.manual_override ? existingApp.status : computedStatus;
 
     let finalRole = existingApp?.manual_override ? existingApp.role : extractedJob.role;
-    if (finalRole && (
-      /\byou\s*(?:are|have|re)\b|dear\s|greetings|eligible|registr|for the candidate|reserve a position|expect them/i.test(finalRole) ||
-      /^(?:focuses on|includes|details\b|we would like|the role|job description)\b/i.test(finalRole.trim()) ||
-      /^(?:super\s+dream|dream|regular)(?:\s+(?:internship|offer|placement|drive))?$/i.test(finalRole.trim())
-    )) {
-      finalRole = null;
-    }
+    finalRole = cleanRoleTitle(finalRole);
 
-    const travelReq = extractTravelRequirement(mainEmailText) || extractTravelRequirement(combinedEmailText);
+    let driveTravelFromEmails = mainEmailText ? extractTravelRequirement(mainEmailText) : null;
+    if (!driveTravelFromEmails || driveTravelFromEmails === 'online') {
+      for (const e of [...activeDriveEmails].reverse()) {
+        const tr = extractTravelRequirement(`${e.subject || ''}\n${e.body_snippet || ''}`);
+        if (tr && tr !== 'online') {
+          driveTravelFromEmails = tr;
+          break;
+        }
+      }
+    }
+    const travelReq = driveTravelFromEmails || extractTravelRequirement(combinedEmailText);
     const existingTravel = existingApp?.notes ? existingApp.notes.split('\n')[0]?.trim() : null;
     const hasCampusLabEvent = allExtractedEvents.some((e) => /campus\s*\/\s*offline|\blc\s*\d+\b|\blab\b/i.test(e.venue || ''));
     const hasOnlineEvent = allExtractedEvents.some((e) => e.mode === 'online' || /online|virtual/i.test(e.venue || ''));
@@ -791,7 +957,7 @@ export async function recalculateApplicationStatuses(
       (/\byou\b|\bwe\b|\bi\b|\bcan\b|\bwrite\b|\bwant\b|\btest\b|\blab\b|\blc\s*\d+|\bsjt|\bprp|\banna|\bhall\b|---|forwarded|own\s+location|\b(?:lc|sjt|prp|tt|mb|cb|smv)\s*\d+\b|please find|attached shortlisted|services interested|as per business|nonsense|come at|economy class|round trip|placement office|\bpre$/i.test(
         workLocation
       ) ||
-        /^(?:vit\s+)?(?:vellore|chennai|bhopal)(?:\s+campus)?$/i.test(workLocation.trim()))
+        /^(?:vit\s+(?:vellore|chennai|bhopal|ap)(?:\s+campus)?|(?:vellore|chennai|bhopal|ap)\s+campus)$/i.test(workLocation.trim()))
     ) {
       workLocation = null;
     }
@@ -821,39 +987,60 @@ export async function recalculateApplicationStatuses(
     const regDeadlineEvt = allExtractedEvents.find((e) => e.eventType === 'registration_deadline' && e.startTime);
     const finalRegDeadline = regDeadlineEvt?.startTime ? regDeadlineEvt.startTime.toISOString() : (existingApp?.registration_deadline || null);
 
-    await supabase.from('applications').upsert(
-      {
-        user_id: userId,
-        company_id: comp.id,
-        status: finalStatus,
-        status_source: existingApp?.manual_override ? 'manual_override' : 'sync_reprocess',
-        status_confidence: 'high',
-        manual_override: Boolean(existingApp?.manual_override),
-        role: finalRole,
-        category: finalCategory,
-        ctc: finalCtc,
-        stipend: finalStipend,
-        location: workLocation || null,
-        registration_deadline: finalRegDeadline,
-        notes: finalNotes,
-        applied_at: (registrationEmails[0]?.received_at ? new Date(registrationEmails[0].received_at) : (driveStartDate || (existingApp?.applied_at ? new Date(existingApp.applied_at) : new Date()))).toISOString(),
-        last_updated: new Date().toISOString(),
-      },
-      { onConflict: 'user_id,company_id' }
-    );
+    const appPayload = {
+      user_id: userId,
+      placement_drive_id: drive.id,
+      status: finalStatus,
+      status_source: existingApp?.manual_override ? 'manual_override' : 'sync_reprocess',
+      status_confidence: 'high',
+      manual_override: Boolean(existingApp?.manual_override),
+      role: finalRole,
+      category: finalCategory,
+      ctc: finalCtc,
+      stipend: finalStipend,
+      location: workLocation || null,
+      registration_deadline: finalRegDeadline,
+      eligibility: extractedJob.eligibility || existingApp?.eligibility || null,
+      branches: (extractedJob.branches && extractedJob.branches.length > 0) ? extractedJob.branches : (existingApp?.branches || null),
+      cgpa_requirement: extractedJob.cgpaRequirement || existingApp?.cgpa_requirement || null,
+      backlog_requirement: extractedJob.backlogRequirement || existingApp?.backlog_requirement || null,
+      notes: finalNotes,
+      applied_at: (registrationEmails[0]?.received_at ? new Date(registrationEmails[0].received_at) : (driveStartDate || (existingApp?.applied_at ? new Date(existingApp.applied_at) : new Date()))).toISOString(),
+      last_updated: new Date().toISOString(),
+    };
+
+    if (existingApp?.id) {
+      await supabase.from('applications').update(appPayload).eq('id', existingApp.id);
+    } else {
+      await supabase.from('applications').insert(appPayload);
+    }
+
+    await supabase.from('placement_drives').update({
+      role: finalRole,
+      category: finalCategory,
+      ctc: finalCtc,
+      stipend: finalStipend,
+      location: workLocation || null,
+      registration_deadline: finalRegDeadline,
+      eligibility: extractedJob.eligibility || existingApp?.eligibility || null,
+      branches: (extractedJob.branches && extractedJob.branches.length > 0) ? extractedJob.branches : (existingApp?.branches || null),
+      cgpa_requirement: extractedJob.cgpaRequirement || existingApp?.cgpa_requirement || null,
+      backlog_requirement: extractedJob.backlogRequirement || existingApp?.backlog_requirement || null,
+      updated_at: new Date().toISOString(),
+    }).eq('id', drive.id);
 
     const { data: manualEvents } = await supabase
       .from('events')
       .select('*')
       .eq('user_id', userId)
-      .eq('company_id', comp.id)
+      .eq('placement_drive_id', drive.id)
       .eq('manual_override', true);
 
     await supabase
       .from('events')
       .delete()
       .eq('user_id', userId)
-      .eq('company_id', comp.id)
+      .eq('placement_drive_id', drive.id)
       .eq('manual_override', false);
 
     const isOptedOut = ['declined', 'withdrawn'].includes(finalStatus);
@@ -945,7 +1132,7 @@ export async function recalculateApplicationStatuses(
 
         await supabase.from('events').insert({
           user_id: userId,
-          company_id: comp.id,
+          placement_drive_id: drive.id,
           event_type: evt.eventType,
           title: `${comp.name} - ${evt.title}`,
           start_time: evt.startTime.toISOString(),
@@ -1031,7 +1218,7 @@ export async function performReprocess(
     sender: string | null;
     body_snippet: string | null;
     classification: string | null;
-    company_id: string | null;
+    placement_drive_id: string | null;
     received_at: string | null;
   }> = [];
 
@@ -1040,7 +1227,7 @@ export async function performReprocess(
   while (true) {
     const { data: chunk, error: chunkErr } = await supabase
       .from('emails')
-      .select('id, subject, sender, body_snippet, classification, company_id, received_at')
+      .select('id, subject, sender, body_snippet, classification, placement_drive_id, received_at')
       .eq('user_id', userId)
       .order('received_at', { ascending: true })
       .range(page * pageSize, (page + 1) * pageSize - 1);
@@ -1079,68 +1266,60 @@ export async function performReprocess(
     message: `Analyzing ${neoPatEmails.length} official NeoPAT drives & resolving track numbers…`,
   });
 
-  // Pre-load all existing user companies into memory to avoid thousands of slow DB roundtrips
+  // Pre-load all existing user companies and drives into memory to avoid thousands of slow DB roundtrips
   const { data: initialDbCompanies } = await supabase
     .from('companies')
-    .select('id, name, aliases, drive_number, drive_name, updated_at')
+    .select('id, name, aliases, updated_at')
     .eq('user_id', userId);
 
-  const cachedCompanies: Array<{
-    id: string;
-    name: string;
-    aliases: string[];
-    drive_number: string | null;
-    drive_name: string | null;
-    activeDriveDate: Date;
-  }> = (initialDbCompanies || []).map((c) => {
-    const cleanAliases = extractCompanyAliases(c.name, c.name, c.drive_name);
-    if (c.drive_number && !cleanAliases.includes(c.drive_number.toLowerCase())) {
-      cleanAliases.push(c.drive_number.toLowerCase());
+  const { data: initialDbDrives } = await supabase
+    .from('placement_drives')
+    .select('id, company_id, drive_number, normalized_drive_number, drive_name, role, created_at')
+    .eq('user_id', userId);
+
+  const companiesById = new Map<string, any>();
+  const companiesByName = new Map<string, any>();
+  for (const c of (initialDbCompanies || [])) {
+    companiesById.set(c.id, c);
+    companiesByName.set(c.name.toLowerCase().trim(), c);
+    for (const a of (c.aliases || [])) {
+      companiesByName.set(a.toLowerCase().trim(), c);
     }
-    return {
-      id: c.id,
-      name: c.name,
-      aliases: cleanAliases.map((a: string) => a.toLowerCase()),
-      drive_number: c.drive_number || null,
-      drive_name: c.drive_name || null,
-      activeDriveDate: new Date(c.updated_at || 0),
-    };
-  });
+  }
 
-  const validCompanyMap = new Map<string, { id: string; canonicalName: string; activeDriveDate: Date }>();
-  const driveNumberToCompanyMap = new Map<string, { id: string; canonicalName: string; activeDriveDate: Date }>();
+  const driveById = new Map<string, any>();
+  const driveByNumber = new Map<string, any>();
+  const drivesByCompanyId = new Map<string, any[]>();
+  const driveDateMap = new Map<string, Date>();
+
+  for (const d of (initialDbDrives || [])) {
+    driveById.set(d.id, d);
+    if (d.drive_number) {
+      driveByNumber.set(d.drive_number.toLowerCase().trim(), d);
+    }
+    const list = drivesByCompanyId.get(d.company_id) || [];
+    list.push(d);
+    drivesByCompanyId.set(d.company_id, list);
+    if (d.created_at) {
+      driveDateMap.set(d.id, new Date(d.created_at));
+    }
+  }
+
+  const validDriveIdSet = new Set<string>();
   const validCompanyIdSet = new Set<string>();
-  const emailUpdates: Array<{ id: string; company_id: string | null; classification: string; is_relevant: boolean }> = [];
+  const emailUpdates: Array<{ id: string; placement_drive_id: string | null; classification: string; is_relevant: boolean }> = [];
 
-  const companiesToUpdate = new Map<string, { aliases?: string[]; drive_number?: string; drive_name?: string | null; name?: string }>();
+  const companiesToUpdate = new Map<string, { aliases?: string[]; name?: string }>();
+  const drivesToUpdate = new Map<string, { drive_number?: string; normalized_drive_number?: string; drive_name?: string | null }>();
   const driveResolutionsToUpsert = new Map<string, any>();
 
-  // Sanitize cached company names with legacy drive suffixes (e.g. "Euler Motors (1170)")
-  for (const c of cachedCompanies) {
+  // Sanitize company names with legacy drive suffixes (e.g. "Euler Motors (1170)")
+  for (const c of (initialDbCompanies || [])) {
     if (/\s*\(\d+\)\s*$/.test(c.name)) {
       const cleanName = c.name.replace(/\s*\(\d+\)\s*$/, '').trim();
       c.name = cleanName;
       companiesToUpdate.set(c.id, { ...(companiesToUpdate.get(c.id) || {}), name: cleanName });
-    }
-  }
-
-  // Synchronize freshly sanitized aliases to DB to wipe out poisoned legacy aliases
-  for (const c of cachedCompanies) {
-    companiesToUpdate.set(c.id, {
-      ...(companiesToUpdate.get(c.id) || {}),
-      aliases: c.aliases,
-    });
-  }
-
-  // Populate maps from initial companies
-  for (const c of cachedCompanies) {
-    const compObj = { id: c.id, canonicalName: c.name, activeDriveDate: c.activeDriveDate };
-    validCompanyMap.set(c.name.toLowerCase(), compObj);
-    for (const a of c.aliases) {
-      validCompanyMap.set(a.toLowerCase(), compObj);
-    }
-    if (c.drive_number) {
-      driveNumberToCompanyMap.set(c.drive_number, compObj);
+      companiesByName.set(cleanName.toLowerCase(), c);
     }
   }
 
@@ -1181,8 +1360,6 @@ export async function performReprocess(
     let companyName = classification.companyName;
     const isPlacement = !['irrelevant', 'unclassified', 'general'].includes(classification.classification);
 
-    // If this NeoPAT email has a drive number and was identified with a base company (like 'Apple' or 'Honeywell'),
-    // run timing correlation against circular catalog to resolve specific track (e.g. Apple SDET vs Apple SRE)
     if (driveNumber && companyName && isPlacement) {
       const baseClean = cleanCompanyName(companyName);
       if (['Apple', 'Honeywell', 'Zluri', 'EY'].some((b) => b.toLowerCase() === baseClean.toLowerCase())) {
@@ -1206,219 +1383,152 @@ export async function performReprocess(
       if (!normalized || isInvalidCompanyName(normalized)) {
         continue;
       }
-      let comp: { id: string; canonicalName: string; activeDriveDate: Date } | undefined;
 
-      // 1. Primary Identity Anchor: Check if drive_number matches an already established company
-      if (driveNumber && driveNumberToCompanyMap.has(driveNumber)) {
-        comp = driveNumberToCompanyMap.get(driveNumber);
-      }
+      // 1. Resolve Company
+      let comp = driveNumber && driveByNumber.has(driveNumber.toLowerCase().trim())
+        ? companiesById.get(driveByNumber.get(driveNumber.toLowerCase().trim()).company_id)
+        : null;
 
-      // 1.5 Check if an existing company in memory has this drive_number directly
-      if (!comp && driveNumber) {
-        const existingDriveComp = cachedCompanies.find(
-          (c) => c.drive_number?.toLowerCase() === driveNumber.toLowerCase()
-        );
-        if (existingDriveComp) {
-          comp = { id: existingDriveComp.id, canonicalName: existingDriveComp.name, activeDriveDate: emailDate };
-          driveNumberToCompanyMap.set(driveNumber, comp);
-        }
-      }
-
-      // 2. Name-based lookup if no drive_number match
       if (!comp) {
-        if (driveNumber) {
-          const existing = validCompanyMap.get(normalized.toLowerCase());
-          if (existing) {
-            let boundToAnother = false;
-            for (const [dNum, cObj] of driveNumberToCompanyMap.entries()) {
-              if (cObj.id === existing.id && dNum !== driveNumber) {
-                boundToAnother = true;
-                break;
-              }
-            }
-            if (!boundToAnother) {
-              comp = existing;
-            }
-          }
-        } else {
-          comp = validCompanyMap.get(normalized.toLowerCase());
-        }
+        comp = companiesByName.get(normalized.toLowerCase());
       }
-
-      if (!comp && !driveNumber) {
-        for (const [validKey, cObj] of validCompanyMap.entries()) {
-          if (normalized.split(/\s+/).length === 1 && cObj.canonicalName.split(/\s+/).length > 2) {
-            continue;
-          }
-          if (isFuzzyCompanyMatch(validKey, normalized) || isFuzzyCompanyMatch(cObj.canonicalName, normalized)) {
-            comp = cObj;
+      if (!comp) {
+        for (const [key, c] of companiesByName.entries()) {
+          if (isFuzzyCompanyMatch(key, normalized) || isFuzzyCompanyMatch(c.name, normalized)) {
+            comp = c;
             break;
           }
         }
       }
-
       if (!comp) {
-        // In-memory check against existing DB companies
-        const existingComp = cachedCompanies.find((c) => c.name.toLowerCase() === normalized.toLowerCase());
-        let boundToAnother = false;
-        if (existingComp && driveNumber) {
-          for (const [dNum, cObj] of driveNumberToCompanyMap.entries()) {
-            if (cObj.id === existingComp.id && dNum !== driveNumber) {
-              boundToAnother = true;
-              break;
-            }
-          }
+        // Create company
+        const generatedAliases = extractCompanyAliases(companyName, normalized);
+        if (driveNumber && !generatedAliases.includes(driveNumber.toLowerCase())) {
+          generatedAliases.push(driveNumber.toLowerCase());
         }
 
-        if (existingComp && !boundToAnother) {
-          comp = { id: existingComp.id, canonicalName: normalized, activeDriveDate: emailDate };
-        } else {
-          // Check aliases in memory
-          const aliasMatch = !driveNumber
-            ? cachedCompanies.find((c) => c.aliases.includes(normalized.toLowerCase()))
-            : null;
+        let { data: newComp, error: insertError } = await supabase
+          .from('companies')
+          .insert({
+            user_id: userId,
+            name: normalized,
+            aliases: generatedAliases,
+          })
+          .select('id, name, aliases')
+          .single();
 
-          if (aliasMatch) {
-            comp = { id: aliasMatch.id, canonicalName: normalized, activeDriveDate: emailDate };
-            aliasMatch.name = normalized;
-            companiesToUpdate.set(aliasMatch.id, { name: normalized });
-          } else {
-            // Check existing companies with fuzzy match in memory
-            let dbFuzzyMatch: (typeof cachedCompanies)[0] | null = null;
-            for (const uc of cachedCompanies) {
-              if (isFuzzyCompanyMatch(uc.name, normalized)) {
-                let ucBoundToAnother = false;
-                if (driveNumber) {
-                  for (const [dNum, cObj] of driveNumberToCompanyMap.entries()) {
-                    if (cObj.id === uc.id && dNum !== driveNumber) {
-                      ucBoundToAnother = true;
-                      break;
-                    }
-                  }
-                }
-                if (!ucBoundToAnother) {
-                  dbFuzzyMatch = uc;
-                  break;
-                }
-              }
-            }
-
-            if (dbFuzzyMatch) {
-              const chosenCanonical = normalized.length > dbFuzzyMatch.name.length ? normalized : dbFuzzyMatch.name;
-              comp = { id: dbFuzzyMatch.id, canonicalName: chosenCanonical, activeDriveDate: emailDate };
-              if (chosenCanonical !== dbFuzzyMatch.name) {
-                dbFuzzyMatch.name = chosenCanonical;
-                companiesToUpdate.set(dbFuzzyMatch.id, { name: chosenCanonical });
-              }
-            } else {
-              // Create new legitimate NeoPAT company in DB
-              const generatedAliases = extractCompanyAliases(companyName, normalized);
-              if (driveNumber && !generatedAliases.includes(driveNumber.toLowerCase())) {
-                generatedAliases.push(driveNumber.toLowerCase());
-              }
-
-              let { data: newComp, error: insertError } = await supabase
-                .from('companies')
-                .insert({
-                  user_id: userId,
-                  name: normalized,
-                  aliases: generatedAliases,
-                  drive_number: driveNumber || null,
-                  drive_name: driveName || null,
-                })
-                .select('id, name')
-                .single();
-
-              if (insertError) {
-                if (insertError.code === '23505') {
-                  // Unique constraint violation — NEVER create a suffixed name.
-                  // Look up the existing company by drive_number, then by name.
-                  let existingId: string | null = null;
-                  if (driveNumber) {
-                    const { data: driveOwner } = await supabase
-                      .from('companies')
-                      .select('id, name')
-                      .eq('user_id', userId)
-                      .eq('drive_number', driveNumber)
-                      .maybeSingle();
-                    if (driveOwner) {
-                      existingId = driveOwner.id;
-                      newComp = driveOwner;
-                    }
-                  }
-                  if (!existingId) {
-                    const { data: nameOwner } = await supabase
-                      .from('companies')
-                      .select('id, name')
-                      .eq('user_id', userId)
-                      .eq('name', normalized)
-                      .maybeSingle();
-                    if (nameOwner) {
-                      existingId = nameOwner.id;
-                      newComp = nameOwner;
-                    }
-                  }
-                }
-              }
-
-              if (newComp) {
-                comp = { id: newComp.id, canonicalName: newComp.name, activeDriveDate: emailDate };
-                cachedCompanies.push({
-                  id: newComp.id,
-                  name: newComp.name,
-                  aliases: generatedAliases.map((a) => a.toLowerCase()),
-                  drive_number: driveNumber || null,
-                  drive_name: driveName || null,
-                  activeDriveDate: emailDate,
-                });
-              }
-            }
-          }
+        if (insertError && insertError.code === '23505') {
+          const { data: existingByName } = await supabase
+            .from('companies')
+            .select('id, name, aliases')
+            .eq('user_id', userId)
+            .eq('name', normalized)
+            .maybeSingle();
+          if (existingByName) newComp = existingByName;
         }
-      } else {
-        if (emailDate > comp.activeDriveDate) {
-          comp.activeDriveDate = emailDate;
+
+        if (newComp) {
+          comp = newComp;
+          companiesById.set(newComp.id, newComp);
+          companiesByName.set(newComp.name.toLowerCase(), newComp);
+          for (const a of (newComp.aliases || [])) {
+            companiesByName.set(a.toLowerCase(), newComp);
+          }
         }
       }
 
-      if (comp) {
-        validCompanyMap.set(comp.canonicalName.toLowerCase(), comp);
-        validCompanyMap.set(normalized.toLowerCase(), comp);
-        const aliases = extractCompanyAliases(companyName, comp.canonicalName);
-        if (driveNumber && !aliases.includes(driveNumber.toLowerCase())) {
-          aliases.push(driveNumber.toLowerCase());
-        }
-        for (const alias of aliases) {
-          if (!validCompanyMap.has(alias.toLowerCase())) {
-            validCompanyMap.set(alias.toLowerCase(), comp);
+      if (!comp) continue;
+
+      // 2. Resolve Placement Drive
+      let targetDrive: any = null;
+      if (driveNumber) {
+        const dNumLower = driveNumber.toLowerCase().trim();
+        targetDrive = driveByNumber.get(dNumLower);
+
+        if (!targetDrive) {
+          // Check initialDbDrives
+          const existingDrive = (initialDbDrives || []).find((d: any) => d.drive_number?.toLowerCase() === dNumLower);
+          if (existingDrive) {
+            targetDrive = existingDrive;
+          } else {
+            // Check if there is an unassigned dummy drive for this company
+            const nullDrive = (initialDbDrives || []).find((d: any) => d.company_id === comp.id && !d.drive_number);
+            if (nullDrive) {
+              targetDrive = nullDrive;
+              targetDrive.drive_number = driveNumber;
+              targetDrive.normalized_drive_number = dNumLower;
+              targetDrive.drive_name = driveName || comp.name;
+              drivesToUpdate.set(targetDrive.id, {
+                drive_number: driveNumber,
+                normalized_drive_number: dNumLower,
+                drive_name: targetDrive.drive_name,
+              });
+            } else {
+              // Create brand new placement drive!
+              const { data: createdDrive } = await supabase
+                .from('placement_drives')
+                .insert({
+                  user_id: userId,
+                  company_id: comp.id,
+                  drive_number: driveNumber,
+                  normalized_drive_number: dNumLower,
+                  drive_name: driveName || comp.name,
+                  created_at: emailDate.toISOString(),
+                })
+                .select('id, company_id, drive_number, normalized_drive_number, drive_name, role, created_at')
+                .single();
+              if (createdDrive) {
+                targetDrive = createdDrive;
+                initialDbDrives?.push(createdDrive);
+              }
+            }
+          }
+
+          if (targetDrive) {
+            driveByNumber.set(dNumLower, targetDrive);
+            driveById.set(targetDrive.id, targetDrive);
+            const compDrives = drivesByCompanyId.get(comp.id) || [];
+            if (!compDrives.some((d: any) => d.id === targetDrive.id)) compDrives.push(targetDrive);
+            drivesByCompanyId.set(comp.id, compDrives);
           }
         }
-        if (driveNumber) {
-          driveNumberToCompanyMap.set(driveNumber, comp);
 
-          const existingUpdates = companiesToUpdate.get(comp.id) || {};
-          companiesToUpdate.set(comp.id, {
-            ...existingUpdates,
-            aliases,
-            drive_number: driveNumber,
-            ...(driveName ? { drive_name: driveName } : {}),
-          });
-
+        if (targetDrive) {
+          const prevStart = driveDateMap.get(targetDrive.id);
+          if (!prevStart || emailDate.getTime() < prevStart.getTime()) {
+            driveDateMap.set(targetDrive.id, emailDate);
+          }
           driveResolutionsToUpsert.set(driveNumber, {
             drive_number: driveNumber,
             company_base_name: cleanCompanyName(companyName),
-            resolved_role: comp.canonicalName,
-            resolved_company_name: comp.canonicalName,
+            resolved_role: comp.name,
+            resolved_company_name: comp.name,
             resolved_via: 'direct_role_text',
             confidence: 'high',
             updated_at: new Date().toISOString(),
           });
         }
-        validCompanyIdSet.add(comp.id);
+      } else {
+        // NeoPAT email without drive number (e.g. withdrawal confirmation)
+        const compDrives = drivesByCompanyId.get(comp.id) || [];
+        const validPastDrives = compDrives.filter((d: any) => {
+          const dStart = driveDateMap.get(d.id);
+          return !dStart || dStart.getTime() <= emailDate.getTime() + 6 * 3600 * 1000;
+        });
+        validPastDrives.sort((a: any, b: any) => {
+          const aTime = driveDateMap.get(a.id)?.getTime() || 0;
+          const bTime = driveDateMap.get(b.id)?.getTime() || 0;
+          return bTime - aTime;
+        });
+        targetDrive = validPastDrives[0] || compDrives[0];
+      }
 
+      if (targetDrive) {
+        validDriveIdSet.add(targetDrive.id);
+        validCompanyIdSet.add(comp.id);
         emailUpdates.push({
           id: email.id,
-          company_id: comp.id,
+          placement_drive_id: targetDrive.id,
           classification: classification.classification,
           is_relevant: true,
         });
@@ -1426,7 +1536,7 @@ export async function performReprocess(
     } else {
       emailUpdates.push({
         id: email.id,
-        company_id: null,
+        placement_drive_id: null,
         classification: classification.classification,
         is_relevant: false,
       });
@@ -1444,6 +1554,17 @@ export async function performReprocess(
     }
   }
 
+  // Flush queued drive updates in small parallel batches
+  if (drivesToUpdate.size > 0) {
+    const updateEntries = Array.from(drivesToUpdate.entries());
+    for (let i = 0; i < updateEntries.length; i += 20) {
+      const batch = updateEntries.slice(i, i + 20);
+      await Promise.all(
+        batch.map(([driveId, payload]) => supabase.from('placement_drives').update(payload).eq('id', driveId))
+      );
+    }
+  }
+
   // Flush queued drive_resolutions in a single batch
   if (driveResolutionsToUpsert.size > 0) {
     await supabase
@@ -1451,12 +1572,30 @@ export async function performReprocess(
       .upsert(Array.from(driveResolutionsToUpsert.values()), { onConflict: 'drive_number' });
   }
 
-  // 4. Phase 2: Purge ANY Company in DB that is NOT in the Official NeoPAT List
+  // 4. Phase 2: Purge ANY Drive & Company in DB that is NOT in the Official NeoPAT List
   onProgress?.({
     step: 3,
     totalSteps: 5,
-    message: `Verified ${validCompanyIdSet.size} official NeoPAT drives. Purging non-NeoPAT entries…`,
+    message: `Verified ${validDriveIdSet.size} official NeoPAT drives across ${validCompanyIdSet.size} companies. Purging unverified entries…`,
   });
+
+  const { data: currentDbDrives } = await supabase
+    .from('placement_drives')
+    .select('id, company_id')
+    .eq('user_id', userId);
+
+  const orphanDriveIds = (currentDbDrives || [])
+    .filter((d) => !validDriveIdSet.has(d.id))
+    .map((d) => d.id);
+
+  if (orphanDriveIds.length > 0) {
+    await supabase.from('events').delete().eq('user_id', userId).in('placement_drive_id', orphanDriveIds);
+    await supabase.from('applications').delete().eq('user_id', userId).in('placement_drive_id', orphanDriveIds);
+    await supabase.from('notifications').delete().eq('user_id', userId).in('placement_drive_id', orphanDriveIds);
+    await supabase.from('email_drive_links').delete().in('placement_drive_id', orphanDriveIds);
+    await supabase.from('emails').update({ placement_drive_id: null }).in('placement_drive_id', orphanDriveIds);
+    await supabase.from('placement_drives').delete().in('id', orphanDriveIds);
+  }
 
   const { data: currentDbCompanies } = await supabase
     .from('companies')
@@ -1472,13 +1611,10 @@ export async function performReprocess(
     });
 
   if (invalidCompIds.length > 0) {
-    await supabase.from('events').delete().eq('user_id', userId).in('company_id', invalidCompIds);
-    await supabase.from('applications').delete().eq('user_id', userId).in('company_id', invalidCompIds);
-    await supabase.from('notifications').delete().eq('user_id', userId).in('company_id', invalidCompIds);
     await supabase.from('companies').delete().eq('user_id', userId).in('id', invalidCompIds);
   }
 
-  // 5. Phase 3: Match College Emails against Official NeoPAT Companies ONLY
+  // 5. Phase 3: Match College Emails against Official NeoPAT Placement Drives ONLY
   onProgress?.({
     step: 4,
     totalSteps: 5,
@@ -1487,6 +1623,7 @@ export async function performReprocess(
 
   let collegeLinkedCount = 0;
   let collegeDiscardedCount = 0;
+  const collegeDriveLinks: Array<{ user_id: string; email_id: string; placement_drive_id: string; link_type: string; assignment_source: string; confidence: string }> = [];
 
   for (const email of collegeEmails) {
     const subject = email.subject || '';
@@ -1512,68 +1649,111 @@ export async function performReprocess(
     const fullEmailText = `${subject}\n${bodySnippet}`;
     const driveNumber = extractDriveNumber(fullEmailText);
     const companyName = classification.companyName;
-    let matchedCompanyId: string | null = null;
+    let matchedDriveId: string | null = null;
 
     // 1. Primary Identity Anchor: Drive Number match
-    if (driveNumber && driveNumberToCompanyMap.has(driveNumber)) {
-      matchedCompanyId = driveNumberToCompanyMap.get(driveNumber)!.id;
-    } else if (companyName) {
-      const normalized = normalizeCompanyName(companyName).toLowerCase();
-
-      // 2. Identify candidate matches across valid NeoPAT companies
-      const uniqueComps = Array.from(new Map(Array.from(validCompanyMap.values()).map(c => [c.id, c])).values());
-      const exactMatches = uniqueComps.filter(c => c.canonicalName.toLowerCase() === normalized);
-      const fuzzyMatches = uniqueComps.filter(c => isFuzzyCompanyMatch(c.canonicalName, companyName));
-
-      const candidateComps = exactMatches.length > 0 ? exactMatches : fuzzyMatches;
-
-      if (candidateComps.length === 1) {
-        matchedCompanyId = candidateComps[0].id;
-      } else if (candidateComps.length > 1) {
-        // If multiple drives match (e.g. July Zluri vs Sept Zluri SDET, or Apple SDET vs Apple SRE),
-        // pick the drive whose active cycle is chronologically closest to this circular
-        candidateComps.sort(
-          (a, b) =>
-            Math.abs(a.activeDriveDate.getTime() - emailDate.getTime()) -
-            Math.abs(b.activeDriveDate.getTime() - emailDate.getTime())
-        );
-        matchedCompanyId = candidateComps[0].id;
+    if (driveNumber && driveByNumber.has(driveNumber.toLowerCase().trim())) {
+      matchedDriveId = driveByNumber.get(driveNumber.toLowerCase().trim())!.id;
+    } else {
+      let matchedCompId: string | null = null;
+      if (companyName) {
+        const normalized = normalizeCompanyName(companyName).toLowerCase();
+        const found = companiesByName.get(normalized);
+        if (found && validCompanyIdSet.has(found.id)) {
+          matchedCompId = found.id;
+        } else {
+          for (const [cName, c] of companiesByName.entries()) {
+            if (validCompanyIdSet.has(c.id) && (isFuzzyCompanyMatch(cName, companyName) || isFuzzyCompanyMatch(c.name, companyName))) {
+              matchedCompId = c.id;
+              break;
+            }
+          }
+        }
       }
-    }
 
-    // 4. Reverse Search fallback: ONLY if no company was extracted at all from the email
-    // (If an email was already confidently identified as another company like "Altair Engineering",
-    // do NOT hijack it to a different company like "Siemens" just because the word appears in parentheses!)
-    if (!matchedCompanyId && !companyName) {
-      // Strip parenthetical corporate affiliations (e.g. "(A Siemens Company)", "(A Subsidiary of ...)")
-      const sanitizedSubject = subject.replace(/\((?:a|an|the)?\s*[^)]*?(?:company|group|subsidiary|division)[^)]*\)/gi, ' ');
-      const subjectLower = sanitizedSubject.toLowerCase();
-      // Sort valid companies by canonical name length descending to match longest first
-      const knownCompanies = Array.from(validCompanyMap.values()).sort((a, b) => b.canonicalName.length - a.canonicalName.length);
-      
-      for (const comp of knownCompanies) {
-        if (comp.canonicalName.length < 4 || isInvalidCompanyName(comp.canonicalName)) continue; // Skip short or generic names
-        const escaped = comp.canonicalName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const regex = new RegExp(`(?:^|[^a-z0-9])${escaped}(?:[^a-z0-9]|$)`, 'i');
-        if (regex.test(subjectLower)) {
-          matchedCompanyId = comp.id;
-          break;
+      // Reverse search fallback
+      if (!matchedCompId && !companyName) {
+        const sanitizedSubject = subject.replace(/\((?:a|an|the)?\s*[^)]*?(?:company|group|subsidiary|division)[^)]*\)/gi, ' ');
+        const subjectLower = sanitizedSubject.toLowerCase();
+        for (const [cId, comp] of companiesById.entries()) {
+          if (!validCompanyIdSet.has(cId) || comp.name.length < 4 || isInvalidCompanyName(comp.name)) continue;
+          const escaped = comp.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          const regex = new RegExp(`(?:^|[^a-z0-9])${escaped}(?:[^a-z0-9]|$)`, 'i');
+          if (regex.test(subjectLower)) {
+            matchedCompId = cId;
+            break;
+          }
+        }
+      }
+
+      if (matchedCompId) {
+        const compDrives = drivesByCompanyId.get(matchedCompId) || [];
+        const isReg = /registration/i.test(subject);
+        const graceMs = isReg ? 24 * 60 * 60 * 1000 : 0;
+
+        if (compDrives.length === 1) {
+          const dStart = driveDateMap.get(compDrives[0].id);
+          // Only link if email is not older than the drive start (24h grace only for registration circulars)
+          if (!dStart || emailDate.getTime() >= dStart.getTime() - graceMs) {
+            matchedDriveId = compDrives[0].id;
+          }
+        } else if (compDrives.length > 1) {
+          // Check for explicit category match first (e.g. Super Dream vs Dream)
+          const textLower = `${subject} ${bodySnippet}`.toLowerCase();
+          const hasSuperDream = /super\s*dream/i.test(textLower);
+          const hasDream = !hasSuperDream && /\bdream\b/i.test(textLower);
+
+          let candidateDrives = compDrives;
+          if (hasSuperDream) {
+            const superMatches = compDrives.filter((d: any) =>
+              /super\s*dream/i.test(d.category || d.drive_name || '')
+            );
+            if (superMatches.length > 0) candidateDrives = superMatches;
+          } else if (hasDream) {
+            const dreamMatches = compDrives.filter((d: any) =>
+              /dream/i.test(d.category || d.drive_name || '') &&
+              !/super\s*dream/i.test(d.category || d.drive_name || '')
+            );
+            if (dreamMatches.length > 0) candidateDrives = dreamMatches;
+          }
+
+          // Date-scoped circular linking: filter to drives whose startDate <= emailDate (+ graceMs only for registration)
+          const eligibleDrives = candidateDrives.filter((d: any) => {
+            const dStart = driveDateMap.get(d.id);
+            return !dStart || dStart.getTime() <= emailDate.getTime() + graceMs;
+          });
+          if (eligibleDrives.length > 0) {
+            eligibleDrives.sort((a: any, b: any) => {
+              const aTime = driveDateMap.get(a.id)?.getTime() || 0;
+              const bTime = driveDateMap.get(b.id)?.getTime() || 0;
+              return bTime - aTime;
+            });
+            matchedDriveId = eligibleDrives[0].id;
+          }
         }
       }
     }
 
-    if (matchedCompanyId) {
+    if (matchedDriveId) {
       emailUpdates.push({
         id: email.id,
-        company_id: matchedCompanyId,
+        placement_drive_id: matchedDriveId,
         classification: classification.classification,
         is_relevant: true,
+      });
+      collegeDriveLinks.push({
+        user_id: userId,
+        email_id: email.id,
+        placement_drive_id: matchedDriveId,
+        link_type: 'secondary',
+        assignment_source: 'reprocess_college_matcher',
+        confidence: 'medium',
       });
       collegeLinkedCount++;
     } else {
       emailUpdates.push({
         id: email.id,
-        company_id: null,
+        placement_drive_id: null,
         classification: classification.classification,
         is_relevant: false,
       });
@@ -1584,7 +1764,7 @@ export async function performReprocess(
   // Fast Batch Update emails in grouped chunks
   const groupedUpdates = new Map<string, string[]>();
   for (const u of emailUpdates) {
-    const key = `${u.company_id || 'null'}|${u.classification}|${u.is_relevant}`;
+    const key = `${u.placement_drive_id || 'null'}|${u.classification}|${u.is_relevant}`;
     if (!groupedUpdates.has(key)) groupedUpdates.set(key, []);
     groupedUpdates.get(key)!.push(u.id);
   }
@@ -1599,7 +1779,7 @@ export async function performReprocess(
       await supabase
         .from('emails')
         .update({
-          company_id: compId,
+          placement_drive_id: compId,
           classification: cls as any,
           is_relevant: isRel,
         })
@@ -1607,15 +1787,32 @@ export async function performReprocess(
     }
   }
 
-  // 6. Phase 4: Recalculate Stage Progression & Events for Official NeoPAT Companies
+  // Purge stale secondary email_drive_links so re-assigned college circulars don't leave phantom duplicates
+  await supabase
+    .from('email_drive_links')
+    .delete()
+    .eq('user_id', userId)
+    .eq('link_type', 'secondary');
+
+  // Upsert email_drive_links for college emails
+  if (collegeDriveLinks.length > 0) {
+    for (let i = 0; i < collegeDriveLinks.length; i += 500) {
+      const chunk = collegeDriveLinks.slice(i, i + 500);
+      await supabase
+        .from('email_drive_links')
+        .upsert(chunk, { onConflict: 'email_id,placement_drive_id,link_type' });
+    }
+  }
+
+  // 6. Phase 4: Recalculate Stage Progression & Events for Official NeoPAT Drives
   const phase4Res = await recalculateApplicationStatuses(userId, onProgress);
   const updatedAppsCount = phase4Res.updatedCount;
   const applicationResults = phase4Res.results || [];
 
   return {
     success: true,
-    message: `Successfully re-indexed: ${validCompanyIdSet.size} official NeoPAT drives tracked`,
-    neoPatDrivesCount: validCompanyIdSet.size,
+    message: `Successfully re-indexed: ${validDriveIdSet.size} official NeoPAT drives tracked`,
+    neoPatDrivesCount: validDriveIdSet.size,
     deletedNonNeoPatCompanies: deletedCompanyNames,
     collegeCircularsLinked: collegeLinkedCount,
     collegeCircularsDiscarded: collegeDiscardedCount,
@@ -1655,24 +1852,55 @@ export async function POST(req: Request) {
 
   if (isStream) {
     const encoder = new TextEncoder();
+    let isClosed = false;
+    let heartbeat: NodeJS.Timeout | null = null;
+    let streamController: ReadableStreamDefaultController | null = null;
+
+    const cleanup = () => {
+      if (isClosed) return;
+      isClosed = true;
+      if (heartbeat) {
+        clearInterval(heartbeat);
+        heartbeat = null;
+      }
+      if (streamController) {
+        try {
+          streamController.close();
+        } catch {
+          // Stream may already be closed
+        }
+        streamController = null;
+      }
+    };
+
+    if (req.signal.aborted) {
+      cleanup();
+    } else {
+      req.signal.addEventListener('abort', cleanup, { once: true });
+    }
+
     const stream = new ReadableStream({
       async start(controller) {
-        let isClosed = false;
+        streamController = controller;
+
         const sendEvent = (event: string, data: unknown) => {
-          if (isClosed) return;
+          if (isClosed || req.signal.aborted) return;
           try {
             controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
           } catch {
-            isClosed = true;
+            cleanup();
           }
         };
 
-        const heartbeat = setInterval(() => {
-          if (isClosed) return;
+        heartbeat = setInterval(() => {
+          if (isClosed || req.signal.aborted) {
+            cleanup();
+            return;
+          }
           try {
             controller.enqueue(encoder.encode(`: keep-alive\n\n`));
           } catch {
-            isClosed = true;
+            cleanup();
           }
         }, 2000);
 
@@ -1699,17 +1927,21 @@ export async function POST(req: Request) {
         } catch (err: any) {
           sendEvent('error', { message: err instanceof Error ? err.message : 'Placement re-indexing failed' });
         } finally {
-          clearInterval(heartbeat);
-          controller.close();
+          cleanup();
         }
+      },
+      cancel() {
+        cleanup();
       },
     });
 
     return new Response(stream, {
       headers: {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
+        'Content-Type': 'text/event-stream; charset=utf-8',
+        'Cache-Control': 'no-cache, no-transform',
         Connection: 'keep-alive',
+        'Content-Encoding': 'none',
+        'X-Accel-Buffering': 'no',
       },
     });
   }

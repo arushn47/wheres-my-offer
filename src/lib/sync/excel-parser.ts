@@ -5,6 +5,7 @@ import { searchRollNumberInWorkbook } from './xlsx-matcher';
 
 export interface ExcelMatchResult {
   matched: boolean;
+  scanStatus: 'matched' | 'no_match' | 'failed';
   filename: string;
   matchedNeoId: string | null;
   details: string | null;
@@ -109,6 +110,7 @@ export async function scanExcelAttachmentsForNeoId(
   });
 
   let appliedListMatch: ExcelMatchResult | null = null;
+  let scanFailed = false;
 
   for (const att of sorted) {
     const fileType = classifyExcelFile(att.filename);
@@ -120,12 +122,20 @@ export async function scanExcelAttachmentsForNeoId(
         id: att.attachmentId,
       });
 
-      if (!res.data.data) continue;
+      if (!res.data.data) {
+        scanFailed = true;
+        continue;
+      }
 
       const buffer = Buffer.from(res.data.data, 'base64url');
 
       for (const token of searchTokens) {
         const match = searchRollNumberInWorkbook(buffer, token);
+
+        if (match.parseError) {
+          scanFailed = true;
+          continue;
+        }
 
         if (match.isMatched) {
           // Check for venue / room / lab in additional extracted data
@@ -148,6 +158,7 @@ export async function scanExcelAttachmentsForNeoId(
 
           const result: ExcelMatchResult = {
             matched: true,
+            scanStatus: 'matched',
             filename: att.filename,
             matchedNeoId: match.matchedValue || token,
             details: `Matched in ${att.filename} (${match.matchedSheet}!${match.matchedCell})${
@@ -170,9 +181,36 @@ export async function scanExcelAttachmentsForNeoId(
       }
     } catch (err) {
       console.error(`Failed to scan attachment ${att.filename}:`, err);
+      scanFailed = true;
     }
   }
 
-  // No shortlist match found — return the applied list match if any (for informational purposes)
-  return appliedListMatch;
+  // Preserve a valid applied-list match, but expose any failed sibling scan.
+  if (appliedListMatch) {
+    return scanFailed
+      ? { ...appliedListMatch, scanStatus: 'failed' }
+      : appliedListMatch;
+  }
+
+  if (scanFailed) {
+    return {
+      matched: false,
+      scanStatus: 'failed',
+      filename: '',
+      matchedNeoId: null,
+      details: null,
+      venueOrRoom: null,
+      isActualShortlist: false,
+    };
+  }
+
+  return {
+    matched: false,
+    scanStatus: 'no_match',
+    filename: '',
+    matchedNeoId: null,
+    details: null,
+    venueOrRoom: null,
+    isActualShortlist: false,
+  };
 }

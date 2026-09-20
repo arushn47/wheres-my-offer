@@ -4,6 +4,7 @@ import { useMemo, useState, useEffect, useRef } from 'react';
 import Link from 'next/link';
 import { AnimatePresence, motion } from 'framer-motion';
 import { appToast } from '@/lib/toast';
+import { cleanEventTitle } from '@/lib/sync/events';
 import {
   CalendarPlus,
   MapPin,
@@ -85,8 +86,9 @@ function getGcalUrl(companyName: string, title: string | null, label: string, st
   if (!startTime) return null;
   const startIso = new Date(startTime).toISOString().replace(/-|:|\.\d+/g, '');
   const endIso = new Date(new Date(startTime).getTime() + 3600000).toISOString().replace(/-|:|\.\d+/g, '');
+  const cleanTitle = cleanEventTitle(title, companyName, label);
   return `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${encodeURIComponent(
-    `${companyName} — ${title || label}`
+    `${companyName} — ${cleanTitle}`
   )}&dates=${startIso}/${endIso}&location=${encodeURIComponent(
     venue || 'VIT Campus / Online'
   )}`;
@@ -392,7 +394,7 @@ export default function CalendarClient({ events }: CalendarClientProps) {
                           <div
                             key={e.id}
                             className={`flex items-center gap-1 truncate rounded border px-1.5 py-0.5 text-[9px] font-medium transition-all hover:brightness-125 ${meta.cls}`}
-                            title={`${e.companyName} — ${e.title || meta.label}`}
+                            title={`${e.companyName} — ${cleanEventTitle(e.title, e.companyName, meta.label)}`}
                           >
                             <span className={`h-1 w-1 shrink-0 rounded-full ${meta.dot}`} />
                             <span className="truncate">{e.companyName}</span>
@@ -478,11 +480,15 @@ export default function CalendarClient({ events }: CalendarClientProps) {
                                   {m.label}
                                 </span>
                               </div>
-                              {e.title && e.title !== m.label && (
-                                <p className="mt-0.5 text-xs text-zinc-400 line-clamp-1">
-                                  {e.title}
-                                </p>
-                              )}
+                              {(() => {
+                                const subtitle = cleanEventTitle(e.title, e.companyName, m.label);
+                                if (!subtitle || subtitle.toLowerCase() === m.label.toLowerCase()) return null;
+                                return (
+                                  <p className="mt-0.5 text-xs text-zinc-400 line-clamp-1">
+                                    {subtitle}
+                                  </p>
+                                );
+                              })()}
                             </div>
 
                             {e.startTime && (
@@ -571,6 +577,7 @@ export default function CalendarClient({ events }: CalendarClientProps) {
 
                 return (
                   <div
+                    key={e.id || `${e.companyId}-${e.startTime || ''}`}
                     onClick={() => {
                       if (e.startTime) {
                         const d = new Date(e.startTime);
@@ -593,7 +600,7 @@ export default function CalendarClient({ events }: CalendarClientProps) {
                     <div className="min-w-0 flex-1">
                       <div className="flex flex-wrap items-center gap-2">
                         <span className="truncate text-sm font-semibold text-zinc-100 group-hover:text-emerald-300 transition-colors">
-                          {e.companyName} — {e.title || m.label}
+                          {e.companyName} — {cleanEventTitle(e.title, e.companyName, m.label)}
                         </span>
                         <span className={`rounded-full border px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider ${m.cls}`}>
                           {m.label}
@@ -685,7 +692,7 @@ export default function CalendarClient({ events }: CalendarClientProps) {
                         <div className="min-w-0 flex-1">
                           <div className="flex flex-wrap items-center gap-2">
                             <span className="truncate text-sm font-semibold text-zinc-200 group-hover:text-emerald-300 transition-colors">
-                              {e.companyName} — {e.title || m.label}
+                              {e.companyName} — {cleanEventTitle(e.title, e.companyName, m.label)}
                             </span>
                             <span className={`rounded-full border px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider ${m.cls}`}>
                               {m.label}
@@ -807,11 +814,15 @@ export default function CalendarClient({ events }: CalendarClientProps) {
                                 {meta.label}
                               </span>
                             </div>
-                            {evt.title && evt.title !== meta.label && (
-                              <p className="mt-1 text-xs text-zinc-400 line-clamp-2">
-                                {evt.title}
-                              </p>
-                            )}
+                            {(() => {
+                              const subtitle = cleanEventTitle(evt.title, evt.companyName, meta.label);
+                              if (!subtitle || subtitle.toLowerCase() === meta.label.toLowerCase()) return null;
+                              return (
+                                <p className="mt-1 text-xs text-zinc-400 line-clamp-2">
+                                  {subtitle}
+                                </p>
+                              );
+                            })()}
                           </div>
                           {evt.startTime && (
                             <span className="shrink-0 rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-1 font-mono text-[11px] font-bold text-amber-300">

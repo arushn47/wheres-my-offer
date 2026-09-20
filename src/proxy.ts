@@ -12,6 +12,7 @@ const PUBLIC_ROUTES = [
   '/api/auth/google',
   '/api/auth/callback',
   '/api/cron',
+  '/api/admin/migration/phase3',
   '/api/sync/reprocess',
   '/api/webhooks',
 ];

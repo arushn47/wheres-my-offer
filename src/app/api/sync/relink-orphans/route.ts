@@ -21,20 +21,33 @@ export async function POST() {
   const supabase = createAdminClient();
   const userId = session.userId;
 
-  // 1. Fetch all companies for this user
-  const { data: companies } = await supabase
-    .from('companies')
-    .select('id, name, aliases')
-    .eq('user_id', userId);
+  // 1. Fetch all companies and placement drives for this user
+  const [{ data: companies }, { data: drives }] = await Promise.all([
+    supabase
+      .from('companies')
+      .select('id, name, aliases')
+      .eq('user_id', userId),
+    supabase
+      .from('placement_drives')
+      .select('id, company_id, drive_number')
+      .eq('user_id', userId),
+  ]);
 
   if (!companies || companies.length === 0) {
     return NextResponse.json({ message: 'No companies found', linked: 0 });
   }
 
+  const drivesByCompanyId = new Map<string, Array<{ id: string; company_id: string; drive_number: string | null }>>();
+  for (const d of drives || []) {
+    const list = drivesByCompanyId.get(d.company_id) || [];
+    list.push(d);
+    drivesByCompanyId.set(d.company_id, list);
+  }
+
   // 2. Fetch all emails for this user
   const { data: allEmails, error } = await supabase
     .from('emails')
-    .select('id, subject, sender, company_id')
+    .select('id, subject, sender, placement_drive_id')
     .eq('user_id', userId);
 
   if (error || !allEmails || allEmails.length === 0) {
@@ -108,14 +121,32 @@ export async function POST() {
       if (matchedCompanyId) break;
     }
 
-    if (matchedCompanyId && matchedCompanyId !== email.company_id) {
-      await supabase
-        .from('emails')
-        .update({ company_id: matchedCompanyId })
-        .eq('id', email.id);
+    if (matchedCompanyId) {
+      const companyDrives = drivesByCompanyId.get(matchedCompanyId) || [];
+      const targetDrive = companyDrives[0];
 
-      linked++;
-      details.push({ subject: email.subject || '', company: matchedCompanyName });
+      if (targetDrive && targetDrive.id !== email.placement_drive_id) {
+        await supabase
+          .from('emails')
+          .update({ placement_drive_id: targetDrive.id })
+          .eq('id', email.id);
+
+        await supabase
+          .from('email_drive_links')
+          .upsert(
+            {
+              user_id: userId,
+              email_id: email.id,
+              placement_drive_id: targetDrive.id,
+              assignment_source: 'relink_orphans',
+              confidence: 'medium',
+            },
+            { onConflict: 'email_id,placement_drive_id' }
+          );
+
+        linked++;
+        details.push({ subject: email.subject || '', company: matchedCompanyName });
+      }
     }
   }
 

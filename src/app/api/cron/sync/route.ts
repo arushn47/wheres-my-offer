@@ -25,11 +25,15 @@ async function executeBackgroundSync(userIds: string[]) {
         console.log(`[Cron Sync] Successfully synced user ${userId}`);
       }
 
-      // Check if any placement rounds (tests/PPT/interviews) are commencing now and notify
-      const { checkAndNotifyLiveEvents } = await import('@/lib/notifications/service');
-      await checkAndNotifyLiveEvents(userId);
-      const { checkAndNotifyRegistrationDeadlines } = await import('@/lib/notifications/service');
-      await checkAndNotifyRegistrationDeadlines(userId);
+      // Check if any placement rounds (tests/PPT/interviews) or deadlines require notifications
+      // Only run when new emails were actually processed to eliminate unnecessary Supabase queries every 15-min cron tick
+      if (!res?.alreadyRunning && (res?.newEmails ?? 0) > 0) {
+        const { checkAndNotifyLiveEvents, checkAndNotifyRegistrationDeadlines } = await import(
+          '@/lib/notifications/service'
+        );
+        await checkAndNotifyLiveEvents(userId);
+        await checkAndNotifyRegistrationDeadlines(userId);
+      }
     } catch (err: any) {
       console.error(`[Cron Sync] Failed for user ${userId}:`, err);
     }
@@ -88,6 +92,13 @@ export async function GET(req: NextRequest) {
             syncResults.push({ userId, status: 'skipped_already_running', message: 'Sync already in progress' });
           } else {
             syncResults.push({ userId, status: 'success', result });
+            if ((result?.newEmails ?? 0) > 0) {
+              const { checkAndNotifyLiveEvents, checkAndNotifyRegistrationDeadlines } = await import(
+                '@/lib/notifications/service'
+              );
+              await checkAndNotifyLiveEvents(userId);
+              await checkAndNotifyRegistrationDeadlines(userId);
+            }
           }
         } catch (err: any) {
           console.error(`[Cron Sync] Failed for user ${userId}:`, err);

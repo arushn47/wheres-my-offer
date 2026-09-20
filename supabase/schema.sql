@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS public.gmail_accounts (
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW(),
   CONSTRAINT gmail_accounts_pkey PRIMARY KEY (id),
+  CONSTRAINT gmail_accounts_user_email_unique UNIQUE (user_id, email),
   CONSTRAINT gmail_accounts_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE
 );
 
@@ -57,12 +58,43 @@ CREATE TABLE IF NOT EXISTS public.companies (
 );
 
 -- ============================================
--- 4. applications
+-- 4. placement_drives
+-- ============================================
+CREATE TABLE IF NOT EXISTS public.placement_drives (
+  id UUID NOT NULL DEFAULT uuid_generate_v4(),
+  user_id UUID NOT NULL,
+  company_id UUID NOT NULL,
+  drive_number TEXT,
+  normalized_drive_number TEXT,
+  drive_name TEXT,
+  role TEXT,
+  category TEXT,
+  ctc TEXT,
+  stipend TEXT,
+  location TEXT,
+  eligibility TEXT,
+  branches TEXT[],
+  cgpa_requirement TEXT,
+  backlog_requirement TEXT,
+  registration_deadline TIMESTAMPTZ,
+  identity_state TEXT NOT NULL DEFAULT 'unassigned' CHECK (identity_state = ANY (ARRAY['assigned'::text, 'ambiguous'::text, 'unassigned'::text, 'legacy'::text, 'conflict'::text, 'manually_assigned'::text])),
+  identity_confidence TEXT NOT NULL DEFAULT 'low' CHECK (identity_confidence = ANY (ARRAY['high'::text, 'medium'::text, 'low'::text])),
+  identity_source TEXT,
+  source_email_id UUID,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW(),
+  CONSTRAINT placement_drives_pkey PRIMARY KEY (id),
+  CONSTRAINT placement_drives_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE,
+  CONSTRAINT placement_drives_company_id_fkey FOREIGN KEY (company_id) REFERENCES public.companies(id) ON DELETE CASCADE
+);
+
+-- ============================================
+-- 5. applications
 -- ============================================
 CREATE TABLE IF NOT EXISTS public.applications (
   id UUID NOT NULL DEFAULT uuid_generate_v4(),
   user_id UUID NOT NULL,
-  company_id UUID NOT NULL,
+  placement_drive_id UUID NOT NULL,
   status TEXT NOT NULL DEFAULT 'unknown'::text CHECK (status = ANY (ARRAY[
     'not_applied'::text, 'applied'::text, 'shortlisted'::text, 'ppt_scheduled'::text,
     'test_scheduled'::text, 'interview_scheduled'::text, 'selected'::text, 'rejected'::text,
@@ -88,12 +120,13 @@ CREATE TABLE IF NOT EXISTS public.applications (
   category TEXT,
   status_source_email_at TIMESTAMPTZ,
   CONSTRAINT applications_pkey PRIMARY KEY (id),
+  CONSTRAINT applications_user_drive_unique UNIQUE (user_id, placement_drive_id),
   CONSTRAINT applications_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE,
-  CONSTRAINT applications_company_id_fkey FOREIGN KEY (company_id) REFERENCES public.companies(id) ON DELETE CASCADE
+  CONSTRAINT applications_placement_drive_id_fkey FOREIGN KEY (placement_drive_id) REFERENCES public.placement_drives(id) ON DELETE CASCADE
 );
 
 -- ============================================
--- 5. emails
+-- 6. emails
 -- ============================================
 CREATE TABLE IF NOT EXISTS public.emails (
   id UUID NOT NULL DEFAULT uuid_generate_v4(),
@@ -111,19 +144,43 @@ CREATE TABLE IF NOT EXISTS public.emails (
     'interview'::text, 'jd'::text, 'venue_update'::text, 'result'::text, 'general'::text,
     'unclassified_placement_notice'::text, 'irrelevant'::text, 'unclassified'::text
   ])),
-  company_id UUID,
   is_processed BOOLEAN DEFAULT FALSE,
   is_relevant BOOLEAN DEFAULT TRUE,
   processed_at TIMESTAMPTZ,
+  placement_drive_id UUID,
+  assignment_state TEXT DEFAULT 'unassigned',
+  assignment_confidence TEXT DEFAULT 'low',
+  assignment_source TEXT,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   CONSTRAINT emails_pkey PRIMARY KEY (id),
   CONSTRAINT emails_gmail_account_id_fkey FOREIGN KEY (gmail_account_id) REFERENCES public.gmail_accounts(id) ON DELETE CASCADE,
   CONSTRAINT emails_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE,
-  CONSTRAINT emails_company_id_fkey FOREIGN KEY (company_id) REFERENCES public.companies(id) ON DELETE SET NULL
+  CONSTRAINT emails_placement_drive_id_fkey FOREIGN KEY (placement_drive_id) REFERENCES public.placement_drives(id) ON DELETE SET NULL
 );
 
 -- ============================================
--- 6. attachments
+-- 7. email_drive_links
+-- ============================================
+CREATE TABLE IF NOT EXISTS public.email_drive_links (
+  id UUID NOT NULL DEFAULT uuid_generate_v4(),
+  user_id UUID NOT NULL,
+  email_id UUID NOT NULL,
+  placement_drive_id UUID NOT NULL,
+  link_type TEXT NOT NULL DEFAULT 'candidate' CHECK (link_type = ANY (ARRAY['primary'::text, 'secondary'::text, 'pooled'::text, 'reference_only'::text, 'ambiguous_candidate'::text])),
+  confidence TEXT NOT NULL DEFAULT 'low' CHECK (confidence = ANY (ARRAY['high'::text, 'medium'::text, 'low'::text])),
+  assignment_source TEXT,
+  is_primary BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW(),
+  CONSTRAINT email_drive_links_pkey PRIMARY KEY (id),
+  CONSTRAINT email_drive_links_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE,
+  CONSTRAINT email_drive_links_email_id_fkey FOREIGN KEY (email_id) REFERENCES public.emails(id) ON DELETE CASCADE,
+  CONSTRAINT email_drive_links_drive_id_fkey FOREIGN KEY (placement_drive_id) REFERENCES public.placement_drives(id) ON DELETE CASCADE,
+  CONSTRAINT email_drive_links_identity_unique UNIQUE (email_id, placement_drive_id, link_type)
+);
+
+-- ============================================
+-- 8. attachments
 -- ============================================
 CREATE TABLE IF NOT EXISTS public.attachments (
   id UUID NOT NULL DEFAULT uuid_generate_v4(),
@@ -142,35 +199,35 @@ CREATE TABLE IF NOT EXISTS public.attachments (
 );
 
 -- ============================================
--- 7. candidate_matches
+-- 8. candidate_matches
 -- ============================================
 CREATE TABLE IF NOT EXISTS public.candidate_matches (
   id UUID NOT NULL DEFAULT uuid_generate_v4(),
   user_id UUID NOT NULL,
-  application_id UUID,
   attachment_id UUID,
   email_id UUID,
+  placement_drive_id UUID NOT NULL,
   neo_id TEXT NOT NULL,
-  match_type TEXT NOT NULL CHECK (match_type = ANY (ARRAY['xlsx_cell'::text, 'pdf_text'::text, 'docx_text'::text, 'email_body'::text, 'email_subject'::text])),
+  match_type TEXT NOT NULL CHECK (match_type = ANY (ARRAY['xlsx_cell'::text, 'xlsx_applied_list'::text, 'pdf_text'::text, 'docx_text'::text, 'email_body'::text, 'email_subject'::text])),
   matched_value TEXT,
   match_location TEXT,
   confidence TEXT DEFAULT 'high'::text CHECK (confidence = ANY (ARRAY['high'::text, 'medium'::text, 'low'::text])),
   created_at TIMESTAMPTZ DEFAULT NOW(),
   CONSTRAINT candidate_matches_pkey PRIMARY KEY (id),
+  CONSTRAINT candidate_matches_logical_identity_unique UNIQUE (user_id, email_id, neo_id, match_type),
   CONSTRAINT candidate_matches_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE,
-  CONSTRAINT candidate_matches_application_id_fkey FOREIGN KEY (application_id) REFERENCES public.applications(id) ON DELETE CASCADE,
   CONSTRAINT candidate_matches_attachment_id_fkey FOREIGN KEY (attachment_id) REFERENCES public.attachments(id) ON DELETE CASCADE,
-  CONSTRAINT candidate_matches_email_id_fkey FOREIGN KEY (email_id) REFERENCES public.emails(id) ON DELETE CASCADE
+  CONSTRAINT candidate_matches_email_id_fkey FOREIGN KEY (email_id) REFERENCES public.emails(id) ON DELETE CASCADE,
+  CONSTRAINT candidate_matches_placement_drive_id_fkey FOREIGN KEY (placement_drive_id) REFERENCES public.placement_drives(id) ON DELETE CASCADE
 );
 
 -- ============================================
--- 8. events
+-- 9. events
 -- ============================================
 CREATE TABLE IF NOT EXISTS public.events (
   id UUID NOT NULL DEFAULT uuid_generate_v4(),
   user_id UUID NOT NULL,
-  company_id UUID NOT NULL,
-  application_id UUID,
+  placement_drive_id UUID NOT NULL,
   event_type TEXT NOT NULL CHECK (event_type = ANY (ARRAY[
     'registration_deadline'::text, 'ppt'::text, 'online_test'::text, 'coding_test'::text,
     'technical_interview'::text, 'hr_interview'::text, 'final_interview'::text,
@@ -189,9 +246,8 @@ CREATE TABLE IF NOT EXISTS public.events (
   gcal_event_id TEXT,
   CONSTRAINT events_pkey PRIMARY KEY (id),
   CONSTRAINT events_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE,
-  CONSTRAINT events_company_id_fkey FOREIGN KEY (company_id) REFERENCES public.companies(id) ON DELETE CASCADE,
-  CONSTRAINT events_application_id_fkey FOREIGN KEY (application_id) REFERENCES public.applications(id) ON DELETE CASCADE,
-  CONSTRAINT events_source_email_id_fkey FOREIGN KEY (source_email_id) REFERENCES public.emails(id) ON DELETE SET NULL
+  CONSTRAINT events_source_email_id_fkey FOREIGN KEY (source_email_id) REFERENCES public.emails(id) ON DELETE SET NULL,
+  CONSTRAINT events_placement_drive_id_fkey FOREIGN KEY (placement_drive_id) REFERENCES public.placement_drives(id) ON DELETE CASCADE
 );
 
 -- ============================================
@@ -243,19 +299,17 @@ CREATE TABLE IF NOT EXISTS public.notifications (
   ])),
   title TEXT NOT NULL,
   message TEXT,
-  company_id UUID,
+  placement_drive_id UUID,
   is_read BOOLEAN DEFAULT FALSE,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   body TEXT,
   link TEXT,
   event_id UUID,
-  application_id UUID,
   dedupe_key TEXT UNIQUE,
   CONSTRAINT notifications_pkey PRIMARY KEY (id),
-  CONSTRAINT notifications_company_id_fkey FOREIGN KEY (company_id) REFERENCES public.companies(id) ON DELETE CASCADE,
+  CONSTRAINT notifications_placement_drive_id_fkey FOREIGN KEY (placement_drive_id) REFERENCES public.placement_drives(id) ON DELETE SET NULL,
   CONSTRAINT notifications_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE,
-  CONSTRAINT notifications_event_id_fkey FOREIGN KEY (event_id) REFERENCES public.events(id) ON DELETE SET NULL,
-  CONSTRAINT notifications_application_id_fkey FOREIGN KEY (application_id) REFERENCES public.applications(id) ON DELETE SET NULL
+  CONSTRAINT notifications_event_id_fkey FOREIGN KEY (event_id) REFERENCES public.events(id) ON DELETE SET NULL
 );
 
 -- ============================================
@@ -387,24 +441,34 @@ CREATE TABLE IF NOT EXISTS public.feedback_reports (
 CREATE INDEX IF NOT EXISTS idx_users_google_id ON public.users(google_id);
 CREATE INDEX IF NOT EXISTS idx_users_neo_id ON public.users(neo_id);
 CREATE INDEX IF NOT EXISTS idx_gmail_accounts_user ON public.gmail_accounts(user_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_placement_drives_user_drive_number
+  ON public.placement_drives(user_id, normalized_drive_number)
+  WHERE normalized_drive_number IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_applications_user_drive
+  ON public.applications(user_id, placement_drive_id)
+  WHERE placement_drive_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_placement_drives_user ON public.placement_drives(user_id);
+CREATE INDEX IF NOT EXISTS idx_placement_drives_company ON public.placement_drives(company_id);
+CREATE INDEX IF NOT EXISTS idx_placement_drives_state ON public.placement_drives(user_id, identity_state);
+CREATE INDEX IF NOT EXISTS idx_applications_drive ON public.applications(placement_drive_id);
+CREATE INDEX IF NOT EXISTS idx_emails_drive ON public.emails(placement_drive_id);
+CREATE INDEX IF NOT EXISTS idx_emails_assignment ON public.emails(user_id, assignment_state);
+CREATE INDEX IF NOT EXISTS idx_events_drive ON public.events(placement_drive_id);
+CREATE INDEX IF NOT EXISTS idx_candidate_matches_drive ON public.candidate_matches(placement_drive_id);
+CREATE INDEX IF NOT EXISTS idx_notifications_drive ON public.notifications(placement_drive_id);
 CREATE INDEX IF NOT EXISTS idx_companies_user ON public.companies(user_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_companies_name ON public.companies(user_id, name);
 CREATE INDEX IF NOT EXISTS idx_applications_user ON public.applications(user_id);
-CREATE INDEX IF NOT EXISTS idx_applications_company ON public.applications(company_id);
 CREATE INDEX IF NOT EXISTS idx_applications_status ON public.applications(user_id, status);
 CREATE INDEX IF NOT EXISTS idx_emails_gmail_message ON public.emails(gmail_account_id, gmail_message_id);
 CREATE INDEX IF NOT EXISTS idx_emails_user ON public.emails(user_id);
 CREATE INDEX IF NOT EXISTS idx_emails_classification ON public.emails(classification);
-CREATE INDEX IF NOT EXISTS idx_emails_company ON public.emails(company_id);
 CREATE INDEX IF NOT EXISTS idx_attachments_email ON public.attachments(email_id);
 CREATE INDEX IF NOT EXISTS idx_attachments_hash ON public.attachments(file_hash);
 CREATE INDEX IF NOT EXISTS idx_candidate_matches_neo ON public.candidate_matches(neo_id);
-CREATE INDEX IF NOT EXISTS idx_candidate_matches_app ON public.candidate_matches(application_id);
-CREATE INDEX IF NOT EXISTS idx_events_company ON public.events(company_id);
 CREATE INDEX IF NOT EXISTS idx_events_user ON public.events(user_id);
 CREATE INDEX IF NOT EXISTS idx_events_start ON public.events(start_time);
 CREATE INDEX IF NOT EXISTS idx_events_type ON public.events(event_type);
-CREATE INDEX IF NOT EXISTS idx_documents_company ON public.documents(company_id);
 CREATE INDEX IF NOT EXISTS idx_notifications_user ON public.notifications(user_id, is_read);
 CREATE INDEX IF NOT EXISTS idx_status_history_app ON public.status_history(application_id);
 CREATE INDEX IF NOT EXISTS idx_drive_resolutions_drive_num ON public.drive_resolutions(drive_number);

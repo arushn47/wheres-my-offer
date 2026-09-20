@@ -167,20 +167,27 @@ export default function NotificationBell({
     };
   }, [fetchNotifications]);
 
-  // Close dropdown on outside click or touch
+  // Close dropdown on outside click, touch, or Escape key
   useEffect(() => {
     function handleClickOutside(event: MouseEvent | TouchEvent) {
       if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
         setIsOpen(false);
       }
     }
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        setIsOpen(false);
+      }
+    }
     if (isOpen) {
       document.addEventListener('mousedown', handleClickOutside);
       document.addEventListener('touchstart', handleClickOutside);
+      document.addEventListener('keydown', handleKeyDown);
     }
     return () => {
       document.removeEventListener('mousedown', handleClickOutside);
       document.removeEventListener('touchstart', handleClickOutside);
+      document.removeEventListener('keydown', handleKeyDown);
     };
   }, [isOpen]);
 
@@ -303,18 +310,18 @@ export default function NotificationBell({
       {/* Notification Dropdown Panel */}
       {isOpen && (
         <>
-          {/* Mobile backdrop for outside tap dismiss: strictly below header (top-12) so header stays 100% crisp and unblurred */}
+          {/* Backdrop for outside tap dismiss on touch viewports */}
           <div
-            className="fixed top-12 inset-x-0 bottom-0 z-40 bg-black/40 sm:hidden"
+            className="fixed inset-0 z-40 bg-black/40 lg:hidden"
             onClick={() => setIsOpen(false)}
           />
 
           <div
             className={cn(
-              "fixed inset-x-2.5 top-13 max-w-sm mx-auto bg-[#111113] border border-white/10 rounded-2xl shadow-2xl z-50 overflow-hidden animate-fade-in flex flex-col max-h-[calc(100vh-4.5rem)] sm:max-h-[32rem]",
+              "bg-[#111113] border border-white/10 rounded-2xl shadow-2xl z-50 overflow-hidden animate-fade-in flex flex-col",
               align === 'sidebar'
-                ? "lg:fixed lg:left-[18.75rem] lg:top-3 lg:w-96 lg:max-w-none lg:inset-auto"
-                : "sm:absolute sm:inset-auto sm:right-0 sm:top-full sm:mt-2 sm:w-96 sm:max-w-none"
+                ? "fixed top-3 left-[19rem] w-96 max-w-[calc(100vw-20.5rem)] max-h-[calc(100dvh-2rem)]"
+                : "fixed inset-x-2.5 top-14 sm:absolute sm:inset-x-auto sm:top-full sm:right-0 sm:mt-2 sm:w-96 max-h-[calc(100dvh-5rem)]"
             )}
           >
             {/* Header */}

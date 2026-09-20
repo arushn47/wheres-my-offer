@@ -17,12 +17,14 @@ export async function GET() {
   const memoryProgress = getActiveSyncProgress(session.userId);
   const memoryIsActive = isUserSyncActive(session.userId);
 
-  // 2. Check sync_state table from Supabase (cross-server persistence)
+  // 2. Check sync_state table from Supabase (narrow column projection to reduce egress)
   let dbSyncState: any = null;
   try {
     const { data } = await supabase
       .from('sync_state')
-      .select('*')
+      .select(
+        'is_syncing, updated_at, phase, total_messages, processed_messages, skipped_duplicates, account_email, account_type, new_emails, new_companies, last_error, current_subject, is_initial_sync, current_page_index, total_pages'
+      )
       .eq('user_id', session.userId)
       .single();
     dbSyncState = data;
@@ -54,8 +56,8 @@ export async function GET() {
 
   if (dbSyncState?.is_syncing) {
     const updatedAt = new Date(dbSyncState.updated_at || 0).getTime();
-    // 60 seconds timeout: active syncs touch updated_at every ~1.5s. If untouched for > 60s, the process was killed/disconnected
-    const isStale = Date.now() - updatedAt > 60 * 1000;
+    // 90 seconds timeout: active syncs touch updated_at every <= 15s. If untouched for > 90s, the process was killed/interrupted
+    const isStale = Date.now() - updatedAt > 90 * 1000;
     if (!isStale) {
       const totalMessages = dbSyncState.total_messages || 0;
       const processedMessages = dbSyncState.processed_messages || 0;
@@ -87,30 +89,15 @@ export async function GET() {
         lastSyncAt,
       });
     } else {
-      // Heal stale lock in DB immediately so subsequent syncs are not blocked.
-      // Only set phase to 'pending' if there are genuinely unprocessed pages in sync_pages.
-      const { data: pendingPages } = await supabase
-        .from('sync_pages')
-        .select('id')
-        .eq('user_id', session.userId)
-        .neq('status', 'complete')
-        .limit(1);
-
-      const hasPending = Boolean(pendingPages && pendingPages.length > 0);
-
-      await supabase
-        .from('sync_state')
-        .update({
-          is_syncing: false,
-          phase: hasPending ? 'pending' : 'idle',
-          updated_at: new Date().toISOString(),
-        })
-        .eq('user_id', session.userId);
-
-      if (dbSyncState) {
-        dbSyncState.is_syncing = false;
-        dbSyncState.phase = hasPending ? 'pending' : 'idle';
-      }
+      // Stale lock detected (>90s untouched).
+      // Keep this status endpoint strictly read-only: do NOT perform DB writes here.
+      // Stale locks are safely overridden by runSync() when a new sync is initiated.
+      return NextResponse.json({
+        isSyncing: false,
+        phase: 'idle',
+        progress: null,
+        lastSyncAt,
+      });
     }
   }
 

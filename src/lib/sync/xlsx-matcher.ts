@@ -238,6 +238,7 @@ export function searchRollNumberInWorkbook(
     // 5. Search Execution (with Section Header Tracking)
     // -------------------------------------------------------------
     let currentSectionBanner: string | null = null;
+    let shouldScanFullSheet = !isColumnConfidenceHigh;
 
     if (isColumnConfidenceHigh) {
       // High Confidence Path: Scan ONLY the detected ID column (Fast Path)
@@ -275,8 +276,15 @@ export function searchRollNumberInWorkbook(
           };
         }
       }
-    } else {
-      // Low Confidence Fallback: Scan all cells across all rows
+
+      // The fast path can select a different ID-shaped column than the target.
+      // Fall back to the same exact full-sheet scan before moving to another tab.
+      currentSectionBanner = null;
+      shouldScanFullSheet = true;
+    }
+
+    if (shouldScanFullSheet) {
+      // Low-confidence path or high-confidence fast-path miss: scan all cells.
       for (let r = 0; r < rows.length; r++) {
         const row = rows[r];
         if (!Array.isArray(row)) continue;

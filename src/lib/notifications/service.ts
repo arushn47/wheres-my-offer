@@ -13,12 +13,27 @@ export type NotificationType =
   | 'sync_complete'
   | 'general';
 
+export function buildDeadlineNotificationDedupeKey(params: {
+  userId: string;
+  placementDriveId?: string | null;
+  companyId?: string | null;
+  deadline: Date | string;
+  leadMinutes: number;
+}): string {
+  const identity = params.placementDriveId
+    ? `drive:${params.placementDriveId}`
+    : `legacy:${params.companyId || 'unscoped'}`;
+  const deadlineSlot = new Date(params.deadline).toISOString().slice(0, 13);
+  return `deadline:${params.userId}:${identity}:${deadlineSlot}:${params.leadMinutes}`;
+}
+
 export interface CreateNotificationParams {
   userId: string;
   type: NotificationType;
   title: string;
   body: string;
   companyId?: string | null;
+  placementDriveId?: string | null;
   applicationId?: string | null;
   eventId?: string | null;
   link?: string | null;
@@ -42,7 +57,8 @@ export async function sendNotification(
     type,
     title,
     body,
-    companyId,
+    
+    placementDriveId,
     applicationId,
     eventId,
     link,
@@ -89,20 +105,31 @@ export async function sendNotification(
 
   let inAppCreated = false;
 
-  // 2. Insert into in-app notifications if in-app notifications are enabled
+  // Fast-path duplicate suppression. The database unique dedupe_key remains
+  // the race-safe backstop for concurrent callers.
+  const { data: existingNotif } = await supabase
+    .from('notifications')
+    .select('id')
+    .eq('dedupe_key', dedupeKey)
+    .maybeSingle();
+
+  if (existingNotif) {
+    return { inAppCreated: false, pushSent: false };
+  }
+
+  // Insert into in-app notifications if in-app notifications are enabled
   if (prefs.inAppEnabled) {
     const { data: inserted, error: insertError } = await supabase
       .from('notifications')
       .insert({
         user_id: userId,
-        company_id: companyId || null,
-        application_id: applicationId || null,
+        placement_drive_id: placementDriveId || null,
         event_id: eventId || null,
         type,
         title,
         message: body,
         body,
-        link: link || (companyId ? `/companies/${companyId}` : '/'),
+        link: link || (placementDriveId ? `/companies/search?drive=${placementDriveId}` : '/'),
         dedupe_key: dedupeKey,
         is_read: false,
       })
@@ -111,8 +138,7 @@ export async function sendNotification(
 
     if (insertError) {
       if (insertError.code === '23505') {
-        // The notification was already delivered for this dedupe key.
-        // Do not send another push on the next cron tick.
+        // Fallback catch if race condition occurred
         inAppCreated = false;
         return { inAppCreated: false, pushSent: false };
       } else {
@@ -123,11 +149,12 @@ export async function sendNotification(
     }
   }
 
-  // 3. Dispatch Web Push notification if browser push is enabled
+  // 3. Dispatch Web Push notification asynchronously if browser push is enabled
   let pushSent = false;
   if (prefs.browserPushEnabled) {
-    const targetLink = link || (companyId ? `/companies/${companyId}` : '/');
-    const { sent } = await sendPushToUser(userId, {
+    const targetLink = link || (placementDriveId ? `/companies/search?drive=${placementDriveId}` : '/');
+    // Non-blocking fire-and-forget push with internal timeout protection
+    sendPushToUser(userId, {
       ...pushPayload,
       title,
       body,
@@ -135,12 +162,13 @@ export async function sendNotification(
       data: {
         ...pushPayload?.data,
         url: targetLink,
-        companyId: companyId || undefined,
         eventId: eventId || undefined,
         type,
       },
+    }).catch((err) => {
+      console.warn('[Push] Background push error:', err);
     });
-    pushSent = sent > 0;
+    pushSent = true;
   }
 
   return { inAppCreated, pushSent };
@@ -155,17 +183,18 @@ export async function sendNotification(
  */
 export async function notifyStatusChange(params: {
   userId: string;
-  companyId: string;
+  placementDriveId: string;
   companyName: string;
   oldStatus: string | null;
   newStatus: string;
   sourceEmailId?: string;
 }) {
-  const { userId, companyId, companyName, oldStatus, newStatus, sourceEmailId } = params;
+  const { userId, placementDriveId, companyName, oldStatus, newStatus, sourceEmailId } = params;
 
   if (oldStatus === newStatus) return; // Do not notify if status did not change
 
-  const dedupeKey = `status:${userId}:${companyId}:${newStatus}:${sourceEmailId || 'sync'}`;
+  const identity = placementDriveId;
+  const dedupeKey = `status:${userId}:${identity}:${newStatus}:${sourceEmailId || 'sync'}`;
 
   let title = `${companyName} — Status Update`;
   let body = `Your application status for ${companyName} has changed to ${newStatus.toUpperCase().replace(/_/g, ' ')}.`;
@@ -189,8 +218,8 @@ export async function notifyStatusChange(params: {
     type: 'status_change',
     title,
     body,
-    companyId,
-    link: `/companies/${companyId}`,
+    placementDriveId,
+    link: `/companies/search?drive=${placementDriveId}`,
     dedupeKey,
   });
 }
@@ -200,22 +229,23 @@ export async function notifyStatusChange(params: {
  */
 export async function notifyShortlistMatch(params: {
   userId: string;
-  companyId: string;
+  placementDriveId: string;
   companyName: string;
   neoId: string;
   emailSubject: string;
   sourceEmailId?: string;
 }) {
-  const { userId, companyId, companyName, neoId, emailSubject, sourceEmailId } = params;
-  const dedupeKey = `shortlist:${userId}:${companyId}:${neoId}:${sourceEmailId || 'match'}`;
+  const { userId, placementDriveId, companyName, neoId, emailSubject, sourceEmailId } = params;
+  const identity = placementDriveId;
+  const dedupeKey = `shortlist:${userId}:${identity}:${neoId}:${sourceEmailId || 'match'}`;
 
   return sendNotification({
     userId,
     type: 'shortlist_match',
     title: `🎉 ${companyName} Shortlist Match!`,
     body: `Your Neo ID (${neoId}) was found in the official ${companyName} shortlist!`,
-    companyId,
-    link: `/companies/${companyId}`,
+    placementDriveId,
+    link: `/companies/search?drive=${placementDriveId}`,
     dedupeKey,
   });
 }
@@ -225,7 +255,7 @@ export async function notifyShortlistMatch(params: {
  */
 export async function notifyNewDrive(params: {
   userId: string;
-  companyId: string;
+  placementDriveId: string;
   companyName: string;
   role?: string | null;
   ctc?: string | null;
@@ -237,7 +267,7 @@ export async function notifyNewDrive(params: {
 }) {
   const {
     userId,
-    companyId,
+    placementDriveId,
     companyName,
     role,
     ctc,
@@ -248,7 +278,8 @@ export async function notifyNewDrive(params: {
     sourceEmailId,
   } = params;
 
-  const dedupeKey = `new_drive:${userId}:${companyId}`;
+  const identity = placementDriveId;
+  const dedupeKey = `new_drive:${userId}:${identity}`;
 
   const compCompensation = ctc || stipend || 'Compensation TBA';
   const roleDisplay = role ? `${role} · ` : '';
@@ -264,16 +295,15 @@ export async function notifyNewDrive(params: {
     type: 'new_company',
     title,
     body,
-    companyId,
-    link: `/companies/${companyId}`,
+    placementDriveId,
+    link: `/companies/search?drive=${placementDriveId}`,
     dedupeKey,
     pushPayload: {
       title,
       body,
       data: {
-        url: `/companies/${companyId}`,
+        url: `/companies/search?drive=${placementDriveId}`,
         type: 'new_company',
-        companyId,
       },
     },
   });
@@ -284,7 +314,7 @@ export async function notifyNewDrive(params: {
  */
 export async function notifyEventScheduled(params: {
   userId: string;
-  companyId: string;
+  placementDriveId: string;
   companyName: string;
   eventType: string;
   startTime: Date | null;
@@ -294,7 +324,7 @@ export async function notifyEventScheduled(params: {
 }) {
   const {
     userId,
-    companyId,
+    placementDriveId,
     companyName,
     eventType,
     startTime,
@@ -309,7 +339,7 @@ export async function notifyEventScheduled(params: {
     .from('applications')
     .select('status')
     .eq('user_id', userId)
-    .eq('company_id', companyId)
+    .eq('placement_drive_id', placementDriveId)
     .maybeSingle();
 
   const appStatus = (app?.status || '').toLowerCase();
@@ -336,7 +366,8 @@ export async function notifyEventScheduled(params: {
     : 'Date TBD';
 
   const dateKey = startTime ? startTime.toISOString().slice(0, 10) : 'unknown';
-  const dedupeKey = `event:${userId}:${companyId}:${eventType}:${dateKey}`;
+  const identity = placementDriveId || `legacy-company:unscoped`;
+  const dedupeKey = `event:${userId}:${identity}:${eventType}:${dateKey}`;
 
   let title = `📅 ${companyName} — Event Scheduled`;
   let body = `${eventType.replace(/_/g, ' ').toUpperCase()} on ${dateStr}${venue ? ` at ${venue}` : ''}.`;
@@ -365,9 +396,10 @@ export async function notifyEventScheduled(params: {
     type: notifType,
     title,
     body,
-    companyId,
+    
+    placementDriveId,
     eventId,
-    link: eventType === 'registration_deadline' ? `/companies/${companyId}` : `/calendar`,
+    link: eventType === 'registration_deadline' ? `/companies/search?drive=${placementDriveId}` : `/calendar`,
     dedupeKey,
   });
 }
@@ -381,25 +413,40 @@ export async function checkAndNotifyRegistrationDeadlines(userId: string) {
     const now = Date.now();
     const { data: deadlines, error: deadlinesError } = await supabase
       .from('events')
-      .select('id, company_id, start_time, companies(name)')
+      .select('id, placement_drive_id, start_time, placement_drives(company_id, companies(name))')
       .eq('user_id', userId)
       .eq('event_type', 'registration_deadline')
       .gt('start_time', new Date(now).toISOString());
 
     if (deadlinesError || !deadlines || deadlines.length === 0) return;
 
-    const companyIds = Array.from(new Set(deadlines.map((d) => d.company_id).filter(Boolean)));
+    const placementDriveIds = Array.from(new Set(deadlines.map((d) => d.placement_drive_id).filter(Boolean)));
     const { data: apps } = await supabase
       .from('applications')
-      .select('company_id, status')
+      .select('placement_drive_id, status')
       .eq('user_id', userId)
-      .in('company_id', companyIds);
+      .in('placement_drive_id', placementDriveIds);
 
-    const appStatusMap = new Map((apps || []).map((a) => [a.company_id, a.status]));
+    const appStatusMap = new Map<string, string>();
+    for (const a of apps || []) {
+      const s = (a.status || '').toLowerCase();
+      if (a.placement_drive_id) appStatusMap.set(a.placement_drive_id, s);
+    }
+
     const sortedLeadTimes = [...prefs.reminderLeadTimeMins].sort((a, b) => a - b);
+    const seenEventIdentities = new Set<string>();
 
     for (const event of deadlines) {
-      const appStatus = appStatusMap.get(event.company_id);
+      const targetIdentity = event.placement_drive_id ? `drive:${event.placement_drive_id}` : `event:${event.id}`;
+      const timeSlot = new Date(event.start_time).toISOString().slice(0, 13);
+      const identityKey = `${targetIdentity}:${timeSlot}`;
+      if (seenEventIdentities.has(identityKey)) continue;
+      seenEventIdentities.add(identityKey);
+
+      const appStatus = event.placement_drive_id
+        ? appStatusMap.get(event.placement_drive_id)
+        : undefined;
+
       // Only remind if candidate has not applied yet
       if (appStatus && appStatus !== 'not_applied') continue;
 
@@ -408,12 +455,18 @@ export async function checkAndNotifyRegistrationDeadlines(userId: string) {
       if (remainingMs <= 0) continue;
 
       const remainingMins = remainingMs / (60 * 1000);
-      const company = Array.isArray(event.companies) ? event.companies[0] : event.companies;
+      const pd = Array.isArray(event.placement_drives) ? event.placement_drives[0] : event.placement_drives;
+      const company = Array.isArray(pd?.companies) ? pd.companies[0] : pd?.companies;
       const companyName = company?.name || 'Placement Drive';
 
       for (const leadMinutes of sortedLeadTimes) {
         if (remainingMins <= leadMinutes) {
-          const dedupeKey = `deadline:${userId}:${event.id}:${leadMinutes}`;
+           const dedupeKey = buildDeadlineNotificationDedupeKey({
+             userId,
+             placementDriveId: event.placement_drive_id,
+             deadline: event.start_time,
+             leadMinutes,
+           });
           const approxTimeStr =
             remainingMins < 60
               ? `${Math.max(1, Math.round(remainingMins))} min`
@@ -422,6 +475,7 @@ export async function checkAndNotifyRegistrationDeadlines(userId: string) {
               : `~${Math.round(remainingMins / 60)} hours`;
 
           const dateStr = new Date(event.start_time).toLocaleDateString('en-IN', {
+            timeZone: 'Asia/Kolkata',
             month: 'short',
             day: 'numeric',
             hour: '2-digit',
@@ -434,9 +488,11 @@ export async function checkAndNotifyRegistrationDeadlines(userId: string) {
             type: 'deadline_approaching',
             title: `⏰ ${companyName} — Registration Deadline Approaching`,
             body: `Registration closes ${dateStr} (in ${approxTimeStr}). Apply on NeoPAT before the deadline.`,
-            companyId: event.company_id,
+            placementDriveId: event.placement_drive_id,
             eventId: event.id,
-            link: `/companies/${event.company_id}`,
+            link: event.placement_drive_id
+              ? `/companies/${event.placement_drive_id}?driveId=${event.placement_drive_id}`
+              : `/companies/${event.placement_drive_id}`,
             dedupeKey,
           });
 
@@ -493,7 +549,7 @@ export async function checkAndNotifyLiveEvents(userId: string) {
 
     const { data: liveEvents } = await supabase
       .from('events')
-      .select('id, company_id, event_type, title, start_time, venue, companies(name)')
+      .select('id, placement_drive_id, event_type, title, start_time, venue, placement_drives(company_id, companies(name))')
       .eq('user_id', userId)
       .gte('start_time', windowStart)
       .lte('start_time', windowEnd);
@@ -501,17 +557,17 @@ export async function checkAndNotifyLiveEvents(userId: string) {
     if (!liveEvents || liveEvents.length === 0) return;
 
     // Fetch application statuses for these companies to check candidate participation
-    const companyIds = [...new Set(liveEvents.map((e) => e.company_id))];
+    const placementDriveIds = [...new Set(liveEvents.map((e) => e.placement_drive_id).filter(Boolean))];
     const { data: apps } = await supabase
       .from('applications')
-      .select('company_id, status')
+      .select('placement_drive_id, status')
       .eq('user_id', userId)
-      .in('company_id', companyIds);
+      .in('placement_drive_id', placementDriveIds);
 
-    const appStatusMap = new Map((apps || []).map((a) => [a.company_id, (a.status || '').toLowerCase()]));
+    const appStatusMap = new Map((apps || []).map((a) => [a.placement_drive_id, (a.status || '').toLowerCase()]));
 
     for (const ev of liveEvents) {
-      const appStatus = appStatusMap.get(ev.company_id) || 'not_applied';
+      const appStatus = (ev.placement_drive_id ? appStatusMap.get(ev.placement_drive_id) : undefined) || 'not_applied';
 
       // Suppress live notifications if the user was eliminated, opted out, or not applied
       const isEliminatedOrOptedOut = [
@@ -541,8 +597,12 @@ export async function checkAndNotifyLiveEvents(userId: string) {
         continue;
       }
 
-      const compName = (ev as any).companies?.name || 'Company';
-      const dedupeKey = `live_event:${userId}:${ev.id}`;
+      const pd = Array.isArray(ev.placement_drives) ? ev.placement_drives[0] : ev.placement_drives;
+      const company = Array.isArray(pd?.companies) ? pd.companies[0] : pd?.companies;
+      const compName = company?.name || 'Company';
+      const targetIdentity = ev.placement_drive_id ? `drive:${ev.placement_drive_id}` : `event:${ev.id}`;
+      const timeSlot = ev.start_time ? new Date(ev.start_time).toISOString().slice(0, 13) : 'now';
+      const dedupeKey = `live_event:${userId}:${targetIdentity}:${evType}:${timeSlot}`;
       let title = `🔴 ${compName} — Placement Round Starting Now`;
       let body = `Your event for ${compName} has commenced. Best of luck!`;
 
@@ -562,9 +622,11 @@ export async function checkAndNotifyLiveEvents(userId: string) {
         type: 'test_scheduled',
         title,
         body,
-        companyId: ev.company_id,
+        placementDriveId: ev.placement_drive_id,
         eventId: ev.id,
-        link: `/companies/${ev.company_id}`,
+        link: ev.placement_drive_id
+          ? `/companies/${ev.placement_drive_id}?driveId=${ev.placement_drive_id}`
+          : `/companies/${ev.placement_drive_id}`,
         dedupeKey,
       });
     }
@@ -601,4 +663,3 @@ export async function broadcastSystemNotification(params: {
   }
   return sent;
 }
-

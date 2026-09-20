@@ -12,11 +12,27 @@ export async function generateMetadata({
 }): Promise<Metadata> {
   const { id } = await params;
   const supabase = createAdminClient();
-  const { data: company } = await supabase
+  let { data: company } = await supabase
     .from('companies')
     .select('name')
     .eq('id', id)
-    .single();
+    .maybeSingle();
+
+  if (!company) {
+    const { data: drive } = await supabase
+      .from('placement_drives')
+      .select('company_id')
+      .eq('id', id)
+      .maybeSingle();
+    if (drive) {
+      const { data: c } = await supabase
+        .from('companies')
+        .select('name')
+        .eq('id', drive.company_id)
+        .maybeSingle();
+      company = c;
+    }
+  }
 
   const name = company?.name || 'Company Details';
   return {
@@ -28,56 +44,151 @@ export async function generateMetadata({
   };
 }
 
-export default async function CompanyDetailPage({
-  params,
-}: {
+export default async function CompanyDetailPage(props: {
   params: Promise<{ id: string }>;
+  searchParams?: Promise<{ [key: string]: string | string[] | undefined }>;
 }) {
   const session = await requireSession();
-  const { id: companyId } = await params;
+  const params = await props.params;
+  const searchParams = props.searchParams ? await props.searchParams : {};
+  const companyId = params.id;
+  const appId = searchParams.appId as string | undefined;
+  const urlDriveId = searchParams.driveId as string | undefined;
   const supabase = createAdminClient();
 
-  // Fetch company, application, events, emails, candidate matches, user info, accounts, and attachments
+  // 1. Fetch company early (or resolve via placement_drive if id is driveId)
+  let { data: company } = await supabase
+    .from('companies')
+    .select('id, name, aliases')
+    .eq('id', companyId)
+    .eq('user_id', session.userId)
+    .maybeSingle();
+
+  let resolvedDriveId = urlDriveId || null;
+
+  if (!company) {
+    // Try resolving if params.id was a placement_drive_id
+    const { data: drive } = await supabase
+      .from('placement_drives')
+      .select('id, company_id')
+      .eq('id', companyId)
+      .eq('user_id', session.userId)
+      .maybeSingle();
+    if (drive) {
+      resolvedDriveId = drive.id;
+      const { data: comp } = await supabase
+        .from('companies')
+        .select('id, name, aliases')
+        .eq('id', drive.company_id)
+        .eq('user_id', session.userId)
+        .maybeSingle();
+      company = comp;
+    }
+  }
+
+  if (!company) {
+    notFound();
+  }
+
+  // 2. Resolve all drives for this company
+  const { data: companyDrives } = await supabase
+    .from('placement_drives')
+    .select('id, drive_number, drive_name, role, category, ctc, stipend, location, registration_deadline, eligibility, branches, cgpa_requirement, backlog_requirement, created_at')
+    .eq('company_id', company.id)
+    .eq('user_id', session.userId);
+
+  const driveIds = (companyDrives || []).map((d) => d.id);
+
+  // 3. Resolve target drive
+  let targetDrive = null;
+  if (resolvedDriveId) {
+    targetDrive = (companyDrives || []).find((d) => d.id === resolvedDriveId) || null;
+  }
+  if (!targetDrive && companyDrives && companyDrives.length > 0) {
+    targetDrive = companyDrives[0];
+  }
+  const placementDriveId = targetDrive?.id || null;
+
+  // 4. Resolve application
+  let application = null;
+  if (appId) {
+    const { data: app } = await supabase
+      .from('applications')
+      .select('*')
+      .eq('id', appId)
+      .eq('user_id', session.userId)
+      .maybeSingle();
+    application = app;
+  } else if (placementDriveId) {
+    const { data: app } = await supabase
+      .from('applications')
+      .select('*')
+      .eq('placement_drive_id', placementDriveId)
+      .eq('user_id', session.userId)
+      .maybeSingle();
+    application = app;
+  }
+
+  // 5. Query events and emails using placement_drive_id, email_drive_links, and company name matching
+  const targetDriveIds = placementDriveId ? [placementDriveId] : driveIds;
+  const driveFilterIds = targetDriveIds.length > 0 ? targetDriveIds : ['00000000-0000-0000-0000-000000000000'];
+
+  const companyAliases = Array.from(new Set([
+    company.name,
+    ...(company.aliases || []),
+    ...(targetDrive?.drive_number ? [targetDrive.drive_number] : []),
+  ])).filter((a) => a && a.length >= 3);
+
+  // Substantive aliases only for SQL query (>= 4 chars, excluding generic words)
+  const substantiveAliases = companyAliases.filter((a) => {
+    const clean = a.trim().toLowerCase();
+    return clean.length >= 4 && !['group', 'india', 'campus', 'work', 'part', 'data', 'asia', 'tech', 'life', 'pls'].includes(clean);
+  });
+
   const [
-    { data: company },
-    { data: application },
     { data: events },
-    { data: emails },
+    { data: assignedEmails },
+    unassignedEmailsResult,
+    { data: linkedEmailsData },
     { data: candidateMatches },
     { data: userProfile },
     { data: gmailAccounts },
   ] = await Promise.all([
     supabase
-      .from('companies')
-      .select('id, name, aliases, drive_number, drive_name')
-      .eq('id', companyId)
-      .eq('user_id', session.userId)
-      .single(),
-
-    supabase
-      .from('applications')
-      .select('*')
-      .eq('company_id', companyId)
-      .eq('user_id', session.userId)
-      .single(),
-
-    supabase
       .from('events')
-      .select('id, event_type, title, start_time, venue, mode')
-      .eq('company_id', companyId)
+      .select('id, event_type, title, start_time, end_time, venue, mode, placement_drive_id')
+      .in('placement_drive_id', driveFilterIds)
       .eq('user_id', session.userId)
       .order('start_time', { ascending: false }),
 
     supabase
       .from('emails')
-      .select('id, subject, sender, received_at, body_snippet, classification, thread_id, gmail_message_id, gmail_account_id')
-      .eq('company_id', companyId)
+      .select('id, subject, sender, received_at, body_snippet, classification, thread_id, gmail_message_id, gmail_account_id, placement_drive_id')
+      .in('placement_drive_id', driveFilterIds)
       .eq('user_id', session.userId)
       .order('received_at', { ascending: false }),
+
+    substantiveAliases.length > 0
+      ? supabase
+          .from('emails')
+          .select('id, subject, sender, received_at, body_snippet, classification, thread_id, gmail_message_id, gmail_account_id, placement_drive_id')
+          .eq('user_id', session.userId)
+          .is('placement_drive_id', null)
+          .or(substantiveAliases.map((a) => `subject.ilike.%${a.replace(/,/g, '')}%`).join(','))
+          .order('received_at', { ascending: false })
+          .limit(50)
+      : Promise.resolve({ data: [] }),
+
+    supabase
+      .from('email_drive_links')
+      .select('email_id')
+      .in('placement_drive_id', driveFilterIds)
+      .eq('user_id', session.userId),
 
     supabase
       .from('candidate_matches')
       .select('id, match_type, matched_value, match_location, created_at, email_id, neo_id')
+      .in('placement_drive_id', driveFilterIds)
       .eq('user_id', session.userId)
       .neq('match_type', 'xlsx_applied_list'),
 
@@ -93,9 +204,66 @@ export default async function CompanyDetailPage({
       .eq('user_id', session.userId),
   ]);
 
-  if (!company) {
-    notFound();
+  // Determine the verified start date of this drive from its official records
+  const verifiedTimes = (assignedEmails || [])
+    .map((em: any) => new Date(em.received_at || 0).getTime())
+    .filter((t: number) => t > 0);
+  if (application?.applied_at) verifiedTimes.push(new Date(application.applied_at).getTime());
+  if (targetDrive?.created_at) verifiedTimes.push(new Date(targetDrive.created_at).getTime());
+
+  const driveStartTime = verifiedTimes.length > 0 ? Math.min(...verifiedTimes) : null;
+  const driveMinAllowedTime = driveStartTime ? driveStartTime - 24 * 60 * 60 * 1000 : 0;
+
+  // Combine verified assigned emails
+  const allEmailsMap = new Map<string, any>();
+  for (const em of (assignedEmails || [])) {
+    allEmailsMap.set(em.id, em);
   }
+
+  // Add verified linked emails
+  const missingLinkedIds = (linkedEmailsData || [])
+    .map((l: any) => l.email_id)
+    .filter((id: string) => !allEmailsMap.has(id));
+  if (missingLinkedIds.length > 0) {
+    const { data: extraEmails } = await supabase
+      .from('emails')
+      .select('id, subject, sender, received_at, body_snippet, classification, thread_id, gmail_message_id, gmail_account_id, placement_drive_id')
+      .in('id', missingLinkedIds);
+    for (const em of (extraEmails || [])) {
+      allEmailsMap.set(em.id, em);
+    }
+  }
+
+  // Add unassigned fallback emails ONLY if they arrived on or after drive start date
+  // AND match the company name with strict word boundaries
+  for (const em of (unassignedEmailsResult?.data || [])) {
+    const emTime = em.received_at ? new Date(em.received_at).getTime() : 0;
+    // RULE: Never check or include emails that arrived before this drive came!
+    if (driveMinAllowedTime > 0 && emTime < driveMinAllowedTime) {
+      continue;
+    }
+    const sub = em.subject || '';
+    const isRealMatch = substantiveAliases.some((alias) => {
+      const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      return new RegExp(`\\b${escaped}\\b`, 'i').test(sub);
+    });
+    if (isRealMatch) {
+      allEmailsMap.set(em.id, em);
+    }
+  }
+
+  // Final safety filter: enforce that no email before drive arrival is ever shown for this drive
+  const emails = Array.from(allEmailsMap.values())
+    .filter((e: any) => {
+      if (!driveMinAllowedTime) return true;
+      const t = e.received_at ? new Date(e.received_at).getTime() : 0;
+      return t >= driveMinAllowedTime;
+    })
+    .sort((a, b) => {
+      const tA = a.received_at ? new Date(a.received_at).getTime() : 0;
+      const tB = b.received_at ? new Date(b.received_at).getTime() : 0;
+      return tB - tA;
+    });
 
   // Map account id to email address
   const accountMap = new Map<string, string>();
@@ -111,11 +279,12 @@ export default async function CompanyDetailPage({
 
   const detail: CompanyDetail = {
     id: company.id,
+    placementDriveId,
     name: company.name,
     legalName: null,
     aliases: company.aliases,
-    driveNumber: company.drive_number || null,
-    driveName: company.drive_name || null,
+    driveNumber: targetDrive?.drive_number || null,
+    driveName: targetDrive?.drive_name || null,
     candidateName: userProfile?.name || session.name || 'Student Candidate',
     candidateRegId: userProfile?.neo_id || '',
     application: application
@@ -124,12 +293,15 @@ export default async function CompanyDetailPage({
           status: application.status,
           statusSource: application.status_source,
           statusConfidence: application.status_confidence,
-          role: application.role,
+          role: application.role || targetDrive?.role || null,
           category: application.category,
-          ctc: application.ctc,
-          stipend: application.stipend,
-          location: application.location,
-          eligibility: application.eligibility,
+          ctc: application.ctc || targetDrive?.ctc || null,
+          stipend: application.stipend || targetDrive?.stipend || null,
+          location: application.location || targetDrive?.location || null,
+          eligibility: application.eligibility || targetDrive?.eligibility || null,
+          branches: application.branches || targetDrive?.branches || null,
+          cgpaRequirement: application.cgpa_requirement || targetDrive?.cgpa_requirement || null,
+          backlogRequirement: application.backlog_requirement || targetDrive?.backlog_requirement || null,
           manualOverride: application.manual_override,
           notes: application.notes,
           appliedAt: application.applied_at,

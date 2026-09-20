@@ -98,8 +98,24 @@ export async function processEmailForEventsAndStatus(
   emailDbId: string,
   userNeoId: string | null,
   userEmail: string,
-  gmail?: import('googleapis').gmail_v1.Gmail
+  placementDriveId?: string | null,
+  gmail?: import('googleapis').gmail_v1.Gmail,
+  mode?: string
 ) {
+  let targetDriveId = placementDriveId || null;
+  if (!targetDriveId) {
+    const { data: drive } = await supabase
+      .from('placement_drives')
+      .select('id')
+      .eq('user_id', userId)
+      .eq('company_id', companyId)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    targetDriveId = drive?.id || null;
+  }
+  if (!targetDriveId) return;
+
   const subjLower = email.subject.toLowerCase();
   const htmlText = htmlToPlainText(email.bodyHtml);
   const fullText = `${email.subject}\n${email.bodyPlain || ''}\n${htmlText}\n${email.bodySnippet || ''}`;
@@ -115,9 +131,9 @@ export async function processEmailForEventsAndStatus(
   // 0. Early check of existing application status from DB
   const { data: existingApp } = await supabase
     .from('applications')
-    .select('status, manual_override, applied_at, location, ctc, role, stipend, notes, status_source_email_at, last_updated')
+    .select('status, manual_override, applied_at, location, ctc, role, stipend, notes, status_source_email_at, last_updated, eligibility, branches, cgpa_requirement, backlog_requirement')
     .eq('user_id', userId)
-    .eq('company_id', companyId)
+    .eq('placement_drive_id', targetDriveId)
     .maybeSingle();
 
   const currentStatus = existingApp?.status || 'not_applied';
@@ -319,12 +335,12 @@ export async function processEmailForEventsAndStatus(
 
 
   if (isWithdrawn) {
-    // Delete any previously inserted events for this company if user has withdrawn
+    // Delete any previously inserted events for this drive if user has withdrawn
     const { data: toDelete } = await supabase
       .from('events')
       .select('id, gcal_event_id')
       .eq('user_id', userId)
-      .eq('company_id', companyId);
+      .eq('placement_drive_id', targetDriveId);
 
     if (toDelete && toDelete.length > 0) {
       const { deleteEventFromGoogleCalendar } = await import('@/lib/calendar/google-sync');
@@ -335,7 +351,7 @@ export async function processEmailForEventsAndStatus(
       }
     }
 
-    await supabase.from('events').delete().eq('user_id', userId).eq('company_id', companyId);
+    await supabase.from('events').delete().eq('user_id', userId).eq('placement_drive_id', targetDriveId);
   } else {
     for (const event of extractedEvents) {
       // RULE: For tests, interviews, and PPTs: ONLY add to user's schedule if candidate is shortlisted or actively participating!
@@ -384,7 +400,7 @@ export async function processEmailForEventsAndStatus(
         .from('events')
         .select('id, start_time, venue, mode')
         .eq('user_id', userId)
-        .eq('company_id', companyId)
+        .eq('placement_drive_id', targetDriveId)
         .eq('event_type', event.eventType);
 
       if (startOfDay && endOfDay) {
@@ -422,7 +438,7 @@ export async function processEmailForEventsAndStatus(
           .from('events')
           .insert({
             user_id: userId,
-            company_id: companyId,
+            placement_drive_id: targetDriveId,
             source_email_id: emailDbId,
             event_type: event.eventType,
             title: finalTitle,
@@ -444,10 +460,10 @@ export async function processEmailForEventsAndStatus(
           const compName = comp?.name || 'Drive';
           await notifyEventScheduled({
             userId,
-            companyId,
+            placementDriveId: targetDriveId,
             companyName: compName,
             eventType: event.eventType,
-            startTime: event.startTime,
+            startTime: event.startTime || null,
             venue: event.venue,
             eventId: insertedEvt.id,
             candidateConfirmed: isNeoMatched,
@@ -646,9 +662,9 @@ export async function processEmailForEventsAndStatus(
         // Check if user had an actual confirmed shortlist match in the database
         const { data: compMatches } = await supabase
           .from('candidate_matches')
-          .select('id, email_id, emails!inner(received_at, company_id)')
+          .select('id, email_id, emails!inner(received_at, placement_drive_id)')
           .eq('user_id', userId)
-          .eq('emails.company_id', companyId);
+          .eq('placement_drive_id', targetDriveId);
 
         const hasConfirmedMatch = compMatches && compMatches.length > 0;
 
@@ -657,7 +673,7 @@ export async function processEmailForEventsAndStatus(
           .from('events')
           .select('start_time, event_type')
           .eq('user_id', userId)
-          .eq('company_id', companyId)
+          .eq('placement_drive_id', targetDriveId)
           .in('event_type', ['online_test', 'coding_test']);
 
         const hasFutureTestEvent = upcomingEvents?.some((ev) => {
@@ -780,7 +796,7 @@ export async function processEmailForEventsAndStatus(
   // Build application update payload
   const appUpdate: Record<string, unknown> = {
     user_id: userId,
-    company_id: companyId,
+    placement_drive_id: targetDriveId,
     // If manual_override was cleared by a neoMatch, refresh last_updated
     last_updated: (existingApp?.manual_override && !isNeoMatched && existingApp?.last_updated) ? existingApp.last_updated : new Date().toISOString(),
   };
@@ -795,7 +811,7 @@ export async function processEmailForEventsAndStatus(
   const { extractTravelRequirement } = await import('@/lib/sync/events');
   const travelReq = extractTravelRequirement(fullText);
   let resolvedLocation = jobDetails.location || existingApp?.location || null;
-  if (resolvedLocation && /^(?:vit\s+)?(?:vellore|chennai|bhopal)(?:\s+campus)?$/i.test(resolvedLocation.trim())) {
+  if (resolvedLocation && /^(?:vit\s+(?:vellore|chennai|bhopal|ap)(?:\s+campus)?|(?:vellore|chennai|bhopal|ap)\s+campus)$/i.test(resolvedLocation.trim())) {
     resolvedLocation = null;
   }
 
@@ -804,6 +820,10 @@ export async function processEmailForEventsAndStatus(
   if (jobDetails.ctc && (!existingApp?.ctc || !isOlderThanCurrentStatus)) appUpdate.ctc = jobDetails.ctc;
   if (jobDetails.stipend && (!existingApp?.stipend || !isOlderThanCurrentStatus)) appUpdate.stipend = jobDetails.stipend;
   if (resolvedLocation && (!existingApp?.location || !isOlderThanCurrentStatus)) appUpdate.location = resolvedLocation;
+  if (jobDetails.eligibility && (!existingApp?.eligibility || !isOlderThanCurrentStatus)) appUpdate.eligibility = jobDetails.eligibility;
+  if (jobDetails.branches && jobDetails.branches.length > 0 && (!existingApp?.branches || !isOlderThanCurrentStatus)) appUpdate.branches = jobDetails.branches;
+  if (jobDetails.cgpaRequirement && (!existingApp?.cgpa_requirement || !isOlderThanCurrentStatus)) appUpdate.cgpa_requirement = jobDetails.cgpaRequirement;
+  if (jobDetails.backlogRequirement && (!existingApp?.backlog_requirement || !isOlderThanCurrentStatus)) appUpdate.backlog_requirement = jobDetails.backlogRequirement;
 
   if (existingApp?.manual_override) {
     // If the user manually set a note (e.g. "Eliminated in Test Round" or "Interviewed · Not Selected"),
@@ -815,14 +835,19 @@ export async function processEmailForEventsAndStatus(
     // Accumulate notes: travel requirement + AI review flags occupy the same column.
     // Build them separately and join so neither overwrites the other.
     const noteParts: string[] = [];
+    const prevTravel = existingApp?.notes?.split('\n')[0]?.trim();
+    const isEstablishedPhysical = ['vellore', 'chennai', 'ap', 'bhopal', 'bhopal_lab'].includes(prevTravel || '');
+
     if (travelReq) {
-      noteParts.push(travelReq);
-    } else if (existingApp?.notes) {
-      // Preserve previously extracted travel mode so later circulars (e.g. test links) don't overwrite it
-      const prevTravel = existingApp.notes.split('\n')[0]?.trim();
-      if (['vellore', 'chennai', 'ap', 'bhopal', 'bhopal_lab', 'online'].includes(prevTravel)) {
-        noteParts.push(prevTravel);
+      // If the existing drive mode is an established physical campus/lab requirement,
+      // a subsequent virtual event (like a virtual PPT or online test) shouldn't downgrade it to 'online'
+      if (travelReq === 'online' && isEstablishedPhysical) {
+        noteParts.push(prevTravel!);
+      } else {
+        noteParts.push(travelReq);
       }
+    } else if (prevTravel && ['vellore', 'chennai', 'ap', 'bhopal', 'bhopal_lab', 'online'].includes(prevTravel)) {
+      noteParts.push(prevTravel);
     }
     if (isAiFlaggedForReview && aiReviewNotes) noteParts.push(aiReviewNotes);
     if (noteParts.length > 0) appUpdate.notes = noteParts.join('\n');
@@ -843,7 +868,7 @@ export async function processEmailForEventsAndStatus(
         .from('events')
         .select('id, gcal_event_id')
         .eq('user_id', userId)
-        .eq('company_id', companyId)
+        .eq('placement_drive_id', targetDriveId)
         .neq('event_type', 'ppt');
 
       if (toDelete && toDelete.length > 0) {
@@ -859,14 +884,14 @@ export async function processEmailForEventsAndStatus(
         .from('events')
         .delete()
         .eq('user_id', userId)
-        .eq('company_id', companyId)
+        .eq('placement_drive_id', targetDriveId)
         .neq('event_type', 'ppt');
     } else if (['withdrawn', 'declined', 'rejected'].includes(newStatus)) {
       const { data: toDelete } = await supabase
         .from('events')
         .select('id, gcal_event_id')
         .eq('user_id', userId)
-        .eq('company_id', companyId);
+        .eq('placement_drive_id', targetDriveId);
 
       if (toDelete && toDelete.length > 0) {
         const { deleteEventFromGoogleCalendar } = await import('@/lib/calendar/google-sync');
@@ -877,7 +902,7 @@ export async function processEmailForEventsAndStatus(
         }
       }
 
-      await supabase.from('events').delete().eq('user_id', userId).eq('company_id', companyId);
+      await supabase.from('events').delete().eq('user_id', userId).eq('placement_drive_id', targetDriveId);
     }
 
     // Only notify if canonical status actually changed!
@@ -889,7 +914,7 @@ export async function processEmailForEventsAndStatus(
       if (isNeoMatched && (matchType === 'excel_attachment' || newStatus === 'shortlisted')) {
         await notifyShortlistMatch({
           userId,
-          companyId,
+          placementDriveId: targetDriveId,
           companyName,
           neoId: userNeoId || userEmail,
           emailSubject: email.subject,
@@ -899,7 +924,7 @@ export async function processEmailForEventsAndStatus(
 
       await notifyStatusChange({
         userId,
-        companyId,
+        placementDriveId: targetDriveId,
         companyName,
         oldStatus: existingApp?.status || null,
         newStatus,
@@ -929,7 +954,7 @@ export async function processEmailForEventsAndStatus(
     const driveMode = getDriveMode(appUpdate.notes as string);
     await notifyNewDrive({
       userId,
-      companyId,
+      placementDriveId: targetDriveId,
       companyName: compRecord?.name || 'New Placement Drive',
       role: (appUpdate.role as string) || jobDetails.role || null,
       ctc: (appUpdate.ctc as string) || jobDetails.ctc || null,
@@ -941,8 +966,17 @@ export async function processEmailForEventsAndStatus(
     });
   }
 
-  // Upsert application
-  await supabase
+  // Safely persist application
+  const { data: existingAppRow } = await supabase
     .from('applications')
-    .upsert(appUpdate, { onConflict: 'user_id,company_id' });
+    .select('id')
+    .eq('user_id', userId)
+    .eq('placement_drive_id', targetDriveId)
+    .maybeSingle();
+
+  if (existingAppRow?.id) {
+    await supabase.from('applications').update(appUpdate).eq('id', existingAppRow.id);
+  } else {
+    await supabase.from('applications').insert(appUpdate);
+  }
 }

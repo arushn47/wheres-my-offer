@@ -22,6 +22,7 @@ import { DriveModeBadge } from '@/components/ui/drive-mode-badge';
 import { InstallPwaBanner } from '@/components/notifications/install-pwa-banner';
 import { formatStipend, cn, getDriveMode } from '@/lib/utils';
 import { cleanLocationString } from '@/lib/sync/locations';
+import { cleanRoleTitle, cleanEventTitle } from '@/lib/sync/events';
 import { isInactiveStatus } from '@/lib/stages';
 import type { DashboardStats } from '@/types';
 
@@ -46,7 +47,7 @@ interface DashboardClientProps {
   stats: DashboardStats;
   upcomingEvents: Array<{
     id: string;
-    company_id: string;
+    placement_drive_id: string;
     companyName?: string;
     event_type: string;
     title: string | null;
@@ -126,82 +127,156 @@ export default function DashboardClient({
   campus,
   branch,
 }: DashboardClientProps) {
-  // Top 4 active drives prioritizing the most actionable & high-stakes stages
+  // Top 4 active drives: Scheduled rounds first, then Completed rounds, then Applied drives
   const spotlightDrives = useMemo(() => {
     const active = activeApplications.filter(
       (a) => !isInactiveStatus(a.status)
     );
 
-    const getStageScore = (status: string) => {
-      const s = (status || '').toLowerCase();
-      // 1. Live rounds happening right now
-      if (s.includes('interview_ongoing')) return 100;
-      if (s.includes('test_ongoing')) return 95;
-      if (s.includes('ppt_ongoing')) return 90;
+    const now = Date.now();
 
-      // 2. Upcoming scheduled tests or interviews
-      if (['interview_scheduled', 'interview'].includes(s)) return 80;
-      if (['test_scheduled', 'test'].includes(s)) return 75;
-      if (['shortlisted'].includes(s)) return 70;
+    // Check if an item has a confirmed upcoming round or deadline
+    const getNextEventTime = (item: ActiveApplicationItem): number | null => {
+      const ev = upcomingEvents.find(
+        (e) =>
+          (e.placement_drive_id === item.id || e.placement_drive_id === item.companyId) &&
+          e.start_time &&
+          new Date(e.start_time).getTime() > now
+      );
+      return ev?.start_time ? new Date(ev.start_time).getTime() : null;
+    };
 
-      // 3. Rounds just completed, awaiting results
-      if (['interview_completed'].includes(s)) return 60;
-      if (['test_completed'].includes(s)) return 55;
-      if (['ppt_scheduled', 'ppt', 'ppt_completed'].includes(s)) return 50;
+    const getStageTierAndScore = (item: ActiveApplicationItem) => {
+      const s = (item.status || '').toLowerCase();
 
-      // 4. Offers
-      if (['selected', 'offer', 'offer_received'].includes(s)) return 40;
+      // Offers / Selected - top celebration
+      if (['selected', 'offer', 'offer_received'].includes(s)) {
+        return { tier: 4, subScore: 100 };
+      }
 
-      // 5. Normal applied drives
-      return 10;
+      // TIER 3: SCHEDULED & ONGOING ROUNDS (Requires candidate participation)
+      const hasUpcomingEvt = getNextEventTime(item) !== null;
+      const isLive = s.includes('ongoing');
+      const isScheduled =
+        s.includes('scheduled') ||
+        ['interview', 'test', 'ppt'].includes(s) ||
+        hasUpcomingEvt;
+
+      if (isLive || isScheduled) {
+        let subScore = 50;
+        if (s.includes('interview')) subScore = 90;
+        else if (s.includes('test')) subScore = 80;
+        else if (s.includes('ppt')) subScore = 70;
+        else subScore = 60;
+        return { tier: 3, subScore };
+      }
+
+      // TIER 2: COMPLETED ROUNDS (Test completed, PPT completed, awaiting results)
+      const isCompleted = s.includes('completed');
+      if (isCompleted) {
+        let subScore = 50;
+        if (s.includes('interview_completed')) subScore = 90;
+        else if (s.includes('test_completed')) subScore = 80;
+        else if (s.includes('ppt_completed')) subScore = 70;
+        return { tier: 2, subScore };
+      }
+
+      // TIER 1: APPLIED / SHORTLISTED (Awaiting initial test shortlist or schedule)
+      let subScore = 10;
+      if (s === 'shortlisted') subScore = 30;
+      else if (s === 'registration_open') return { tier: 1, subScore: 20 };
+      return { tier: 1, subScore };
     };
 
     return [...active]
       .sort((a, b) => {
-        const scoreA = getStageScore(a.status);
-        const scoreB = getStageScore(b.status);
-        if (scoreA !== scoreB) return scoreB - scoreA;
+        const aRank = getStageTierAndScore(a);
+        const bRank = getStageTierAndScore(b);
+
+        // 1. Primary sort: Tier (Scheduled [3] > Completed [2] > Applied [1])
+        if (bRank.tier !== aRank.tier) {
+          return bRank.tier - aRank.tier;
+        }
+
+        // 2. If both are Scheduled: soonest upcoming event time first
+        if (aRank.tier === 3 && bRank.tier === 3) {
+          const nextA = getNextEventTime(a);
+          const nextB = getNextEventTime(b);
+          if (nextA !== null && nextB !== null && nextA !== nextB) {
+            return nextA - nextB;
+          }
+          if (nextA !== null) return -1;
+          if (nextB !== null) return 1;
+        }
+
+        // 3. Subscore within the tier (e.g. Interview > Test > PPT)
+        if (bRank.subScore !== aRank.subScore) {
+          return bRank.subScore - aRank.subScore;
+        }
+
+        // 4. Secondary sort: recency of update
         return new Date(b.lastUpdated || 0).getTime() - new Date(a.lastUpdated || 0).getTime();
       })
       .slice(0, 4);
-  }, [activeApplications]);
+  }, [activeApplications, upcomingEvents]);
 
   const appliedCount = stats.total_applied ?? stats.applied;
+  const totalShortlisted = stats.total_shortlisted ?? stats.shortlisted;
+  const activeShortlisted = stats.active_shortlisted ?? 0;
+  const completedShortlisted = Math.max(0, totalShortlisted - activeShortlisted);
+
+  const shortlistSub =
+    totalShortlisted === 0
+      ? 'radar tracking'
+      : activeShortlisted > 0
+        ? `${activeShortlisted} active · ${completedShortlisted} completed`
+        : 'cleared for tests / interviews';
+
   const funnelCards = [
     {
       id: 'total',
       label: 'Applied Drives',
       value: appliedCount,
-      sub: `out of ${stats.total_companies} campus circulars`,
+      sub: `out of ${stats.total_companies} placement drives`,
+      title: `${appliedCount} applied drives out of ${stats.total_companies} total eligible drives`,
       accent: 'indigo' as const,
+      href: '/companies?filter=all',
     },
     {
       id: 'active',
       label: 'Active Pipeline',
       value: stats.active_applications,
       sub: 'currently in contention',
+      title: `${stats.active_applications} applications currently active in contention`,
       accent: 'sky' as const,
+      href: '/companies?filter=active',
     },
     {
       id: 'tests',
       label: 'Upcoming Rounds',
       value: stats.upcoming_tests + stats.upcoming_interviews,
-      sub: upcomingEvents.length > 0 ? `next ${formatEventTime(upcomingEvents[0].start_time)}` : 'all caught up',
+      sub: upcomingEvents.find(e => e.event_type !== 'registration_deadline') ? `next ${formatEventTime(upcomingEvents.find(e => e.event_type !== 'registration_deadline')!.start_time)}` : 'all caught up',
+      title: `${stats.upcoming_tests + stats.upcoming_interviews} upcoming scheduled test and interview rounds`,
       accent: 'amber' as const,
+      href: '/companies?filter=scheduled',
     },
     {
       id: 'shortlists',
       label: 'Shortlists Cracked',
-      value: stats.shortlisted,
-      sub: 'cleared for tests / interviews',
+      value: totalShortlisted,
+      sub: shortlistSub,
+      title: `${totalShortlisted} total shortlists cracked across all placement drives (${activeShortlisted} active in round, ${completedShortlisted} completed)`,
       accent: 'violet' as const,
+      href: '/companies?filter=shortlisted',
     },
     {
       id: 'offers',
       label: 'Offers Received',
       value: stats.selected,
       sub: stats.selected > 0 ? 'congratulations 🎉' : 'radar tracking',
+      title: `${stats.selected} placement offers secured`,
       accent: 'emerald' as const,
+      href: '/companies?filter=all',
     },
   ];
 
@@ -267,14 +342,16 @@ export default function DashboardClient({
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.5, delay: i * 0.06 }}
             className={cn(
-              "rounded-xl border p-3 sm:p-4 min-w-0",
+              "group rounded-xl border min-w-0 transition-all duration-200 hover:border-zinc-700/80 hover:bg-zinc-900/60 hover:shadow-lg hover:shadow-black/20",
               ACCENTS[f.accent],
               i === 4 && "col-span-2 sm:col-span-1"
             )}
           >
-            <div className="font-tabular font-display text-2xl sm:text-3xl font-extrabold tracking-tight">{f.value}</div>
-            <div className="mt-1 text-[11px] sm:text-xs font-semibold text-zinc-300 truncate">{f.label}</div>
-            <div className="mt-0.5 font-mono text-[9px] sm:text-[10px] text-zinc-500 truncate">{f.sub}</div>
+            <Link href={f.href} className="block p-3 sm:p-4 min-w-0">
+              <div className="font-tabular font-display text-2xl sm:text-3xl font-extrabold tracking-tight group-hover:scale-[1.02] transition-transform origin-left">{f.value}</div>
+              <div className="mt-1 text-[11px] sm:text-xs font-semibold text-zinc-300 truncate group-hover:text-zinc-100 transition-colors">{f.label}</div>
+              <div className="mt-0.5 font-mono text-[9px] sm:text-[10px] text-zinc-500 truncate" title={f.title || f.sub}>{f.sub}</div>
+            </Link>
           </motion.div>
         ))}
       </div>
@@ -297,11 +374,7 @@ export default function DashboardClient({
             >
               <span className="h-1.5 w-1.5 rounded-full bg-amber-400 pulse-dot shrink-0" />
               <span className="truncate max-w-37.5 sm:max-w-none">
-                {e.companyName || 'Company'} — {
-                  (e.title || e.event_type.replace(/_/g, ' ')).toLowerCase().startsWith((e.companyName || 'Company').toLowerCase())
-                    ? (e.title || e.event_type.replace(/_/g, ' ')).substring((e.companyName || 'Company').length).replace(/^[\s\-—–:]+/, '')
-                    : (e.title || e.event_type.replace(/_/g, ' '))
-                }
+                {e.companyName || 'Company'} — {cleanEventTitle(e.title, e.companyName, e.event_type.replace(/_/g, ' '))}
               </span>
               <span className="font-tabular font-mono text-amber-300 shrink-0">{formatEventTime(e.start_time)}</span>
             </span>
@@ -369,7 +442,7 @@ export default function DashboardClient({
             {upcomingEvents.slice(0, 6).map((ev) => (
               <Link
                 key={ev.id}
-                href={`/companies/${ev.company_id}`}
+                href={`/companies/${ev.placement_drive_id}`}
                 className="group flex flex-col justify-between rounded-xl border border-zinc-800 bg-bg-surface p-4 transition-all duration-200 hover:border-zinc-600 hover:shadow-lg"
               >
                 <div>
@@ -382,9 +455,7 @@ export default function DashboardClient({
                     </span>
                   </div>
                   <h4 className="mt-2 text-xs font-semibold text-zinc-300 line-clamp-1">
-                    {(ev.title || 'Recruitment Assessment').toLowerCase().startsWith((ev.companyName || 'Company').toLowerCase())
-                      ? (ev.title || 'Recruitment Assessment').substring((ev.companyName || 'Company').length).replace(/^[\s\-—–:]+/, '')
-                      : (ev.title || 'Recruitment Assessment')}
+                    {cleanEventTitle(ev.title, ev.companyName, 'Recruitment Assessment')}
                   </h4>
                   <div className="mt-2 flex items-center gap-1.5 font-mono text-[11px] text-zinc-400">
                     <Clock className="h-3 w-3 text-amber-400" />
@@ -455,7 +526,7 @@ export default function DashboardClient({
                         <StatusChip status={c.status} className="shrink-0" />
                       </div>
                       <div className="mt-1 flex items-center gap-1.5 min-w-0 text-[11px] sm:text-xs text-zinc-400">
-                        <span className="truncate">{c.role || 'Software Engineering'}</span>
+                        <span className="truncate">{cleanRoleTitle(c.role) || 'Campus Placement Drive'}</span>
                         {category && (
                           <>
                             <span className="text-zinc-600 shrink-0">·</span>

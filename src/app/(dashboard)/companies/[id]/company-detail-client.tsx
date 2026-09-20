@@ -10,17 +10,18 @@ import {
   ChevronDown,
   AlertTriangle,
   CalendarPlus,
-  Trash2,
   CheckCircle2,
   ExternalLink,
   Plane,
   Building2,
   Globe,
+  GraduationCap,
 } from 'lucide-react';
 import { cn, timeAgo, getDriveMode } from '@/lib/utils';
 import { CategoryBadge, STATUS_META } from '@/components/ui/status-chip';
 import { StageStepper, getStageIndex, getEffectiveStage, isEliminatedStatus } from '@/components/companies/stage-stepper';
 import { cleanLocationString } from '@/lib/sync/locations';
+import { cleanRoleTitle } from '@/lib/sync/events';
 
 export interface CompanyDetail {
   id: string;
@@ -29,6 +30,7 @@ export interface CompanyDetail {
   aliases: string[] | null;
   driveNumber?: string | null;
   driveName?: string | null;
+  placementDriveId?: string | null;
   candidateName?: string | null;
   candidateRegId?: string | null;
   application: {
@@ -42,6 +44,9 @@ export interface CompanyDetail {
     stipend: string | null;
     location: string | null;
     eligibility: string | null;
+    branches?: string[] | null;
+    cgpaRequirement?: string | null;
+    backlogRequirement?: string | null;
     manualOverride: boolean;
     notes: string | null;
     appliedAt: string | null;
@@ -260,7 +265,6 @@ export default function CompanyDetailClient({
   const [isUpdating, setIsUpdating] = useState(false);
   const [showStatusMenu, setShowStatusMenu] = useState(false);
   const [openAccordion, setOpenAccordion] = useState<number | null>(0);
-  const [isDeleting, setIsDeleting] = useState(false);
 
   // Keep state in sync if server props update
   useEffect(() => {
@@ -356,18 +360,8 @@ export default function CompanyDetailClient({
   // 'Online', 'VIT Vellore', 'VIT Chennai', 'VIT AP', or home campus labs ('Vellore Labs', 'Bhopal Labs', etc.)
   const driveModeDisplay = getDriveMode(notesStr, userCampus);
 
-  // Role display
-  const displayRole = (() => {
-    const r = company.application?.role;
-    if (
-      !r ||
-      /\byou\s*(?:are|have|re)\b|dear\s|greetings|eligible|registr/i.test(r) ||
-      /^(?:super\s+dream|dream|regular)(?:\s+(?:internship|offer|placement|drive))?$/i.test(r.trim())
-    ) {
-      return company.application?.category ? 'Campus Placement Drive' : 'Software Engineering Profile';
-    }
-    return r;
-  })();
+  // Role display: only show real, meaningful roles. Fallback to Campus Placement Drive if missing/generic.
+  const displayRole = cleanRoleTitle(company.application?.role) || 'Campus Placement Drive';
 
   const category = company.application?.category || (/1[0-9]\s*lpa|[2-9][0-9]\s*lpa/i.test(company.application?.ctc || '') ? 'Super Dream' : 'Dream');
 
@@ -387,20 +381,189 @@ export default function CompanyDetailClient({
     return s;
   }, [stipend]);
 
-  // Eligibility pills
+  // Eligibility pills - extracted from circular emails, zero static fallbacks
   const eligibilityList = useMemo(() => {
-    const raw = company.application?.eligibility || company.application?.notes || '';
     const pills: string[] = [];
-    const cgpaMatch = raw.match(/cgpa\s*(?:>=|:|of|above)?\s*(\d+(?:\.\d+)?)/i);
-    if (cgpaMatch) pills.push(`CGPA >= ${cgpaMatch[1]}`);
-    else pills.push('CGPA >= 7.0');
+    const seen = new Set<string>();
 
-    if (/no\s*(?:standing)?\s*arrears|0\s*arrear/i.test(raw)) pills.push('No standing arrears');
-    if (/cse|it|ece|circuital/i.test(raw)) pills.push('CSE / IT / ECE');
-    else pills.push('All Eligible Branches');
+    const isGarbled = (str: string) =>
+      !/\d/.test(str) || /stipulated\s+duration|academic\s+program|candidates?\s+must|without\s+any|gap\s+of\s+up\s+to/i.test(str);
+
+    const addPill = (text: string | null | undefined) => {
+      if (!text) return;
+      const clean = text.trim();
+      if (!clean || seen.has(clean.toLowerCase())) return;
+      if (['bhopal', 'bhopal_lab', 'vellore', 'chennai', 'ap', 'online'].includes(clean.toLowerCase())) return;
+      if (/^(?:10th|12th|ug|pg)\b/i.test(clean) && isGarbled(clean)) return;
+      seen.add(clean.toLowerCase());
+      pills.push(clean);
+    };
+
+    const raw = company.application?.eligibility || '';
+    const branches = company.application?.branches;
+    const cgpaReq = company.application?.cgpaRequirement;
+    const backlogReq = company.application?.backlogRequirement;
+
+    const sanitizeAndAddPill = (part: string) => {
+      const p = part.trim();
+      if (!p) return;
+
+      // 1. Combined 10th & 12th
+      if (/^(?:10th\s*(?:&|and)\s*12th|x\s*(?:&|and)\s*xii)/i.test(p)) {
+        const valMatch = p.match(/(?:10th\s*(?:&|and)\s*12th|x\s*(?:&|and)\s*xii)\s*[:\-–—\s]*([^\s]+(?:\s+or\s+[^\s]+)?(?:\s*CGPA|\s*%)?)/i) ||
+                         p.match(/(?:10th\s*(?:&|and)\s*12th|x\s*(?:&|and)\s*xii)\s*[:\-–—\s]*([^\n\r|]+)/i);
+        if (valMatch) {
+          const cleanVal = valMatch[1].replace(/\s*(?:in\s+Pursuing|Pursuing|in\s+UG|for\s+PG).*$/i, '').trim();
+          if (!isGarbled(cleanVal)) addPill(`10th & 12th: ${cleanVal}`);
+          return;
+        }
+      }
+
+      // 2. Legacy merged pill (e.g. "Degree: 60% or 6.0 CGPA in UG (for PGs) – 60% or 6.0 CGPA No Standin")
+      if (/Degree:.*\(for\s+PGs?\)/i.test(p) || /in\s+Pursuing\s+Degree.*(?:for\s+PGs?|in\s+PG)/i.test(p)) {
+        const ugMatch = p.match(/(?:Degree|UG)\s*[:\-–—\s]*([^\s–—|\(]+(?:\s+or\s+[^\s–—|\(]+)?(?:\s*CGPA|\s*%)?)/i);
+        const pgMatch = p.match(/(?:for\s+PGs?\)?|in\s+PG)\s*[:\-–—\s]*([^\s]+(?:\s+or\s+[^\s]+)?(?:\s*CGPA|\s*%)?)/i);
+        if (ugMatch && !isGarbled(ugMatch[1])) addPill(`UG: ${ugMatch[1].trim()}`);
+        if (pgMatch && !isGarbled(pgMatch[1])) addPill(`PG: ${pgMatch[1].trim()}`);
+        return;
+      }
+
+      // 3. Standalone UG / Pursuing Degree
+      if (/^(?:UG|Degree|Pursuing\s+Degree)\s*:/i.test(p)) {
+        const valMatch = p.match(/^(?:UG|Degree|Pursuing\s+Degree)\s*[:\-–—\s]*([^\s]+(?:\s+or\s+[^\s]+)?(?:\s*CGPA|\s*%)?)/i) ||
+                         p.match(/^(?:UG|Degree|Pursuing\s+Degree)\s*[:\-–—\s]*([^\n\r|]+)/i);
+        if (valMatch) {
+          const cleanVal = valMatch[1].replace(/\s*(?:in\s+UG|\(for\s+PG|for\s+PG|No\s+Standing).*$/i, '').trim();
+          if (!isGarbled(cleanVal)) addPill(`UG: ${cleanVal}`);
+          return;
+        }
+      }
+
+      // 4. Standalone PG
+      if (/^PG\s*:/i.test(p)) {
+        const valMatch = p.match(/^PG\s*[:\-–—\s]*([^\s]+(?:\s+or\s+[^\s]+)?(?:\s*CGPA|\s*%)?)/i) ||
+                         p.match(/^PG\s*[:\-–—\s]*([^\n\r|]+)/i);
+        if (valMatch) {
+          const cleanVal = valMatch[1].replace(/\s*(?:No\s+Standing|Arrear|Eligible).*$/i, '').trim();
+          if (!isGarbled(cleanVal)) addPill(`PG: ${cleanVal}`);
+          return;
+        }
+      }
+
+      // 5. Standalone 10th
+      if (/^10th\s*:/i.test(p)) {
+        const valMatch = p.match(/^10th\s*[:\-–—\s]*([^\s]+(?:\s+or\s+[^\s]+)?(?:\s*CGPA|\s*%)?)/i) ||
+                         p.match(/^10th\s*[:\-–—\s]*([^\n\r|]+)/i);
+        if (valMatch) {
+          if (!isGarbled(valMatch[1])) addPill(`10th: ${valMatch[1].trim()}`);
+          return;
+        }
+      }
+
+      // 6. Standalone 12th
+      if (/^12th\s*:/i.test(p)) {
+        const valMatch = p.match(/^12th\s*[:\-–—\s]*([^\s]+(?:\s+or\s+[^\s]+)?(?:\s*CGPA|\s*%)?)/i) ||
+                         p.match(/^12th\s*[:\-–—\s]*([^\n\r|]+)/i);
+        if (valMatch) {
+          if (!isGarbled(valMatch[1])) addPill(`12th: ${valMatch[1].trim()}`);
+          return;
+        }
+      }
+
+      // 7. Arrears
+      if (/arrear/i.test(p)) {
+        if (/no\s*(?:standing)?\s*arrears\s*(?:and|&)\s*no\s*academic\s*gap/i.test(p)) {
+          addPill('No standing arrears & no academic gap');
+        } else if (/no\s*(?:standing)?\s*arrears|0\s*arrear/i.test(p)) {
+          addPill('No standing arrears');
+        } else if (/no\s*(?:history\s*of\s*)?arrears/i.test(p)) {
+          addPill('No history of arrears');
+        } else {
+          addPill(p);
+        }
+        return;
+      }
+
+      // 8. Branches
+      if (/^Branches\s*:/i.test(p)) {
+        addPill(p);
+        return;
+      }
+
+      if (!isGarbled(p)) {
+        addPill(p);
+      }
+    };
+
+    if (raw && raw.includes('|')) {
+      const parts = raw.split('|').map((p) => p.trim()).filter(Boolean);
+      for (const p of parts) {
+        sanitizeAndAddPill(p);
+      }
+    } else {
+      // 1. 10th and 12th (combined or separate)
+      const combinedTenthTwelfthMatch = raw.match(/(?:10th\s*(?:&|and)\s*12th|x\s*(?:&|and)\s*xii)\s*[:\-–—\s]*([^\s]+(?:\s+or\s+[^\s]+)?(?:\s*CGPA|\s*%)?)/i) ||
+                                        raw.match(/(?:% in\s+)?(?:x\s+and\s+xii|10th\s+and\s+12th)\s*[:\-–—\s]*([^\n\r|]+)/i);
+      if (combinedTenthTwelfthMatch) {
+        const cleanVal = combinedTenthTwelfthMatch[1].replace(/\s*(?:in\s+Pursuing|Pursuing|in\s+UG|for\s+PG).*$/i, '').trim();
+        if (!isGarbled(cleanVal)) addPill(`10th & 12th: ${cleanVal}`);
+      } else {
+        const tenthMatch = raw.match(/(?:in\s+10th|10th\s*std|10th\s*grade|10th)\s*[:\-–—\s]*([^\s]+(?:\s+or\s+[^\s]+)?(?:\s*CGPA|\s*%)?)/i);
+        if (tenthMatch && !isGarbled(tenthMatch[1])) addPill(`10th: ${tenthMatch[1].trim()}`);
+        const twelfthMatch = raw.match(/(?:in\s+12th|12th\s*std|12th\s*grade|12th|diploma)\s*[:\-–—\s]*([^\s]+(?:\s+or\s+[^\s]+)?(?:\s*CGPA|\s*%)?)/i);
+        if (twelfthMatch && !isGarbled(twelfthMatch[1])) addPill(`12th: ${twelfthMatch[1].trim()}`);
+      }
+
+      // 2. UG Requirement
+      if (cgpaReq) {
+        const cleanVal = cgpaReq.replace(/^(?:UG|Degree|Pursuing\s+Degree)\s*:\s*/i, '').trim();
+        if (!isGarbled(cleanVal)) {
+          addPill(`UG: ${/cgpa|degree|%/i.test(cleanVal) ? cleanVal : cleanVal + ' CGPA'}`);
+        }
+      } else if (raw) {
+        const ugMatch = raw.match(/(?:in\s+)?(?:pursuing\s+degree|degree|ug\s+cgpa)\s*[:\-–—\s]*([^\s–—|\(]+(?:\s+or\s+[^\s–—|\(]+)?(?:\s*CGPA|\s*%)?)/i) ||
+                        raw.match(/cgpa\s*(?:>=|:|of|above)?\s*(\d+(?:\.\d+)?)/i);
+        if (ugMatch) {
+          const val = (ugMatch[1] || ugMatch[0]).trim();
+          if (!isGarbled(val)) {
+            addPill(`UG: ${/cgpa|%/i.test(val) ? val : val + ' CGPA'}`);
+          }
+        }
+      }
+
+      // 3. PG Requirement (only if explicitly in raw)
+      if (raw && /(?:for\s+PGs?\)?|in\s+PG\b|Post\s*Graduation)/i.test(raw)) {
+        const pgMatch = raw.match(/(?:for\s+PGs?\)?|in\s+PG\b|Post\s*Graduation)\s*[:\-–—\s]*([^\s]+(?:\s+or\s+[^\s]+)?(?:\s*CGPA|\s*%)?)/i);
+        if (pgMatch && !isGarbled(pgMatch[1])) addPill(`PG: ${pgMatch[1].trim()}`);
+      }
+
+      // 4. Backlogs
+      if (backlogReq) {
+        addPill(backlogReq);
+      } else if (raw && /arrear/i.test(raw)) {
+        if (/no\s*(?:standing)?\s*arrears\s*(?:and|&)\s*no\s*academic\s*gap/i.test(raw)) {
+          addPill('No standing arrears & no academic gap');
+        } else if (/no\s*(?:standing)?\s*arrears|0\s*arrear/i.test(raw)) {
+          addPill('No standing arrears');
+        } else if (/no\s*(?:history\s*of\s*)?arrears/i.test(raw)) {
+          addPill('No history of arrears');
+        }
+      }
+
+      // 5. Eligible Branches
+      if (branches && Array.isArray(branches) && branches.length > 0) {
+        const branchStr = branches.join(', ');
+        addPill(`Branches: ${branchStr.length > 40 ? branchStr.slice(0, 37) + '...' : branchStr}`);
+      }
+    }
 
     return pills;
-  }, [company.application?.eligibility, company.application?.notes]);
+  }, [
+    company.application?.eligibility,
+    company.application?.branches,
+    company.application?.cgpaRequirement,
+    company.application?.backlogRequirement,
+  ]);
 
   return (
     <div data-testid="company-detail-page" className="mx-auto max-w-4xl space-y-4 w-full min-w-0 my-3">
@@ -426,10 +589,33 @@ export default function CompanyDetailClient({
               {initials}
             </div>
             <div className="min-w-0 flex-1">
-              <h1 className="font-display text-xl sm:text-2xl font-extrabold tracking-tight text-white truncate">{company.name}</h1>
-              <div className="mt-1.5 flex flex-wrap items-center gap-2">
-                <span className="text-xs sm:text-sm text-zinc-300 font-medium truncate">{displayRole}</span>
-                <CategoryBadge category={category} />
+              <h1 className="font-display text-xl sm:text-2xl font-extrabold tracking-tight text-white truncate flex items-baseline gap-2">
+                <span>{company.name}</span>
+                {company.driveNumber && (() => {
+                  const m = company.driveNumber.match(/\d+$/);
+                  const displayNum = m ? `#${m[0]}` : company.driveNumber;
+                  const tooltip = company.driveNumber.toLowerCase().startsWith('drive')
+                    ? `Placement Drive: ${company.driveNumber}`
+                    : `Placement Drive Number: ${displayNum} (${company.driveNumber})`;
+
+                  return (
+                    <span
+                      title={tooltip}
+                      className="font-mono text-xs sm:text-sm font-normal text-zinc-400 select-all shrink-0 cursor-help hover:text-zinc-300 transition-colors"
+                    >
+                      {displayNum}
+                    </span>
+                  );
+                })()}
+              </h1>
+              <div className="mt-1.5 flex flex-wrap items-center gap-1.5 sm:gap-2">
+                <span className="text-xs sm:text-sm text-zinc-300 font-medium truncate max-w-[240px] sm:max-w-md" title={displayRole}>{displayRole}</span>
+                {category && (
+                  <>
+                    <span className="text-xs sm:text-sm text-zinc-600 font-mono select-none">·</span>
+                    <span className="text-xs sm:text-sm text-zinc-400 font-medium">{category}</span>
+                  </>
+                )}
               </div>
             </div>
           </div>
@@ -489,51 +675,26 @@ export default function CompanyDetailClient({
                 </>
               )}
             </div>
-
-            {/* Delete button */}
-            <button
-              onClick={async () => {
-                if (!confirm(`Delete "${company.name}" and all its events, status, and linked data? This cannot be undone.`)) return;
-                setIsDeleting(true);
-                try {
-                  const res = await fetch(`/api/companies/${company.id}`, { method: 'DELETE' });
-                  if (res.ok) {
-                    router.push('/companies');
-                  } else {
-                    alert('Failed to delete company');
-                  }
-                } catch {
-                  alert('Failed to delete company');
-                } finally {
-                  setIsDeleting(false);
-                }
-              }}
-              disabled={isDeleting}
-              className="p-2 rounded-lg border border-zinc-800 bg-zinc-900/60 text-zinc-500 hover:text-rose-400 hover:border-rose-500/30 transition-colors cursor-pointer"
-              title="Delete company"
-            >
-              <Trash2 className="h-4 w-4" />
-            </button>
           </div>
         </div>
 
         {/* 4 Info Cards (CTC, Stipend, Drive Mode, Work Location) */}
         <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
-          <div data-testid="ctc-total" className="rounded-lg border border-zinc-800 bg-zinc-900/50 px-3.5 py-3">
+          <div data-testid="ctc-total" className="rounded-xl border border-zinc-800 bg-zinc-900/50 px-3.5 py-3">
             <div className="font-mono text-[9px] uppercase tracking-widest text-zinc-500">Total CTC</div>
-            <div className="font-tabular mt-1 font-display text-lg font-bold text-emerald-300 truncate" title={cleanCtc}>
+            <div className="font-tabular mt-1 font-display text-base sm:text-lg font-bold text-emerald-300 truncate" title={cleanCtc}>
               {cleanCtc}
             </div>
           </div>
 
-          <div data-testid="ctc-stipend" className="rounded-lg border border-zinc-800 bg-zinc-900/50 px-3.5 py-3">
+          <div data-testid="ctc-stipend" className="rounded-xl border border-zinc-800 bg-zinc-900/50 px-3.5 py-3">
             <div className="font-mono text-[9px] uppercase tracking-widest text-zinc-500">Stipend</div>
-            <div className="font-tabular mt-1 font-display text-lg font-bold text-zinc-200 truncate" title={cleanStipend || 'TBA'}>
-              {cleanStipend || (cleanCtc !== 'TBA' ? 'Included in CTC' : 'TBA')}
+            <div className="font-tabular mt-1 font-display text-base sm:text-lg font-bold text-zinc-200 truncate" title={cleanStipend || (cleanCtc !== 'TBA' ? 'N/A' : 'TBA')}>
+              {cleanStipend || (cleanCtc !== 'TBA' ? 'N/A' : 'TBA')}
             </div>
           </div>
 
-          <div data-testid="ctc-drive-mode" className="rounded-lg border border-zinc-800 bg-zinc-900/50 px-3.5 py-3">
+          <div data-testid="ctc-drive-mode" className="rounded-xl border border-zinc-800 bg-zinc-900/50 px-3.5 py-3">
             <div className="font-mono text-[9px] uppercase tracking-widest text-zinc-500">Drive Mode</div>
             {(() => {
               const driveColor =
@@ -549,38 +710,54 @@ export default function CompanyDetailClient({
                   ? 'text-purple-300'
                   : 'text-cyan-300';
               return (
-                <div className={cn("font-tabular mt-1 font-display text-lg font-bold truncate", driveColor)} title={driveModeDisplay}>
+                <div className={cn("font-tabular mt-1 font-display text-base sm:text-lg font-bold truncate", driveColor)} title={driveModeDisplay}>
                   {driveModeDisplay}
                 </div>
               );
             })()}
           </div>
 
-          <div data-testid="ctc-location" className="rounded-lg border border-zinc-800 bg-zinc-900/50 px-3.5 py-3">
+          <div data-testid="ctc-location" className="group relative rounded-xl border border-zinc-800 bg-zinc-900/50 px-3.5 py-3 hover:border-zinc-700 transition-colors">
             <div className="font-mono text-[9px] uppercase tracking-widest text-zinc-500">Work Location</div>
             <div
               className={cn(
-                "font-tabular mt-1 font-display text-lg font-bold truncate",
-                (!displayLocation || displayLocation === 'Not Specified') ? "text-zinc-500 font-medium text-base" : "text-zinc-200"
+                "font-tabular mt-1 font-display text-base sm:text-lg font-bold truncate",
+                (!displayLocation || displayLocation === 'Not Specified') ? "text-zinc-500 font-medium" : "text-zinc-200"
               )}
               title={displayLocation && displayLocation !== 'Not Specified' ? displayLocation : 'To be announced'}
             >
               {displayLocation && displayLocation !== 'Not Specified' ? displayLocation : 'TBA'}
             </div>
+            {displayLocation && displayLocation.length > 18 && displayLocation !== 'Not Specified' && (
+              <div className="pointer-events-none absolute left-0 bottom-full mb-2 hidden w-max max-w-xs rounded-lg border border-zinc-700/80 bg-zinc-950/95 px-3 py-2 text-xs text-zinc-200 shadow-2xl backdrop-blur-md group-hover:block z-30 transition-all font-sans font-medium leading-relaxed">
+                <div className="font-mono text-[9px] uppercase tracking-wider text-zinc-400 mb-0.5">Full Location</div>
+                {displayLocation}
+              </div>
+            )}
           </div>
         </div>
 
-        {/* Eligibility Pills */}
-        <div className="mt-4 flex flex-wrap gap-2">
-          {eligibilityList.map((e) => (
-            <span
-              key={e}
-              className="rounded-md border border-zinc-800 bg-zinc-900/60 px-2.5 py-1 font-mono text-[10px] text-zinc-400"
-            >
-              {e}
-            </span>
-          ))}
-        </div>
+        {/* Eligibility Criteria */}
+        {eligibilityList.length > 0 && (
+          <div className="mt-5 pt-4 border-t border-zinc-800/70">
+            <div className="flex items-center gap-1.5 mb-2.5">
+              <GraduationCap className="h-3.5 w-3.5 text-zinc-400" />
+              <span className="font-mono text-[10px] font-semibold uppercase tracking-wider text-zinc-400">
+                Eligibility Criteria
+              </span>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {eligibilityList.map((e) => (
+                <span
+                  key={e}
+                  className="rounded-md border border-zinc-800 bg-zinc-900/60 px-2.5 py-1 font-mono text-[10px] text-zinc-300"
+                >
+                  {e}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Venue / Instructions Banner */}
         {nextUpcomingEvent && (

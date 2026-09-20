@@ -1,5 +1,6 @@
 import type { ParsedEmail } from '@/lib/gmail/client';
 import { extractDriveNumber } from '@/lib/sync/events';
+import { getCanonicalBodyText, getCurrentMessageText } from '@/lib/sync/body';
 
 // ============================================
 // Email Classification Types
@@ -283,42 +284,69 @@ export function classifyEmail(
   knownDriveResolutions?: Map<string, string>
 ): ClassificationResult {
   const subject = email.subject.toLowerCase();
-  const body = (email.bodySnippet || email.bodyPlain || '').toLowerCase().slice(0, 1000);
+  const canonicalBody = getCanonicalBodyText(email);
+  const body = canonicalBody.toLowerCase().slice(0, 1000);
   const sender = email.senderEmail.toLowerCase();
+  const fullClassificationText = `${subject}\n${getCurrentMessageText(email).toLowerCase()}`;
+  const buildClassification = (
+    classification: EmailClassification,
+    confidence: 'high' | 'medium' | 'low',
+    reason: string
+  ): ClassificationResult => ({
+    classification,
+    confidence,
+    companyName: extractCompanyName(
+      email.subject,
+      email.senderEmail,
+      canonicalBody,
+      email.receivedAt,
+      knownDriveResolutions
+    ),
+    reason,
+  });
+
+  // Resolve only explicit conflicts that the ordered rules cannot represent safely.
+  if (
+    /registration.*(?:has\s+been\s+)?withdrawn|drive.*has\s+been\s+withdrawn|status:\s*withdrawn|your\s+registration\s+for\s+the\s+following\s+placement\s+drive\s+has\s+been\s+withdrawn/i.test(fullClassificationText)
+  ) {
+    return buildClassification('withdrawal', 'high', 'Email confirms registration withdrawal');
+  }
+  if (
+    /you\s+have\s+(?:successfully\s+)?(?:declined|opted\s*out)|declined\s+(?:the\s+)?(?:placement\s+)?drive|status:\s*(?:declined|opted\s*out)/i.test(fullClassificationText)
+  ) {
+    return buildClassification('decline', 'high', 'Email confirms decline or opt-out');
+  }
+  if (
+    /not\s+selected|regret\s+to\s+inform|unfortunately|could\s+not\s+be\s+selected/i.test(fullClassificationText)
+  ) {
+    return buildClassification('result', 'high', 'Rejection language detected');
+  }
+  if (/selected\s+for\s+(?:the\s+)?(?:online\s+)?(?:test|assessment|exam)|selected\s+for\s+(?:the\s+)?interview/i.test(fullClassificationText)) {
+    if (/selected\s+for\s+(?:the\s+)?interview/i.test(fullClassificationText)) {
+      return buildClassification('interview', 'high', 'Email announces interview selection');
+    }
+    return buildClassification('test', 'high', 'Email announces test selection');
+  }
+  if (/placement\s+drive[^\n]*interview|interview[^\n]*placement\s+drive/i.test(fullClassificationText)) {
+    return buildClassification('interview', 'high', 'Email announces a placement-drive interview');
+  }
 
   for (const rule of CLASSIFICATION_RULES) {
     if (rule.match(subject, body, sender)) {
-      return {
-        classification: rule.classification,
-        confidence: rule.confidence,
-        companyName: extractCompanyName(
-          email.subject,
-          email.senderEmail,
-          email.bodySnippet || email.bodyPlain,
-          email.receivedAt,
-          knownDriveResolutions
-        ),
-        reason: rule.reason,
-      };
+      return buildClassification(rule.classification, rule.confidence, rule.reason);
     }
   }
 
   const isTrustedSender =
     sender === 'noreply.cdcinfo@vitstudent.ac.in' ||
     sender === 'vitlions2027@vitbhopal.ac.in';
-  return {
-    classification: isTrustedSender ? 'unclassified_placement_notice' : 'unclassified',
-    confidence: isTrustedSender ? 'medium' : 'low',
-    companyName: extractCompanyName(
-      email.subject,
-      email.senderEmail,
-      email.bodySnippet || email.bodyPlain,
-      email.receivedAt
-    ),
-    reason: isTrustedSender
+  return buildClassification(
+    isTrustedSender ? 'unclassified_placement_notice' : 'unclassified',
+    isTrustedSender ? 'medium' : 'low',
+    isTrustedSender
       ? 'Trusted placement sender with unclassified content'
-      : 'No classification rule matched',
-  };
+      : 'No classification rule matched'
+  );
 }
 
 // ============================================
@@ -752,28 +780,9 @@ export function extractCompanyAliases(rawName: string, canonicalName: string, dr
     }
   }
 
-  // 2. Multi-word acronym generation: e.g. "Willis Towers Watson" -> "wtw" (must be >= 3 chars)
-  const base = canonicalName.replace(/\([^)]*\)/g, ' ').replace(/[^a-zA-Z0-9\s]/g, ' ');
-  const words = base.split(/\s+/).filter(Boolean);
-  if (words.length >= 3) {
-    const connectors = new Set(['of', 'and', 'for', 'in', 'the', 'at', 'on', 'to']);
-    const meaningful = words.filter((w) => !connectors.has(w.toLowerCase()));
-    if (meaningful.length >= 3 && meaningful.length <= 6) {
-      const acronym = meaningful.map((w) => w[0]).join('').toLowerCase();
-      if (acronym.length >= 3 && !ENGLISH_STOPWORDS.has(acronym)) {
-        add(acronym);
-      }
-    }
-
-    const corporateLegalWords = new Set(['pvt', 'ltd', 'limited', 'private', 'inc', 'corp', 'corporation', 'llc', 'llp']);
-    const withoutLegal = meaningful.filter((w) => !corporateLegalWords.has(w.toLowerCase()));
-    if (withoutLegal.length >= 3 && withoutLegal.length < meaningful.length) {
-      const acronymCore = withoutLegal.map((w) => w[0]).join('').toLowerCase();
-      if (acronymCore.length >= 3 && !ENGLISH_STOPWORDS.has(acronymCore)) {
-        add(acronymCore);
-      }
-    }
-  }
+  // 2. Acronyms are strictly governed by KNOWN_ACRONYMS or explicit parentheticals above.
+  // We do NOT generate arbitrary acronyms from multi-word company names (e.g. "Natwest Group India" -> "ngi")
+  // because arbitrary 3-4 letter acronyms collide with common English and technical terms (e.g. "engineering").
 
   // 3. Known acronym map additions (strict equality or whole-word match only)
   const cLower = canonicalName.toLowerCase();

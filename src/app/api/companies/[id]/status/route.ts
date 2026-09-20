@@ -2,10 +2,12 @@ import { NextResponse } from 'next/server';
 import { getSession } from '@/lib/auth';
 import { createAdminClient } from '@/lib/supabase/admin';
 
+export const dynamic = 'force-dynamic';
+
 /**
  * PATCH /api/companies/[id]/status
  *
- * Allows manual override of application status for a company.
+ * Allows manual override of application status for a company drive.
  */
 export async function PATCH(
   request: Request,
@@ -19,9 +21,9 @@ export async function PATCH(
     );
   }
 
-  const { id: companyId } = await params;
+  const { id: companyOrDriveId } = await params;
   const body = await request.json();
-  const { status, role, ctc, location, notes } = body;
+  const { status, role, ctc, location, notes, placement_drive_id: requestedDriveId, application_id: requestedApplicationId } = body;
 
   if (!status) {
     return NextResponse.json(
@@ -48,27 +50,93 @@ export async function PATCH(
 
   const supabase = createAdminClient();
 
+  let targetDriveId: string | null = requestedDriveId || null;
+
+  // Resolve whether companyOrDriveId is a placement_drive id or company id
+  if (!targetDriveId) {
+    const { data: directDrive } = await supabase
+      .from('placement_drives')
+      .select('id, company_id')
+      .eq('id', companyOrDriveId)
+      .eq('user_id', session.userId)
+      .maybeSingle();
+
+    if (directDrive) {
+      targetDriveId = directDrive.id;
+    } else {
+      // It's a company ID. Find or create a drive for it.
+      const { data: drives } = await supabase
+        .from('placement_drives')
+        .select('id')
+        .eq('user_id', session.userId)
+        .eq('company_id', companyOrDriveId);
+
+      if (drives && drives.length > 0) {
+        targetDriveId = drives[0].id;
+      } else {
+        // Create initial drive for this company
+        const { data: newDrive } = await supabase
+          .from('placement_drives')
+          .insert({
+            user_id: session.userId,
+            company_id: companyOrDriveId,
+            identity_state: 'manually_assigned',
+            identity_confidence: 'high',
+            identity_source: 'manual_status_override',
+          })
+          .select('id')
+          .single();
+        targetDriveId = newDrive?.id || null;
+      }
+    }
+  }
+
+  if (!targetDriveId) {
+    return NextResponse.json({ error: { message: 'Could not resolve placement drive for this company', code: 'drive_not_found' } }, { status: 404 });
+  }
+
   // Upsert application record with manual override flag
-  const { data: application, error } = await supabase
+  const applicationPayload = {
+    user_id: session.userId,
+    placement_drive_id: targetDriveId,
+    status: normalizedStatus,
+    status_source: 'manual_override',
+    status_confidence: 'manual',
+    manual_override: true,
+    role: role || undefined,
+    ctc: ctc || undefined,
+    location: location || undefined,
+    notes: normalizedNotes !== undefined ? normalizedNotes : undefined,
+    last_updated: new Date().toISOString(),
+  };
+
+  const { data: existingApp } = await supabase
     .from('applications')
-    .upsert(
-      {
-        user_id: session.userId,
-        company_id: companyId,
-        status: normalizedStatus,
-        status_source: 'manual_override',
-        status_confidence: 'manual',
-        manual_override: true,
-        role: role || undefined,
-        ctc: ctc || undefined,
-        location: location || undefined,
-        notes: normalizedNotes !== undefined ? normalizedNotes : undefined,
-        last_updated: new Date().toISOString(),
-      },
-      { onConflict: 'user_id,company_id' }
-    )
-    .select()
-    .single();
+    .select('id')
+    .eq('user_id', session.userId)
+    .eq('placement_drive_id', targetDriveId)
+    .maybeSingle();
+
+  let application;
+  let error;
+  if (existingApp?.id) {
+    const res = await supabase
+      .from('applications')
+      .update(applicationPayload)
+      .eq('id', existingApp.id)
+      .select()
+      .single();
+    application = res.data;
+    error = res.error;
+  } else {
+    const res = await supabase
+      .from('applications')
+      .insert(applicationPayload)
+      .select()
+      .single();
+    application = res.data;
+    error = res.error;
+  }
 
   if (error) {
     console.error('Failed to update status:', error);
@@ -78,7 +146,7 @@ export async function PATCH(
     );
   }
 
-  // Trigger background Google Calendar reconciliation so status changes (withdrawn, rejected, shortlisted)
+  // Trigger background Google Calendar reconciliation so status changes
   // are immediately reflected on the user's Google Calendar.
   import('@/lib/calendar/google-sync').then(({ reconcileUserGoogleCalendar }) => {
     reconcileUserGoogleCalendar(session.userId).catch((err) => {

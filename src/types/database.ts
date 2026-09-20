@@ -36,8 +36,32 @@ export interface DbCompany {
   name: string;
   legal_name: string | null;
   aliases: string[];
-  drive_number?: string | null;
-  drive_name?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DbPlacementDrive {
+  id: string;
+  user_id: string;
+  company_id: string;
+
+  drive_number: string | null;
+  normalized_drive_number: string | null;
+  drive_name: string | null;
+  role: string | null;
+  category: string | null;
+  ctc: string | null;
+  stipend: string | null;
+  location: string | null;
+  eligibility: string | null;
+  branches: string[] | null;
+  cgpa_requirement: string | null;
+  backlog_requirement: string | null;
+  registration_deadline: string | null;
+  identity_state: 'assigned' | 'ambiguous' | 'unassigned' | 'legacy' | 'conflict' | 'manually_assigned';
+  identity_confidence: 'high' | 'medium' | 'low';
+  identity_source: string | null;
+  source_email_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -45,7 +69,7 @@ export interface DbCompany {
 export interface DbApplication {
   id: string;
   user_id: string;
-  company_id: string;
+  placement_drive_id: string;
   status: string;
   status_source: string | null;
   status_confidence: 'high' | 'medium' | 'low' | 'ai' | 'manual';
@@ -79,11 +103,27 @@ export interface DbEmail {
   received_at: string | null;
   body_snippet: string | null;
   classification: string | null;
-  company_id: string | null;
+  placement_drive_id: string | null;
+  assignment_state: 'assigned' | 'ambiguous' | 'unassigned' | 'legacy' | 'conflict' | null;
+  assignment_confidence: 'high' | 'medium' | 'low' | null;
+  assignment_source: string | null;
   is_processed: boolean;
   is_relevant: boolean;
   processed_at: string | null;
   created_at: string;
+}
+
+export interface DbEmailDriveLink {
+  id: string;
+  user_id: string;
+  email_id: string;
+  placement_drive_id: string;
+  link_type: 'primary' | 'secondary' | 'pooled' | 'reference_only' | 'ambiguous_candidate';
+  confidence: 'high' | 'medium' | 'low';
+  assignment_source: string | null;
+  is_primary: boolean;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface DbAttachment {
@@ -102,11 +142,11 @@ export interface DbAttachment {
 export interface DbCandidateMatch {
   id: string;
   user_id: string;
-  application_id: string | null;
   attachment_id: string | null;
   email_id: string | null;
+  placement_drive_id: string;
   neo_id: string;
-  match_type: 'xlsx_cell' | 'pdf_text' | 'docx_text' | 'email_body' | 'email_subject';
+  match_type: 'xlsx_cell' | 'xlsx_applied_list' | 'pdf_text' | 'docx_text' | 'email_body' | 'email_subject';
   matched_value: string | null;
   match_location: string | null;
   confidence: 'high' | 'medium' | 'low';
@@ -116,8 +156,7 @@ export interface DbCandidateMatch {
 export interface DbEvent {
   id: string;
   user_id: string;
-  company_id: string;
-  application_id: string | null;
+  placement_drive_id: string;
   event_type: string;
   title: string | null;
   start_time: string | null;
@@ -135,7 +174,7 @@ export interface DbEvent {
 export interface DbDocument {
   id: string;
   user_id: string;
-  company_id: string | null;
+
   application_id: string | null;
   document_type: 'jd' | 'shortlist' | 'company_info' | 'offer_letter' | 'other';
   filename: string;
@@ -160,12 +199,11 @@ export interface DbNotification {
   type: string;
   title: string;
   message: string | null;
-  company_id: string | null;
+  placement_drive_id?: string | null;
   is_read: boolean;
   body?: string | null;
   link?: string | null;
   event_id?: string | null;
-  application_id?: string | null;
   dedupe_key?: string | null;
   created_at: string;
 }

@@ -14,6 +14,9 @@ export interface SyncCalendarEventParams {
   mode?: string | null;
   /** If provided, the existing GCal event will be updated in-place instead of searching/inserting. */
   gcalEventId?: string | null;
+  eventId?: string | null;
+  placementDriveId?: string | null;
+  applicationId?: string | null;
 }
 
 /**
@@ -107,6 +110,13 @@ export async function pushEventToGoogleCalendar(params: SyncCalendarEventParams)
         useDefault: false,
         overrides: reminderOverrides,
       },
+      extendedProperties: {
+        private: {
+          neotrackEventId: params.eventId || '',
+          placementDriveId: params.placementDriveId || '',
+          applicationId: params.applicationId || '',
+        },
+      },
     };
 
     // --- Path 1: We have a stored GCal event ID — update directly, no search needed ---
@@ -129,7 +139,17 @@ export async function pushEventToGoogleCalendar(params: SyncCalendarEventParams)
       }
     }
 
-    // --- Path 2: No stored ID — fuzzy search within ±4h window to avoid duplicates ---
+    // Drive-owned events must not use company-name fuzzy matching: two drives
+    // can have the same company prefix. Insert with stable metadata instead.
+    if (params.placementDriveId) {
+      const insertRes = await calendar.events.insert({
+        calendarId: 'primary',
+        requestBody: eventPayload,
+      });
+      return insertRes.data.id || null;
+    }
+
+    // --- Path 2: No stored ID — legacy fuzzy search within ±4h window ---
     const timeMin = new Date(startDate.getTime() - 4 * 60 * 60 * 1000).toISOString();
     const timeMax = new Date(startDate.getTime() + 4 * 60 * 60 * 1000).toISOString();
     const companyPrefix = params.title.split(' - ')[0].trim();
@@ -281,11 +301,12 @@ export async function reconcileUserGoogleCalendar(userId: string): Promise<Recon
   const [
     { data: events },
     { data: companies },
+    { data: placementDrives },
     { data: applications },
   ] = await Promise.all([
     supabase
       .from('events')
-      .select('id, company_id, event_type, title, start_time, end_time, venue, mode, manual_override, gcal_event_id')
+      .select('id, placement_drive_id, event_type, title, start_time, end_time, venue, mode, manual_override, gcal_event_id')
       .eq('user_id', userId)
       .order('start_time', { ascending: true }),
 
@@ -295,18 +316,27 @@ export async function reconcileUserGoogleCalendar(userId: string): Promise<Recon
       .eq('user_id', userId),
 
     supabase
+      .from('placement_drives')
+      .select('id, company_id')
+      .eq('user_id', userId),
+
+    supabase
       .from('applications')
-      .select('company_id, status')
+      .select('id, placement_drive_id, status')
       .eq('user_id', userId),
   ]);
 
   const companyMap = new Map((companies || []).map((c) => [c.id, c.name]));
-  const appStatusMap = new Map((applications || []).map((a) => [a.company_id, a.status]));
+  const driveMap = new Map((placementDrives || []).map((d) => [d.id, d]));
+  const appStatusMap = new Map((applications || []).map((a) => [a.placement_drive_id, a.status]));
+  const driveAppMap = new Map((applications || []).map((a) => [a.placement_drive_id, a.id]));
 
   const seenKeys = new Set<string>();
   const eligibleEvents: Array<{
     id: string;
     companyId: string;
+    placementDriveId: string | null;
+    applicationId: string | null;
     companyName: string;
     eventType: string;
     title: string;
@@ -315,6 +345,7 @@ export async function reconcileUserGoogleCalendar(userId: string): Promise<Recon
     venue?: string | null;
     mode?: string | null;
     gcalEventId?: string | null;
+    eventId?: string | null;
   }> = [];
 
   for (const evt of events || []) {
@@ -330,7 +361,7 @@ export async function reconcileUserGoogleCalendar(userId: string): Promise<Recon
       }
     }
 
-    const status = appStatusMap.get(evt.company_id) || 'not_applied';
+    const status = appStatusMap.get(evt.placement_drive_id) || 'not_applied';
     const isManual = (evt as unknown as { manual_override?: boolean }).manual_override;
 
     // Filter out inactive/eliminated/withdrawn companies unless manually scheduled
@@ -346,20 +377,25 @@ export async function reconcileUserGoogleCalendar(userId: string): Promise<Recon
     }
 
     // Deduplicate identical company + event_type
-    const key = `${evt.company_id}:${evt.event_type}`;
+    const key = `${evt.placement_drive_id}:${evt.event_type}`;
     if (!seenKeys.has(key)) {
       seenKeys.add(key);
+      const drive = driveMap.get(evt.placement_drive_id);
+      const companyName = drive ? companyMap.get(drive.company_id) || 'Placement Drive' : 'Placement Drive';
       eligibleEvents.push({
         id: evt.id,
-        companyId: evt.company_id,
-        companyName: companyMap.get(evt.company_id) || 'Placement Drive',
+        companyId: drive?.company_id || evt.placement_drive_id,
+        placementDriveId: evt.placement_drive_id,
+        applicationId: (evt.placement_drive_id ? driveAppMap.get(evt.placement_drive_id) : null) || null,
+        companyName,
         eventType: evt.event_type,
-        title: evt.title || `${companyMap.get(evt.company_id) || 'Placement'} - ${evt.event_type}`,
+        title: evt.title || `${companyName} - ${evt.event_type}`,
         startTime: evt.start_time,
         endTime: evt.end_time,
         venue: evt.venue,
         mode: evt.mode,
         gcalEventId: evt.gcal_event_id,
+        eventId: evt.id,
       });
     }
   }
@@ -425,10 +461,18 @@ export async function reconcileUserGoogleCalendar(userId: string): Promise<Recon
     const gStart = gItem.start?.dateTime ? new Date(gItem.start.dateTime).getTime() : 0;
     const gSummary = (gItem.summary || '').toLowerCase();
 
-    // Match by stored gcalEventId or by company name + round type on same day
+    const itemDriveId = gItem.extendedProperties?.private?.placementDriveId;
+    const itemEventId = gItem.extendedProperties?.private?.neotrackEventId;
+
+    // Drive-owned records match by stable private metadata first. Company-name
+    // fuzzy matching remains a legacy compatibility path only.
     const match = eligibleEvents.find((e) => {
       if (matchedAppEventIds.has(e.id)) return false; // Already claimed by another GCal event
       if (e.gcalEventId && e.gcalEventId === gItem.id) return true;
+      if (e.placementDriveId && itemDriveId && e.placementDriveId === itemDriveId) {
+        return e.id === itemEventId;
+      }
+      if (e.placementDriveId || itemDriveId) return false;
 
       const eStart = new Date(e.startTime).getTime();
       const sameDay = Math.abs(eStart - gStart) < 24 * 60 * 60 * 1000;
@@ -475,6 +519,13 @@ export async function reconcileUserGoogleCalendar(userId: string): Promise<Recon
                 { method: 'popup', minutes: 120 },
                 { method: 'email', minutes: 1440 },
               ],
+            },
+            extendedProperties: {
+              private: {
+                neotrackEventId: match.id,
+                placementDriveId: match.placementDriveId || '',
+                applicationId: match.applicationId || '',
+              },
             },
           },
         });
@@ -530,6 +581,13 @@ export async function reconcileUserGoogleCalendar(userId: string): Promise<Recon
               { method: 'popup', minutes: 120 },
               { method: 'email', minutes: 1440 },
             ],
+          },
+          extendedProperties: {
+            private: {
+              neotrackEventId: ins.id,
+              placementDriveId: ins.placementDriveId || '',
+              applicationId: ins.applicationId || '',
+            },
           },
         },
       });

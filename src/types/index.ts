@@ -24,6 +24,20 @@ export interface CompanyWithApplication {
   manual_override: boolean;
 }
 
+export interface PlacementDriveSummary {
+  id: string;
+
+  company_name: string;
+  drive_number: string | null;
+  drive_name: string | null;
+  status: ApplicationStatus | null;
+  next_event: {
+    type: EventType;
+    start_time: string;
+    title: string | null;
+  } | null;
+}
+
 /** Dashboard summary statistics */
 export interface DashboardStats {
   total_companies: number;
@@ -31,6 +45,8 @@ export interface DashboardStats {
   total_applied?: number;
   applied: number;
   shortlisted: number;
+  total_shortlisted?: number;
+  active_shortlisted?: number;
   not_shortlisted: number;
   upcoming_tests: number;
   upcoming_interviews: number;
@@ -43,7 +59,7 @@ export interface DashboardStats {
 export interface UpcomingEvent {
   id: string;
   company_name: string;
-  company_id: string;
+
   event_type: EventType;
   title: string | null;
   start_time: string;
@@ -87,6 +103,7 @@ export interface CompanyDetail {
     eligibility: string | null;
     branches: string[] | null;
     cgpa_requirement: string | null;
+    backlog_requirement: string | null;
     registration_deadline: string | null;
     job_description: string | null;
     manual_override: boolean;

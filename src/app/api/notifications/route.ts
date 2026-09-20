@@ -30,8 +30,9 @@ export async function GET() {
   // 2. Fetch latest active notifications (last 7 days, max 30)
   const { data: notifications, error } = await supabase
     .from('notifications')
-    .select('id, type, title, message, body, link, company_id, is_read, created_at')
+    .select('id, type, title, message, body, link, is_read, created_at')
     .eq('user_id', session.userId)
+    .neq('type', 'deleted')
     .gte('created_at', sevenDaysAgo)
     .order('created_at', { ascending: false })
     .limit(30);
@@ -46,6 +47,7 @@ export async function GET() {
     .from('notifications')
     .select('id', { count: 'exact', head: true })
     .eq('user_id', session.userId)
+    .neq('type', 'deleted')
     .gte('created_at', sevenDaysAgo)
     .or('is_read.eq.false,is_read.is.null');
 
@@ -97,7 +99,7 @@ export async function DELETE(request: Request) {
   const readOnly = searchParams.get('readOnly') === 'true';
 
   const supabase = createAdminClient();
-  let query = supabase.from('notifications').delete().eq('user_id', session.userId);
+  let query = supabase.from('notifications').update({ type: 'deleted' }).eq('user_id', session.userId);
 
   if (readOnly) {
     query = query.eq('is_read', true);
