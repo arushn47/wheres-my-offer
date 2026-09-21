@@ -56,8 +56,8 @@ export function classifyExcelFile(filename: string): 'shortlist' | 'applied_list
  * @param gmail Gmail API client
  * @param messageId Gmail Message ID
  * @param attachments List of attachments on the email
- * @param userNeoId User's configured Neo ID (e.g. "I4W0P0K8")
- * @param userEmail User's email (e.g. "arush.23bce10472@vitbhopal.ac.in")
+ * @param userNeoId User's configured Neo ID (e.g. alphanumeric candidate registration ID)
+ * @param userEmail User's email (e.g. student email address)
  */
 export async function scanExcelAttachmentsForNeoId(
   gmail: gmail_v1.Gmail,

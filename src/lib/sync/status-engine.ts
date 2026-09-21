@@ -50,7 +50,7 @@ export function checkNeoIdMatch(
     .replace(/from:\s*[^\n]+/gi, ' ')
     .toUpperCase();
 
-  // 1. Check user's explicitly configured Neo ID (e.g. "I4W0POK8", "I4W0P0K8", "K1D6D1R7")
+  // 1. Check user's explicitly configured Neo ID (e.g. alphanumeric registration ID)
   // Uses strict word-boundary regex to avoid false positives from partial substring matches.
   // Retains 0/O and 1/I fuzzy matching to handle OCR scan / CDC font rendering artefacts.
   if (userNeoId && userNeoId.trim().length >= 4) {

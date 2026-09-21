@@ -134,8 +134,7 @@
 ## Context for AI
 
 - **User**: VIT Bhopal student (`arush.23bce10472@vitbhopal.ac.in`)
-- **Personal email**: `arushn.2005@gmail.com`
-- **Neo ID**: `A6S2A7G9` (user entered `I4W0P0K8` in the UI — may have changed)
+- **Neo ID**: Configured per user in Settings (e.g. 6-12 alphanumeric characters)
 - **Primary use case**: Track campus placement drives from NeoPAT portal and VIT placement emails
 - **External Cron Job (CRITICAL)**: Configured on [cron-job.org](https://console.cron-job.org/jobs/8265126) running `GET https://neopat-tracker.vercel.app/api/cron/sync` **every 15 minutes** (`*/15 * * * *`). Sync MUST be concurrency-locked per user so background cron never collides with manual or ongoing initial syncs.
 - **Project location**: `d:\CODING\Web Development\Projects\Fullstack\NeoTrack`
