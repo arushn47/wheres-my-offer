@@ -130,7 +130,6 @@ export const isTrustedPlacementSender = (senderEmail: string, isPersonal: boolea
   }
   return (
     clean.includes('vitlions2027@vitbhopal.ac.in') ||
-    clean.includes('placementoffice@vitbhopal.ac.in') ||
     clean.includes('noreply.cdcinfo@vitstudent.ac.in')
   );
 };
