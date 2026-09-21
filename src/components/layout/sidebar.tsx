@@ -66,6 +66,7 @@ export default function Sidebar({
             <Link
               key={href}
               href={href}
+              prefetch={true}
               className={cn(
                 'group flex items-center gap-3 rounded-xl px-3.5 py-2.5 text-sm font-medium transition-colors duration-150',
                 isActive
@@ -112,6 +113,7 @@ export default function Sidebar({
       <div className="border-t border-zinc-800/80 p-3 shrink-0 flex items-center justify-between gap-2.5">
         <Link
           href="/settings"
+          prefetch={true}
           className="flex items-center gap-2.5 min-w-0 flex-1 p-1 -m-1 rounded-xl hover:bg-zinc-800/50 transition-colors group cursor-pointer"
           title="Go to Settings & Profile"
         >

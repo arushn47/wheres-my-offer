@@ -15,6 +15,12 @@ process.emitWarning = (warning: string | Error, ...args: any[]) => {
 const nextConfig: NextConfig = {
   // Disable internal Node.js gzip compression to prevent live SSE streams from being piped into Gzip transform streams with dangling drain listeners. Compression is handled at the edge (Vercel).
   compress: false,
+  experimental: {
+    staleTimes: {
+      dynamic: 60, // Cache dynamic routes in client memory for 60s to make page switching instant
+      static: 300,
+    },
+  },
   async redirects() {
     return [
       {

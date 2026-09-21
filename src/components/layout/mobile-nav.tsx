@@ -36,6 +36,7 @@ export default function MobileNav() {
             <Link
               key={item.href}
               href={item.href}
+              prefetch={true}
               className={cn(
                 'flex flex-1 flex-col items-center justify-center py-1 text-[10px] font-medium transition-all select-none',
                 isActive ? 'text-emerald-400 font-semibold' : 'text-zinc-500 hover:text-zinc-300'
