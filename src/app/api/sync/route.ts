@@ -119,14 +119,13 @@ export async function POST(req: Request) {
           newCompanies: result.newCompanies,
         });
 
-        // Trigger notifications for live events and approaching registration deadlines
-        try {
-          const { checkAndNotifyLiveEvents, checkAndNotifyRegistrationDeadlines } = await import('@/lib/notifications/service');
-          await checkAndNotifyLiveEvents(session.userId);
-          await checkAndNotifyRegistrationDeadlines(session.userId);
-        } catch (notifErr) {
-          console.warn('[Sync API] Post-sync notification check error:', notifErr);
-        }
+        // Trigger notifications in the background so stream closes with zero latency
+        import('@/lib/notifications/service')
+          .then(({ checkAndNotifyLiveEvents, checkAndNotifyRegistrationDeadlines }) => {
+            checkAndNotifyLiveEvents(session.userId).catch(() => {});
+            checkAndNotifyRegistrationDeadlines(session.userId).catch(() => {});
+          })
+          .catch((notifErr) => console.warn('[Sync API] Post-sync notification error:', notifErr));
       } catch (err) {
         const errorMessage =
           err instanceof Error ? err.message : 'Unknown error';

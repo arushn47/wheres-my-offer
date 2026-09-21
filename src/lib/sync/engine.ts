@@ -130,6 +130,7 @@ export const isTrustedPlacementSender = (senderEmail: string, isPersonal: boolea
   }
   return (
     clean.includes('vitlions2027@vitbhopal.ac.in') ||
+    clean.includes('placementoffice@vitbhopal.ac.in') ||
     clean.includes('noreply.cdcinfo@vitstudent.ac.in')
   );
 };
@@ -777,6 +778,7 @@ export async function processPage(
   totalPagesCount?: number
 ): Promise<ProcessPageResult> {
   const updateCheckpoint = async (nextOffset: number, status?: SyncPageRow['status']) => {
+    if (page.id === 'ephemeral-page') return;
     const { data, error } = await supabase.rpc('update_sync_page_checkpoint', {
       p_user_id: userId,
       p_run_id: runId,
@@ -1265,6 +1267,7 @@ export async function runSync(
 
         let pages: SyncPageRow[] = (existingPages || []) as SyncPageRow[];
         let pendingPages = pages.filter((p) => p.status !== 'complete');
+        let nextHistoryId: string | null = null;
 
         // If no pending pages exist, check Gmail for new messages and plan pages
         if (pendingPages.length === 0) {
@@ -1272,7 +1275,6 @@ export async function runSync(
           notifyProgress(progress);
 
           let messageIds: string[] = [];
-          let nextHistoryId: string | null = null;
 
           const onFetchBatch = (fetchedCount: number) => {
             progress.totalMessages = fetchedCount;
@@ -1335,6 +1337,13 @@ export async function runSync(
                 last_history_id: nextHistoryId || account.last_history_id,
               })
               .eq('id', account.id);
+
+            notifyProgress({
+              ...progress,
+              phase: 'complete',
+              totalMessages: 0,
+              processedMessages: 0,
+            });
           } else {
             // Fast Pre-Check: Filter out emails already in DB
             let existingSet = new Set<string>();
@@ -1368,8 +1377,26 @@ export async function runSync(
             result.skippedDuplicates += skippedCount;
 
             if (newMsgIds.length > 0) {
-              pages = await planSyncPages(supabase, userId, account, newMsgIds);
-              pendingPages = pages.filter((p) => p.status !== 'complete');
+              const isEphemeral = !isInitialSync && newMsgIds.length <= 15;
+              if (isEphemeral) {
+                pages = [
+                  {
+                    id: 'ephemeral-page',
+                    user_id: userId,
+                    gmail_account_id: account.id,
+                    page_index: 0,
+                    message_ids: newMsgIds,
+                    next_offset: 0,
+                    status: 'pending',
+                    created_at: new Date().toISOString(),
+                    updated_at: new Date().toISOString(),
+                  },
+                ];
+                pendingPages = pages;
+              } else {
+                pages = await planSyncPages(supabase, userId, account, newMsgIds);
+                pendingPages = pages.filter((p) => p.status !== 'complete');
+              }
             } else {
               // No new emails to process
               await supabase
@@ -1379,6 +1406,13 @@ export async function runSync(
                   last_history_id: nextHistoryId || account.last_history_id,
                 })
                 .eq('id', account.id);
+
+              notifyProgress({
+                ...progress,
+                phase: 'complete',
+                totalMessages: 0,
+                processedMessages: 0,
+              });
             }
           }
         }
@@ -1476,9 +1510,9 @@ export async function runSync(
               .select('status')
               .eq('gmail_account_id', account.id);
 
-            const allDone = refreshedPages && refreshedPages.length > 0 && refreshedPages.every((p) => p.status === 'complete');
+            const allDone = (refreshedPages && refreshedPages.length > 0 && refreshedPages.every((p) => p.status === 'complete')) || (pages.length === 1 && pages[0].id === 'ephemeral-page');
             if (allDone) {
-              const nextHistId = await getProfileHistoryId(gmail).catch(() => null);
+              const nextHistId = nextHistoryId || (await getProfileHistoryId(gmail).catch(() => null));
               await supabase
                 .from('gmail_accounts')
                 .update({
@@ -1486,8 +1520,15 @@ export async function runSync(
                   last_history_id: nextHistId || account.last_history_id,
                 })
                 .eq('id', account.id);
+
+              notifyProgress({
+                ...progress,
+                phase: 'complete',
+                totalMessages: accountResult.emailsProcessed,
+                processedMessages: accountResult.emailsProcessed,
+              });
             }
-            result.isPage0Complete = refreshedPages?.find((p: any) => p.page_index === 0)?.status === 'complete';
+            result.isPage0Complete = refreshedPages?.find((p: any) => p.page_index === 0)?.status === 'complete' || pages[0]?.id === 'ephemeral-page';
             result.hasMorePagesPending = !allDone;
 
           } else {
@@ -1564,9 +1605,9 @@ export async function runSync(
               .select('status')
               .eq('gmail_account_id', account.id);
 
-            const allDone = refreshedPages && refreshedPages.length > 0 && refreshedPages.every((p) => p.status === 'complete');
+            const allDone = (refreshedPages && refreshedPages.length > 0 && refreshedPages.every((p) => p.status === 'complete')) || (pages.length === 1 && pages[0].id === 'ephemeral-page');
             if (allDone) {
-              const nextHistId = await getProfileHistoryId(gmail).catch(() => null);
+              const nextHistId = nextHistoryId || (await getProfileHistoryId(gmail).catch(() => null));
               await supabase
                 .from('gmail_accounts')
                 .update({
@@ -1574,9 +1615,16 @@ export async function runSync(
                   last_history_id: nextHistId || account.last_history_id,
                 })
                 .eq('id', account.id);
+
+              notifyProgress({
+                ...progress,
+                phase: 'complete',
+                totalMessages: accountResult.emailsProcessed,
+                processedMessages: accountResult.emailsProcessed,
+              });
             }
 
-            result.isPage0Complete = refreshedPages?.find((p: any) => p.page_index === 0)?.status === 'complete';
+            result.isPage0Complete = refreshedPages?.find((p: any) => p.page_index === 0)?.status === 'complete' || pages[0]?.id === 'ephemeral-page';
           }
         }
       } catch (accountErr) {
@@ -1953,14 +2001,11 @@ export async function runSync(
       }
 
       // 6. Automatic Google Calendar reconciliation:
-      // Only runs if new emails or archive pages were processed
-      try {
-        const { reconcileUserGoogleCalendar } = await import('@/lib/calendar/google-sync');
-        const calResult = await reconcileUserGoogleCalendar(userId);
-        console.log(`[Google Calendar Auto-Sync] User ${userId}: ${calResult.message}`);
-      } catch (calErr) {
-        console.warn('[Google Calendar Auto-Sync] Non-critical reconciliation error:', calErr);
-      }
+      // Run in background fire-and-forget so it NEVER blocks returning the sync response
+      import('@/lib/calendar/google-sync')
+        .then(({ reconcileUserGoogleCalendar }) => reconcileUserGoogleCalendar(userId))
+        .then((calResult) => console.log(`[Google Calendar Auto-Sync] User ${userId}: ${calResult.message}`))
+        .catch((calErr) => console.warn('[Google Calendar Auto-Sync] Non-critical reconciliation error:', calErr));
 
       // Clean up completed initial sync pages so future idle cron runs don't re-trigger
       if (hadCompletedInitialPages) {
@@ -1972,17 +2017,15 @@ export async function runSync(
       );
     }
 
-    // Reconcile elapsed event statuses (test_scheduled -> test_completed, etc.)
-    // Ensures scheduled rounds that conclude are promoted in DB even during idle cron runs
-    try {
-      const { reconcileElapsedEventStatuses } = await import('@/lib/sync/event-reconciliation');
-      const reconResult = await reconcileElapsedEventStatuses(supabase, userId);
-      if (reconResult.updatedCount > 0) {
-        console.log(`[SyncEngine] Reconciled ${reconResult.updatedCount} elapsed round(s) for user ${userId}`);
-      }
-    } catch (reconErr) {
-      console.warn('[SyncEngine] Elapsed events reconciliation non-critical error:', reconErr);
-    }
+    // Reconcile elapsed event statuses in the background
+    import('@/lib/sync/event-reconciliation')
+      .then(({ reconcileElapsedEventStatuses }) => reconcileElapsedEventStatuses(supabase, userId))
+      .then((reconResult) => {
+        if (reconResult.updatedCount > 0) {
+          console.log(`[SyncEngine] Reconciled ${reconResult.updatedCount} elapsed round(s) for user ${userId}`);
+        }
+      })
+      .catch((reconErr) => console.warn('[SyncEngine] Elapsed events reconciliation non-critical error:', reconErr));
 
     return result;
   } finally {
@@ -1990,20 +2033,33 @@ export async function runSync(
     activeSyncLocks.delete(userId);
     activeSyncMap.delete(userId);
     try {
-      await dbWriteChain;
+      await dbWriteChain.catch(() => {});
+    } catch {}
+    try {
       const isError = result.errors.length > 0 && result.totalEmailsProcessed === 0;
       const isComplete = !result.hasMorePagesPending;
-      const { error: releaseError } = await supabase.rpc('release_sync_lease', {
-        p_user_id: userId,
-        p_run_id: runId,
-        p_phase: isError ? 'error' : (isComplete ? 'complete' : 'pending'),
-        p_last_error: result.errors.length > 0 ? result.errors[result.errors.length - 1] : null,
-      });
-      if (releaseError && !leaseLost) {
-        console.error(`[Sync Engine] Failed to release sync lease for ${userId}:`, releaseError);
-      }
-    } catch {
-      // Ignore if sync_state table not yet created
+      try {
+        await supabase.rpc('release_sync_lease', {
+          p_user_id: userId,
+          p_run_id: runId,
+          p_phase: isError ? 'error' : (isComplete ? 'complete' : 'pending'),
+          p_last_error: result.errors.length > 0 ? result.errors[result.errors.length - 1] : null,
+        });
+      } catch {}
+
+      // Direct fallback update to guarantee sync_state is ALWAYS marked as finished
+      await supabase
+        .from('sync_state')
+        .update({
+          is_syncing: false,
+          phase: isError ? 'error' : (isComplete ? 'complete' : 'pending'),
+          completed_at: new Date().toISOString(),
+          lease_expires_at: null,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('user_id', userId);
+    } catch (cleanupErr) {
+      console.error(`[Sync Engine] Error releasing sync lease for ${userId}:`, cleanupErr);
     }
   }
 }

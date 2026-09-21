@@ -145,8 +145,8 @@ export function SyncProvider({
     if (immediate) {
       poll();
     }
-    // 60-second fallback polling interval (reduced from 2.5s to minimize Supabase egress and Vercel CPU)
-    pollIntervalRef.current = setInterval(poll, 60000);
+    // Dynamic 2.5-second polling interval while sync is active to instantly reflect completion
+    pollIntervalRef.current = setInterval(poll, 2500);
   }, [router, stopPolling]);
 
   // Clean up polling interval, chained timeouts, and active fetch on unmount
@@ -279,29 +279,28 @@ export function SyncProvider({
                       return;
                     }
 
-                    setSyncProgress((prev) => (prev ? { ...prev, phase: 'complete' } : null));
+                    isSyncingRef.current = false;
+                    setIsSyncing(false);
+                    setSyncProgress(null);
 
-                    setTimeout(() => {
-                      setSyncProgress(null);
-                      const newEmails = parsed.newEmails ?? parsed.result?.newEmails ?? 0;
-                      const newCompanies = parsed.newCompanies ?? parsed.result?.newCompanies ?? 0;
-                      const resultData: SyncResult = {
-                        show: true,
-                        success: true,
-                        message: syncProgress?.isInitialSync
-                          ? 'Sync complete! All placement drives are up to date.'
-                          : 'Placement sync complete',
-                        newEmails,
-                        newCompanies,
-                      };
-                      setSyncResult(resultData);
-                      appToast.sync(
-                        resultData.message,
-                        `${newEmails} new updates · ${newCompanies} companies indexed`
-                      );
-                      router.refresh();
-                      setTimeout(() => setSyncResult(null), 5000);
-                    }, 1000);
+                    const newEmails = parsed.newEmails ?? parsed.result?.newEmails ?? 0;
+                    const newCompanies = parsed.newCompanies ?? parsed.result?.newCompanies ?? 0;
+                    const resultData: SyncResult = {
+                      show: true,
+                      success: true,
+                      message: syncProgress?.isInitialSync
+                        ? 'Sync complete! All placement drives are up to date.'
+                        : 'Placement sync complete',
+                      newEmails,
+                      newCompanies,
+                    };
+                    setSyncResult(resultData);
+                    appToast.sync(
+                      resultData.message,
+                      `${newEmails} new updates · ${newCompanies} companies indexed`
+                    );
+                    router.refresh();
+                    setTimeout(() => setSyncResult(null), 4000);
                   } else if (currentEvent === 'error' || currentEvent === 'sync_error') {
                     stopPolling();
                     setSyncProgress(null);

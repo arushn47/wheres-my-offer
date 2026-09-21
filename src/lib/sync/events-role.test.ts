@@ -217,9 +217,10 @@ describe('isTrustedPlacementSender', () => {
     expect(isTrustedPlacementSender('professor@vitbhopal.ac.in', true)).toBe(false);
     expect(isTrustedPlacementSender('careers@google.com', true)).toBe(false);
 
-    // College account: vitlions2027@vitbhopal.ac.in or noreply.cdcinfo@vitstudent.ac.in
+    // College account: vitlions2027@vitbhopal.ac.in, placementoffice@vitbhopal.ac.in, or noreply.cdcinfo@vitstudent.ac.in
     expect(isTrustedPlacementSender('vitlions2027@vitbhopal.ac.in', false)).toBe(true);
     expect(isTrustedPlacementSender('Placement Cell <vitlions2027@vitbhopal.ac.in>', false)).toBe(true);
+    expect(isTrustedPlacementSender('Placement Office <placementoffice@vitbhopal.ac.in>', false)).toBe(true);
     expect(isTrustedPlacementSender('noreply.cdcinfo@vitstudent.ac.in', false)).toBe(true);
     expect(isTrustedPlacementSender('professor@vitbhopal.ac.in', false)).toBe(false);
     expect(isTrustedPlacementSender('notifications@github.com', false)).toBe(false);
