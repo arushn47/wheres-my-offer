@@ -172,6 +172,9 @@ export async function GET(request: Request) {
       const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
       const watchResult = await setupGmailWatch(gmail, process.env.GOOGLE_PUBSUB_TOPIC);
       if (watchResult) {
+        // expiration is a Unix timestamp in milliseconds returned as a string by Gmail API
+        const watchExpiresAt = new Date(Number(watchResult.expiration)).toISOString();
+
         // Only update last_history_id if the account already completed its initial discovery sync.
         // If last_history_id is null, keep it null so initial full discovery is not skipped.
         const { data: existingAcc } = await supabase
@@ -181,14 +184,16 @@ export async function GET(request: Request) {
           .eq('email', userInfo.email)
           .single();
 
-        if (existingAcc?.last_history_id) {
-          await supabase
-            .from('gmail_accounts')
-            .update({ last_history_id: watchResult.historyId })
-            .eq('user_id', userId)
-            .eq('email', userInfo.email);
-        }
-        console.log(`[Pub/Sub] Registered Gmail watch for ${userInfo.email} at historyId ${watchResult.historyId}`);
+        await supabase
+          .from('gmail_accounts')
+          .update({
+            watch_expires_at: watchExpiresAt,
+            ...(existingAcc?.last_history_id ? { last_history_id: watchResult.historyId } : {}),
+          })
+          .eq('user_id', userId)
+          .eq('email', userInfo.email);
+
+        console.log(`[Pub/Sub] Registered Gmail watch for ${userInfo.email} at historyId ${watchResult.historyId}, expires ${watchExpiresAt}`);
       }
     }
 

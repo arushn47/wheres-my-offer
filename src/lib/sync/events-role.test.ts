@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { cleanEventTitle, cleanRoleTitle, extractJobDetails, extractEvents } from './events';
+import { isTrustedPlacementSender } from './engine';
 
 describe('cleanRoleTitle', () => {
   it('cleans role prefixes like "Designation : " or "Job Role : "', () => {
@@ -207,9 +208,7 @@ Company's Registration Link - https://campus.lntedutech.com/...`,
 });
 
 describe('isTrustedPlacementSender', () => {
-  it('strictly restricts allowed placement senders and rejects unauthorized senders', async () => {
-    const { isTrustedPlacementSender } = await import('./engine');
-
+  it('strictly restricts allowed placement senders and rejects unauthorized senders', () => {
     // Personal account: strictly noreply.cdcinfo@vitstudent.ac.in
     expect(isTrustedPlacementSender('noreply.cdcinfo@vitstudent.ac.in', true)).toBe(true);
     expect(isTrustedPlacementSender('CDC Info <noreply.cdcinfo@vitstudent.ac.in>', true)).toBe(true);

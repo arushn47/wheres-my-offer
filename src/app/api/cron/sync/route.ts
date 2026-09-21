@@ -6,6 +6,21 @@ export const dynamic = 'force-dynamic';
 export const maxDuration = 300; // 5 min — handles multi-user sync on Vercel Pro
 
 async function executeBackgroundSync(userIds: string[]) {
+  const supabase = createAdminClient();
+
+  // Renew any Gmail Pub/Sub watch subscriptions expiring within 48 hours.
+  // When Pub/Sub is active, this cron becomes a daily safety net — not the primary sync driver.
+  try {
+    const { renewExpiringWatches } = await import('@/lib/gmail/watch');
+    const { renewed, failed } = await renewExpiringWatches(supabase);
+    if (renewed > 0 || failed > 0) {
+      console.log(`[Cron Sync] Watch renewal: ${renewed} renewed, ${failed} failed`);
+    }
+  } catch (err) {
+    // Non-fatal — sync should continue even if renewal fails
+    console.error('[Cron Sync] Watch renewal error (non-fatal):', err);
+  }
+
   // Shared wall-clock deadline for this entire cron invocation.
   // All runSync calls share this deadline so serial per-user work
   // can't stack and exceed maxDuration when there are multiple users.
@@ -43,6 +58,7 @@ async function executeBackgroundSync(userIds: string[]) {
  * GET /api/cron/sync
  * Scheduled background sync endpoint for Vercel Cron or external cron services (e.g. cron-job.org).
  * Runs sync automatically for all active users even when the web app is closed.
+ * Also renews Gmail Pub/Sub watch subscriptions that are close to expiry (7-day limit).
  */
 export async function GET(req: NextRequest) {
   // Verify secret authorization header or query parameter if configured
