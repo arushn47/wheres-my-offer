@@ -30,7 +30,86 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { getCurrentMessageText } from '@/lib/sync/body';
 import { resolvePlacementDrive } from '@/lib/sync/drive-resolution';
 import { getLiveApplicationScope } from '@/lib/sync/application-scope';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
+
+// ============================================
+// Canonical Email Deduplication (Phase 2C — Shadow Mode)
+// ============================================
+
+/**
+ * Computes a stable content key for a college broadcast email.
+ * Used to deduplicate identical CDC circulars across all users.
+ *
+ * Key = SHA-256(senderEmail.toLowerCase() + "||" + subject.trim() + "||" + body[:500])
+ *
+ * ONLY call for college broadcast senders (vitlions2027@vitbhopal.ac.in).
+ * Personal NeoPAT emails (noreply.cdcinfo) are never canonicalized.
+ */
+export function computeContentKey(senderEmail: string, subject: string, bodySnippet: string): string {
+  const normalizedSender = (senderEmail || '').toLowerCase().trim();
+  const normalizedSubject = (subject || '').trim();
+  const bodyPrefix = (bodySnippet || '').slice(0, 500);
+  return createHash('sha256')
+    .update(`${normalizedSender}||${normalizedSubject}||${bodyPrefix}`)
+    .digest('hex');
+}
+
+/**
+ * Shadow-writes a canonical_emails row for a processed college broadcast email.
+ * Failures are silently logged — this never throws or affects the main pipeline.
+ * In Phase 2D, we will flip to reading canonical_emails before fetching Gmail bodies.
+ */
+async function shadowWriteCanonical(
+  supabase: ReturnType<typeof createAdminClient>,
+  parsedEmail: ParsedEmail,
+  emailId: string,
+  classification: import('@/lib/sync/classifier').ClassificationResult,
+  companyName: string | null,
+  account: GmailAccount
+): Promise<void> {
+  try {
+    const bodyText = parsedEmail.bodyPlain || parsedEmail.bodySnippet || '';
+    const contentKey = computeContentKey(
+      parsedEmail.senderEmail || parsedEmail.sender,
+      parsedEmail.subject,
+      bodyText
+    );
+
+    const canonicalPayload = {
+      content_key: contentKey,
+      sender_email: (parsedEmail.senderEmail || parsedEmail.sender || '').toLowerCase().trim(),
+      subject: parsedEmail.subject,
+      body_snippet: bodyText.slice(0, 50000),
+      classification: classification.classification,
+      classification_confidence: classification.confidence ?? null,
+      parsed_company_name: companyName || null,
+      processing_status: 'complete' as const,
+      updated_at: new Date().toISOString(),
+    };
+
+    const { data: canonical, error: upsertError } = await supabase
+      .from('canonical_emails')
+      .upsert(canonicalPayload, { onConflict: 'content_key', ignoreDuplicates: false })
+      .select('id')
+      .single();
+
+    if (upsertError) {
+      console.warn('[canonical] Shadow upsert failed:', upsertError.message);
+      return;
+    }
+
+    if (canonical?.id) {
+      // Link the per-user emails row to the canonical row
+      await supabase
+        .from('emails')
+        .update({ canonical_email_id: canonical.id })
+        .eq('id', emailId);
+    }
+  } catch (err) {
+    // Shadow writes must never crash the main pipeline
+    console.warn('[canonical] Shadow write error (non-fatal):', err instanceof Error ? err.message : String(err));
+  }
+}
 
 // ============================================
 // Sync Progress Types & Constants
@@ -654,6 +733,22 @@ async function processSingleMessage(
             .update({ is_processed: true, processed_at: new Date().toISOString() })
             .eq('id', insertedEmail.id);
           if (processedError) throw processedError;
+
+          // Phase 2C — Shadow write to canonical_emails for college broadcast emails.
+          // Personal NeoPAT emails (isPersonal) are never canonicalized — they contain
+          // user-specific registration data. Only identical CDC circulars sent to all
+          // students qualify.
+          if (!isPersonal) {
+            // Fire-and-forget: shadow write must never block or throw into the main pipeline
+            shadowWriteCanonical(
+              supabase,
+              parsedEmail,
+              insertedEmail.id,
+              classification,
+              companyName || null,
+              account
+            ).catch(() => {});
+          }
         }
     }
 
