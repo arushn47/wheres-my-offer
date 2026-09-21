@@ -18,7 +18,7 @@ import {
 } from '@/lib/sync/drive-correlator';
 
 export const dynamic = 'force-dynamic';
-export const maxDuration = 120;
+export const maxDuration = 300; // 300s — maximum allowed on Vercel Fluid Compute (Hobby & Pro)
 
 /**
  * Re-indexes all stored emails using the strict 2-tier architecture:
@@ -90,7 +90,13 @@ export async function recalculateApplicationStatuses(
   if (allEmails.length === 0) return { updatedCount: 0, results: [] };
 
 
-  const [{ data: remainingCompanies }, { data: placementDrives }, { data: driveLinks }] = await Promise.all([
+  const [
+    { data: remainingCompanies },
+    { data: placementDrives },
+    { data: driveLinks },
+    { data: allUserApps },
+    { data: allManualEvents },
+  ] = await Promise.all([
     supabase
       .from('companies')
       .select('id, name, aliases')
@@ -102,9 +108,34 @@ export async function recalculateApplicationStatuses(
     supabase
       .from('email_drive_links')
       .select('email_id, placement_drive_id'),
+    supabase
+      .from('applications')
+      .select('id, placement_drive_id, status, manual_override, role, ctc, stipend, location, notes, applied_at, registration_deadline, eligibility, branches, cgpa_requirement, backlog_requirement')
+      .eq('user_id', userId),
+    supabase
+      .from('events')
+      .select('*')
+      .eq('user_id', userId)
+      .eq('manual_override', true),
   ]);
 
   if (!remainingCompanies || remainingCompanies.length === 0) return { updatedCount: 0, results: [] };
+
+  const appsByDriveId = new Map<string, any>();
+  for (const app of (allUserApps || [])) {
+    if (app.placement_drive_id) {
+      appsByDriveId.set(app.placement_drive_id, app);
+    }
+  }
+
+  const manualEventsByDriveId = new Map<string, any[]>();
+  for (const me of (allManualEvents || [])) {
+    if (me.placement_drive_id) {
+      const list = manualEventsByDriveId.get(me.placement_drive_id) || [];
+      list.push(me);
+      manualEventsByDriveId.set(me.placement_drive_id, list);
+    }
+  }
 
   const companyMap = new Map((remainingCompanies || []).map((c) => [c.id, c]));
   const drivesByCompanyId = new Map<string, any[]>();
@@ -211,10 +242,19 @@ export async function recalculateApplicationStatuses(
     );
   };
 
-  for (let dIdx = 0; dIdx < allDrives.length; dIdx++) {
-    const drive = allDrives[dIdx];
-    const comp = companyMap.get(drive.company_id);
-    if (!comp) continue;
+  const DRIVE_BATCH_SIZE = 8;
+  for (let bIdx = 0; bIdx < allDrives.length; bIdx += DRIVE_BATCH_SIZE) {
+    const driveBatch = allDrives.slice(bIdx, bIdx + DRIVE_BATCH_SIZE);
+    onProgress?.({
+      step: 5,
+      totalSteps: 5,
+      message: `Recalculating application stages, CTCs & calendar events (${Math.min(bIdx + DRIVE_BATCH_SIZE, allDrives.length)} / ${allDrives.length})…`,
+    });
+
+    await Promise.all(
+      driveBatch.map(async (drive) => {
+        const comp = companyMap.get(drive.company_id);
+        if (!comp) return;
 
     const driveEmails = [...(emailsByDriveId.get(drive.id) || [])];
 
@@ -276,15 +316,7 @@ export async function recalculateApplicationStatuses(
       }
     }
 
-    if (driveEmails.length === 0) continue;
-
-    if (dIdx % 5 === 0 || dIdx === allDrives.length - 1) {
-      onProgress?.({
-        step: 5,
-        totalSteps: 5,
-        message: `Recalculating application stages, CTCs & calendar events (${dIdx + 1} / ${allDrives.length})…`,
-      });
-    }
+    if (driveEmails.length === 0) return;
 
     const companyEmails = driveEmails;
     const emailIds = new Set(companyEmails.map((e) => e.id));
@@ -885,12 +917,7 @@ export async function recalculateApplicationStatuses(
       computedStatus = 'not_applied';
     }
 
-    const { data: existingApp } = await supabase
-      .from('applications')
-      .select('id, status, manual_override, role, ctc, stipend, location, notes, applied_at, registration_deadline, eligibility, branches, cgpa_requirement, backlog_requirement')
-      .eq('user_id', userId)
-      .eq('placement_drive_id', drive.id)
-      .maybeSingle();
+    const existingApp = appsByDriveId.get(drive.id) || null;
 
     // GUARD: Reprocess only has access to email subjects + body snippets — it cannot
     // re-scan Excel attachments. The live sync (status-engine) CAN scan attachments and
@@ -1061,12 +1088,7 @@ export async function recalculateApplicationStatuses(
       updated_at: new Date().toISOString(),
     }).eq('id', drive.id);
 
-    const { data: manualEvents } = await supabase
-      .from('events')
-      .select('*')
-      .eq('user_id', userId)
-      .eq('placement_drive_id', drive.id)
-      .eq('manual_override', true);
+    const manualEvents = manualEventsByDriveId.get(drive.id) || [];
 
     await supabase
       .from('events')
@@ -1140,6 +1162,7 @@ export async function recalculateApplicationStatuses(
         )
       );
 
+      const eventsToInsert: any[] = [];
       for (const evt of Array.from(latestEventsByType.values())) {
         const normalizedKey =
           evt.eventType === 'coding_test' || evt.eventType === 'online_test'
@@ -1162,7 +1185,7 @@ export async function recalculateApplicationStatuses(
           }
         }
 
-        await supabase.from('events').insert({
+        eventsToInsert.push({
           user_id: userId,
           placement_drive_id: drive.id,
           event_type: evt.eventType,
@@ -1175,6 +1198,10 @@ export async function recalculateApplicationStatuses(
           manual_override: false,
         });
       }
+
+      if (eventsToInsert.length > 0) {
+        await supabase.from('events').insert(eventsToInsert);
+      }
     }
 
     updatedAppsCount++;
@@ -1184,6 +1211,8 @@ export async function recalculateApplicationStatuses(
       role: finalRole,
       ctc: extractedJob.ctc,
     });
+      })
+    );
   }
 
   console.log(`[recalculateApplicationStatuses] User ${userId}: holistic calculation updated ${updatedAppsCount} applications.`);
@@ -1194,6 +1223,7 @@ export async function performReprocess(
   userId: string,
   onProgress?: (p: { step: number; totalSteps: number; message: string }) => void
 ) {
+  const reprocessStartTime = Date.now();
   const supabase = createAdminClient();
 
   onProgress?.({
@@ -1836,12 +1866,16 @@ export async function performReprocess(
     }
   }
 
-  // Scan Excel shortlist attachments for any missing candidate matches
-  try {
-    const { scanAndPersistCandidateMatches } = await import('@/lib/sync/attachment-scanner');
-    await scanAndPersistCandidateMatches(supabase, userId);
-  } catch (scanErr) {
-    console.warn('[performReprocess] Attachment scan non-critical error:', scanErr);
+  // Scan Excel shortlist attachments for any missing candidate matches (if time permits under 3 min)
+  if (Date.now() - reprocessStartTime < 180_000) {
+    try {
+      const { scanAndPersistCandidateMatches } = await import('@/lib/sync/attachment-scanner');
+      await scanAndPersistCandidateMatches(supabase, userId);
+    } catch (scanErr) {
+      console.warn('[performReprocess] Attachment scan non-critical error:', scanErr);
+    }
+  } else {
+    console.log('[performReprocess] Skipping attachment scan to preserve time budget for stage recalculation');
   }
 
   // 6. Phase 4: Recalculate Stage Progression & Events for Official NeoPAT Drives

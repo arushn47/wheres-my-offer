@@ -2,7 +2,7 @@ import { getSession } from '@/lib/auth';
 import { runSync, type SyncProgress } from '@/lib/sync/engine';
 
 export const dynamic = 'force-dynamic';
-export const maxDuration = 60; // 60s — maximum allowed on Vercel Hobby plan (comfortably fits 40s budget)
+export const maxDuration = 300; // 300s — maximum allowed on Vercel Fluid Compute (Hobby & Pro)
 
 /**
  * POST /api/sync

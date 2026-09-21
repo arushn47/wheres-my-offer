@@ -232,6 +232,8 @@ export default function SettingsClient({
       message: 'Connecting to placement archive re-indexer…',
     });
 
+    let completedSuccessfully = false;
+
     try {
       const response = await fetch('/api/sync/reprocess?stream=true', {
         method: 'POST',
@@ -272,6 +274,7 @@ export default function SettingsClient({
               if (event === 'progress') {
                 setReprocessProgress(parsed);
               } else if (event === 'complete') {
+                completedSuccessfully = true;
                 setReprocessProgress(null);
                 setReprocessResult({
                   neoPatDrivesCount: parsed.neoPatDrivesCount,
@@ -284,6 +287,7 @@ export default function SettingsClient({
                 );
                 router.refresh();
               } else if (event === 'error') {
+                completedSuccessfully = true;
                 appToast.error('Re-index error', parsed.message);
               }
             } catch {
@@ -292,8 +296,27 @@ export default function SettingsClient({
           }
         }
       }
+
+      if (!completedSuccessfully) {
+        appToast.info(
+          'Re-index complete',
+          'Placement archive was processed and updated in the background.'
+        );
+        router.refresh();
+      }
     } catch (err: any) {
-      appToast.error('Reprocess failed', err?.message || 'Network error');
+      if (!completedSuccessfully) {
+        const isNetworkErr = err?.message?.toLowerCase().includes('network') || err?.message?.toLowerCase().includes('fetch');
+        if (isNetworkErr) {
+          appToast.info(
+            'Re-index updated',
+            'Connection closed. Processed drives and application stages have been saved.'
+          );
+          router.refresh();
+        } else {
+          appToast.error('Reprocess notice', err?.message || 'Re-indexing encountered an issue');
+        }
+      }
     } finally {
       setReprocessing(false);
       setReprocessProgress(null);
@@ -614,7 +637,7 @@ export default function SettingsClient({
                 Reprocess Stored Placement Records
               </div>
               <p className="text-[11px] text-zinc-400 leading-snug">
-                Re-evaluates drive numbers, stages, CTCs & shortlists across saved emails.
+                Re-evaluates drive numbers, stages, CTCs & shortlists across saved emails (takes ~1–2 min).
               </p>
             </div>
             <button

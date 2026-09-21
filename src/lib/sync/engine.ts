@@ -2079,18 +2079,23 @@ export async function runSync(
       // by processEmailForEventsAndStatus during page processing. Running full recalculation over all 1,500+ emails
       // on incremental syncs is what caused 1m 44s runtimes, lease loss, and hundreds of MBs in egress.
       if (hadCompletedInitialPages) {
-        try {
-          const { scanAndPersistCandidateMatches } = await import('@/lib/sync/attachment-scanner');
-          await scanAndPersistCandidateMatches(supabase, userId);
-        } catch (scanErr) {
-          console.warn('[Post-Sync Attachment Scan] Non-critical error:', scanErr);
-        }
+        const remainingBudgetMs = options?.globalDeadline ? options.globalDeadline - Date.now() : Infinity;
+        if (remainingBudgetMs > 30_000) {
+          try {
+            const { scanAndPersistCandidateMatches } = await import('@/lib/sync/attachment-scanner');
+            await scanAndPersistCandidateMatches(supabase, userId);
+          } catch (scanErr) {
+            console.warn('[Post-Sync Attachment Scan] Non-critical error:', scanErr);
+          }
 
-        try {
-          const { recalculateApplicationStatuses } = await import('@/app/api/sync/reprocess/route');
-          await recalculateApplicationStatuses(userId);
-        } catch (statusRecalcErr) {
-          console.warn('[Post-Sync Status Recalc] Non-critical error:', statusRecalcErr);
+          try {
+            const { recalculateApplicationStatuses } = await import('@/app/api/sync/reprocess/route');
+            await recalculateApplicationStatuses(userId);
+          } catch (statusRecalcErr) {
+            console.warn('[Post-Sync Status Recalc] Non-critical error:', statusRecalcErr);
+          }
+        } else {
+          console.log('[Post-Sync] Skipping heavy post-sync recalculation to respect time budget');
         }
       }
 
