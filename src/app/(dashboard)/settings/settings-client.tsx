@@ -181,7 +181,13 @@ export default function SettingsClient({
         body: JSON.stringify({ neo_id: trimmed || null }),
       });
 
-      if (!res.ok) throw new Error('Failed to save ID');
+      const resData = await res.json().catch(() => null);
+
+      if (!res.ok) {
+        const errorMsg = resData?.error?.message || 'Failed to save Registration ID';
+        appToast.error(res.status === 409 ? 'Registration ID Already In Use' : 'Failed to save Registration ID', errorMsg);
+        return;
+      }
 
       setRegId(trimmed);
       appToast.success(`Registration ID saved: ${trimmed || 'None'}`);
