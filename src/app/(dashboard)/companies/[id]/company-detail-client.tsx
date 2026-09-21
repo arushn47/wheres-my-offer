@@ -252,6 +252,12 @@ export default function CompanyDetailClient({
   const isManual = company.application?.manualOverride ?? false;
 
   const initialDropdownStatus = useMemo(() => {
+    const eff = getEffectiveStage(rawStatus, null, company.events, notesStr, isManual);
+    if (eff.effectiveStatus === 'rejected_interview') return 'rejected_interview';
+    if (eff.effectiveStatus === 'rejected_test') return 'rejected_test';
+    if (eff.effectiveStatus === 'not_shortlisted') return 'not_shortlisted';
+    if (eff.effectiveStatus === 'test_completed') return 'test_completed';
+
     if (rawStatus === 'rejected') {
       // Use the same note patterns that getEffectiveStage uses
       if (/eliminated.*interview|interview.*eliminated|interviewed.*not\s*selected|rejected.*interview/i.test(notesStr)) return 'rejected_interview';
@@ -259,7 +265,7 @@ export default function CompanyDetailClient({
       return 'not_shortlisted';
     }
     return rawStatus;
-  }, [rawStatus, notesStr]);
+  }, [rawStatus, notesStr, company.events, isManual]);
 
   const [status, setStatus] = useState(initialDropdownStatus);
   const [isUpdating, setIsUpdating] = useState(false);
@@ -319,7 +325,12 @@ export default function CompanyDetailClient({
       const res = await fetch(`/api/companies/${company.id}/status`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: patchStatus, notes: patchNotes }),
+        body: JSON.stringify({
+          status: patchStatus,
+          notes: patchNotes,
+          placement_drive_id: company.placementDriveId || undefined,
+          application_id: company.application?.id || undefined,
+        }),
       });
       if (res.ok) {
         setStatus(newStatus);

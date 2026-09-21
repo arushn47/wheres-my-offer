@@ -249,7 +249,7 @@ export default function PrivacyClient() {
                       3. Google Calendar (Optional)
                     </h3>
                     <code className="text-emerald-300 bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 rounded font-mono text-[10px]">
-                      calendar.events
+                      calendar.events.owned
                     </code>
                   </div>
                   <p className="text-xs text-zinc-400 leading-relaxed">

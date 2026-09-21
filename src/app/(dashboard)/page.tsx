@@ -20,6 +20,7 @@ export default async function DashboardPage() {
   // Fetch stats, drives, applications, events, and user context
   const [
     { data: placementDrives },
+    { data: companies },
     { data: applications },
     { data: rawUpcomingEvents },
     { data: accounts },
@@ -28,7 +29,11 @@ export default async function DashboardPage() {
   ] = await Promise.all([
     supabase
       .from('placement_drives')
-      .select('id, company_id, drive_number, drive_name, role, category, ctc, stipend, location, companies(id, name)')
+      .select('id, company_id, drive_number, drive_name, role, category, ctc, stipend, location')
+      .eq('user_id', session.userId),
+    supabase
+      .from('companies')
+      .select('id, name')
       .eq('user_id', session.userId),
     supabase
       .from('applications')
@@ -58,11 +63,13 @@ export default async function DashboardPage() {
 
   const nowIso = new Date().toISOString();
 
+  const companyById = new Map<string, string>((companies || []).map((c: any) => [c.id, c.name]));
   const driveMap = new Map((placementDrives || []).map((d: any) => [d.id, d]));
   const companyNameMap = new Map<string, string>();
   for (const d of (placementDrives || []) as any[]) {
-    if (d.companies?.name) {
-      companyNameMap.set(d.id, d.companies.name);
+    const cName = companyById.get(d.company_id) || (d.companies as any)?.name;
+    if (cName) {
+      companyNameMap.set(d.id, cName);
     }
   }
 
@@ -285,7 +292,7 @@ export default async function DashboardPage() {
     const { effectiveStatus, statusSubtitle } = getEffectiveStage(a.status, latestEvent, compEvents, a.notes, a.manual_override);
     const drive = driveMap.get(a.placement_drive_id);
     const companyId = drive?.company_id || a.placement_drive_id;
-    const companyName = drive?.companies?.name || 'Company';
+    const companyName = companyById.get(companyId) || (drive as any)?.companies?.name || 'Company';
 
     return {
       id: a.id,

@@ -9,6 +9,24 @@ interface SubscribePayload {
   userAgent?: string;
 }
 
+function isValidPushEndpoint(value: string): boolean {
+  if (value.length > 2048) return false;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== 'https:' || url.username || url.password || url.port) return false;
+    const host = url.hostname.toLowerCase();
+    return (
+      host === 'fcm.googleapis.com' ||
+      host.endsWith('.push.services.mozilla.com') ||
+      host === 'web.push.apple.com' ||
+      host.endsWith('.notify.windows.com') ||
+      host.endsWith('.push.apple.com')
+    );
+  } catch {
+    return false;
+  }
+}
+
 /**
  * POST /api/notifications/subscribe
  * Registers or updates a Web Push subscription for the authenticated user.
@@ -22,7 +40,7 @@ export async function POST(req: NextRequest) {
   try {
     const body: SubscribePayload = await req.json();
 
-    if (!body.endpoint || !body.p256dh || !body.auth) {
+    if (!body.endpoint || !body.p256dh || !body.auth || !isValidPushEndpoint(body.endpoint)) {
       return NextResponse.json({ error: 'Missing required subscription keys' }, { status: 400 });
     }
 

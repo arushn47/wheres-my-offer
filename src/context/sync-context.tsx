@@ -348,6 +348,36 @@ export function SyncProvider({
                 startPolling(true);
                 return;
               }
+              if (data.phase === 'pending') {
+                willAdvanceNextChunk = true;
+                if (chainedTimeoutRef.current) clearTimeout(chainedTimeoutRef.current);
+                chainedTimeoutRef.current = setTimeout(() => {
+                  chainedTimeoutRef.current = null;
+                  handleSync(false, true);
+                }, 800);
+                return;
+              }
+              if (data.phase === 'complete') {
+                stopPolling();
+                setIsSyncing(false);
+                isSyncingRef.current = false;
+                setSyncProgress(null);
+                const resultData = {
+                  show: true,
+                  success: true,
+                  message: 'Placement sync complete',
+                  newEmails: data.progress?.newEmails || 0,
+                  newCompanies: data.progress?.newCompanies || 0,
+                };
+                setSyncResult(resultData);
+                appToast.sync(
+                  'Placement sync complete',
+                  `${resultData.newEmails} new updates · ${resultData.newCompanies} companies indexed`
+                );
+                router.refresh();
+                setTimeout(() => setSyncResult(null), 5000);
+                return;
+              }
             }
           } catch {}
           setSyncProgress(null);
@@ -357,6 +387,49 @@ export function SyncProvider({
         if (err instanceof Error && err.name === 'AbortError') {
           return;
         }
+
+        // Before showing a network error toast, check if the server is actively syncing, checkpointed, or completed
+        try {
+          const res = await fetch('/api/sync/status');
+          if (res.ok) {
+            const data = await res.json();
+            if (data.isSyncing) {
+              startPolling(true);
+              return;
+            }
+            if (data.phase === 'pending') {
+              willAdvanceNextChunk = true;
+              if (chainedTimeoutRef.current) clearTimeout(chainedTimeoutRef.current);
+              chainedTimeoutRef.current = setTimeout(() => {
+                chainedTimeoutRef.current = null;
+                handleSync(false, true);
+              }, 800);
+              return;
+            }
+            if (data.phase === 'complete') {
+              stopPolling();
+              setIsSyncing(false);
+              isSyncingRef.current = false;
+              setSyncProgress(null);
+              const resultData = {
+                show: true,
+                success: true,
+                message: 'Placement sync complete',
+                newEmails: data.progress?.newEmails || 0,
+                newCompanies: data.progress?.newCompanies || 0,
+              };
+              setSyncResult(resultData);
+              appToast.sync(
+                'Placement sync complete',
+                `${resultData.newEmails} new updates · ${resultData.newCompanies} companies indexed`
+              );
+              router.refresh();
+              setTimeout(() => setSyncResult(null), 5000);
+              return;
+            }
+          }
+        } catch {}
+
         stopPolling();
         setSyncProgress(null);
         const errorMsg = err instanceof Error ? err.message : 'Sync failed';

@@ -2,12 +2,13 @@ import { type gmail_v1 } from 'googleapis';
 
 export interface HistoryResult {
   messageIds: string[];
+  deletedMessageIds: string[];
   latestHistoryId: string | null;
   historyExpired: boolean;
 }
 
 /**
- * Fetches new message IDs added to the mailbox since `startHistoryId`.
+ * Fetches message IDs whose content or labels changed since `startHistoryId`.
  * If startHistoryId is invalid or expired (404/400), returns historyExpired: true.
  */
 export async function fetchHistoryChanges(
@@ -15,6 +16,7 @@ export async function fetchHistoryChanges(
   startHistoryId: string
 ): Promise<HistoryResult> {
   const messageIds = new Set<string>();
+  const deletedMessageIds = new Set<string>();
   let latestHistoryId = startHistoryId;
   let pageToken: string | undefined;
 
@@ -25,7 +27,7 @@ export async function fetchHistoryChanges(
         startHistoryId,
         maxResults: 100,
         pageToken,
-        historyTypes: ['messageAdded'],
+        historyTypes: ['messageAdded', 'labelAdded', 'labelRemoved', 'messageDeleted'],
       });
 
       if (response.data.historyId) {
@@ -41,6 +43,21 @@ export async function fetchHistoryChanges(
               }
             }
           }
+          if (record.labelsAdded) {
+            for (const item of record.labelsAdded) {
+              if (item.message?.id) messageIds.add(item.message.id);
+            }
+          }
+          if (record.labelsRemoved) {
+            for (const item of record.labelsRemoved) {
+              if (item.message?.id) messageIds.add(item.message.id);
+            }
+          }
+          if (record.messagesDeleted) {
+            for (const item of record.messagesDeleted) {
+              if (item.message?.id) deletedMessageIds.add(item.message.id);
+            }
+          }
         }
       }
 
@@ -49,6 +66,7 @@ export async function fetchHistoryChanges(
 
     return {
       messageIds: Array.from(messageIds),
+      deletedMessageIds: Array.from(deletedMessageIds),
       latestHistoryId,
       historyExpired: false,
     };
@@ -62,6 +80,7 @@ export async function fetchHistoryChanges(
       const profile = await getProfileHistoryId(gmail);
       return {
         messageIds: [],
+        deletedMessageIds: [],
         latestHistoryId: profile,
         historyExpired: true,
       };

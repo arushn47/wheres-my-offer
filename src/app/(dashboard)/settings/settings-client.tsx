@@ -648,7 +648,7 @@ export default function SettingsClient({
                 />
               </div>
               <p className="text-[10px] font-mono text-indigo-300/80">
-                ⚡ Please keep this tab open until re-indexing completes (~30s).
+                ⚡ Please keep this tab open until re-indexing completes (~1 min).
               </p>
             </div>
           )}

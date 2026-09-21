@@ -96,9 +96,12 @@ CREATE TABLE IF NOT EXISTS public.applications (
   user_id UUID NOT NULL,
   placement_drive_id UUID NOT NULL,
   status TEXT NOT NULL DEFAULT 'unknown'::text CHECK (status = ANY (ARRAY[
-    'not_applied'::text, 'applied'::text, 'shortlisted'::text, 'ppt_scheduled'::text,
-    'test_scheduled'::text, 'interview_scheduled'::text, 'selected'::text, 'rejected'::text,
-    'not_shortlisted'::text, 'withdrawn'::text, 'declined'::text, 'offer_received'::text, 'unknown'::text
+    'not_applied'::text, 'applied'::text, 'registration_open'::text, 'ppt_scheduled'::text,
+    'ppt_ongoing'::text, 'ppt_completed'::text, 'shortlisted'::text, 'test_scheduled'::text,
+    'test_ongoing'::text, 'test_completed'::text, 'interview_scheduled'::text, 'interview_ongoing'::text,
+    'interview_completed'::text, 'selected'::text, 'offer'::text, 'offer_received'::text,
+    'rejected'::text, 'not_shortlisted'::text, 'rejected_test'::text, 'rejected_interview'::text,
+    'withdrawn'::text, 'declined'::text, 'unknown'::text
   ])),
   status_source TEXT,
   status_confidence TEXT DEFAULT 'low'::text CHECK (status_confidence = ANY (ARRAY['high'::text, 'medium'::text, 'low'::text, 'ai'::text, 'manual'::text])),

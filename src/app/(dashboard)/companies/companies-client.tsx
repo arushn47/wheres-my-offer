@@ -139,7 +139,7 @@ const matchFilter = (status: string, filter: string, company?: CompanyWithDetail
     // Pre-test screening eliminations only (screened out before tests, did not make initial shortlist)
     const notes = company?.application?.notes || '';
     const isPostShortlistElimination =
-      ['rejected_test', 'rejected_interview', 'test_eliminated', 'interview_eliminated'].includes(s) ||
+      ['rejected', 'rejected_test', 'rejected_interview', 'test_eliminated', 'interview_eliminated'].includes(s) ||
       /eliminated in (test|interview|assessment)/i.test(notes);
     if (isPostShortlistElimination) return false;
     return isEliminatedStatus(s);
@@ -148,7 +148,7 @@ const matchFilter = (status: string, filter: string, company?: CompanyWithDetail
     // Post-shortlist eliminations: candidate cracked shortlist / took test or interview, but eliminated in test or interview round
     const notes = company?.application?.notes || '';
     const isPostShortlistElimination =
-      ['rejected_test', 'rejected_interview', 'test_eliminated', 'interview_eliminated'].includes(s) ||
+      ['rejected', 'rejected_test', 'rejected_interview', 'test_eliminated', 'interview_eliminated'].includes(s) ||
       /eliminated in (test|interview|assessment)/i.test(notes);
     return isPostShortlistElimination;
   }
@@ -547,7 +547,7 @@ export default function CompaniesClient({
               className="w-full min-w-0 max-w-full h-full"
             >
               <Link
-                href={`/companies/${c.id}?${new URLSearchParams(Object.entries({ appId: c.appId || '', driveId: c.driveId || '' }).filter(([_, v]) => v !== '')).toString()}`}
+                href={c.driveId ? `/companies/${c.id}?driveId=${c.driveId}` : `/companies/${c.id}`}
                 className={cn(`group flex flex-col justify-between h-full w-full min-w-0 max-w-full overflow-hidden rounded-xl border border-zinc-800 bg-bg-surface p-3.5 sm:p-4 text-left transition-colors duration-200 hover:border-zinc-600 ${status === 'selected' || status === 'offer'
                   ? 'border-emerald-500/30 shadow-[0_0_40px_rgba(16,185,129,0.08)]'
                   : ''
@@ -696,6 +696,8 @@ export default function CompaniesClient({
                       status={rawStatus}
                       latestEvent={nextEv}
                       events={c.events}
+                      notes={c.application?.notes}
+                      manualOverride={c.application?.manual_override}
                       compact
                     />
                   </div>

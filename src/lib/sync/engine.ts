@@ -30,12 +30,13 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { getCurrentMessageText } from '@/lib/sync/body';
 import { resolvePlacementDrive } from '@/lib/sync/drive-resolution';
 import { getLiveApplicationScope } from '@/lib/sync/application-scope';
+import { randomUUID } from 'node:crypto';
 
 // ============================================
 // Sync Progress Types & Constants
 // ============================================
 
-export const PAGE_SIZE = 150;
+export const PAGE_SIZE = 50;
 
 /**
  * Total wall-clock budget for a background cron invocation.
@@ -107,7 +108,7 @@ export interface SyncResult {
   }[];
 }
 
-// Known NeoPAT/CDC senders that always pass (no keyword check needed)
+// Authorized NeoPAT & Placement circular senders
 export const TRUSTED_PLACEMENT_SENDERS = [
   'noreply.cdcinfo@vitstudent.ac.in',
   'vitlions2027@vitbhopal.ac.in',
@@ -117,18 +118,24 @@ export const TRUSTED_PLACEMENT_SENDERS = [
 export const BLOCKED_SENDERS = /noreply-accounts@google|no-reply@accounts\.google|noreply@github|notifications@github|@linkedin\.com|@facebookmail|@discord|@slack|noreply@medium|noreply@.*\.zoom\.us|security-noreply|account-security|password.*reset|verify.*email|do-not-reply@|mailer-daemon/i;
 
 /**
- * Returns true if the sender should bypass the `isPlacementRelevant` keyword filter.
- *
- * Personal accounts: only exact known CDC/NeoPAT addresses bypass the keyword gate.
- * Domain-wide @vitstudent.ac.in trust is intentionally removed — if the domain hosts
- * IT helpdesk, library notices, or other non-placement traffic, those would otherwise
- * get silently classified as placement-relevant. Unknown senders on the domain still
- * fall through to the isPlacementRelevant keyword check in the caller.
- *
- * College accounts: use the same explicit allowlist (no change).
+ * Strictly verifies whether an incoming email is from an authorized placement sender.
+ * - Personal accounts: STRICTLY noreply.cdcinfo@vitstudent.ac.in (master drive notifications).
+ * - College accounts: STRICTLY vitlions2027@vitbhopal.ac.in (2027 batch group) OR noreply.cdcinfo@vitstudent.ac.in.
+ * Any other sender is completely ignored and dropped in under a millisecond.
  */
+export const isTrustedPlacementSender = (senderEmail: string, isPersonal: boolean): boolean => {
+  const clean = (senderEmail || '').toLowerCase().trim();
+  if (isPersonal) {
+    return clean.includes('noreply.cdcinfo@vitstudent.ac.in');
+  }
+  return (
+    clean.includes('vitlions2027@vitbhopal.ac.in') ||
+    clean.includes('noreply.cdcinfo@vitstudent.ac.in')
+  );
+};
+
 export const isTrustedSender = (senderEmail: string, isPersonal: boolean) =>
-  TRUSTED_PLACEMENT_SENDERS.includes(senderEmail.toLowerCase());
+  isTrustedPlacementSender(senderEmail, isPersonal);
 
 // Retry a Gmail API call with exponential backoff on quota/rate-limit errors
 export async function withQuotaBackoff<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T> {
@@ -231,6 +238,7 @@ interface SingleMessageResult {
   newCompanies: number;
   skippedDuplicates: number;
   errors: string[];
+  retryable: boolean;
 }
 
 export interface TargetedMessageRequest {
@@ -276,6 +284,7 @@ async function processSingleMessage(
     totalMessages: number;
     onProgress?: (progress: SyncProgress) => void;
     liveTracker: LiveSyncTracker;
+    prefetchedEmail?: ParsedEmail;
   }
 ): Promise<SingleMessageResult> {
   const result: SingleMessageResult = {
@@ -284,6 +293,7 @@ async function processSingleMessage(
     newCompanies: 0,
     skippedDuplicates: 0,
     errors: [],
+    retryable: false,
   };
 
   const { supabase, userId, account, gmail, fetchMessageMetadata, isPersonal, existingInDb, deps } = ctx;
@@ -297,41 +307,36 @@ async function processSingleMessage(
 
   try {
     const t0 = Date.now();
+    let t1 = t0;
 
-    // Stage 1: Cheap metadata inspection
-    let shouldFetchFull = true;
-    const metadata = await withQuotaBackoff(() => fetchMessageMetadata(gmail, msgId));
-    const t1 = Date.now();
-    const subj = metadata.subject.toLowerCase();
-    const snippet = metadata.snippet.toLowerCase();
-    const senderLower = metadata.senderEmail.toLowerCase();
+    let parsedEmail: ParsedEmail;
+    if (ctx.prefetchedEmail) {
+      parsedEmail = ctx.prefetchedEmail;
+    } else {
+      // Stage 1: Cheap metadata inspection
+      let shouldFetchFull = true;
+      const metadata = await withQuotaBackoff(() => fetchMessageMetadata(gmail, msgId));
+      t1 = Date.now();
+      const subj = metadata.subject.toLowerCase();
+      const snippet = metadata.snippet.toLowerCase();
+      const senderLower = metadata.senderEmail.toLowerCase();
 
-    // A. Always block known non-placement senders
-    if (BLOCKED_SENDERS.test(senderLower)) {
-      shouldFetchFull = false;
-    }
-    // B. Always allow trusted CDC/NeoPAT senders
-    else if (isTrustedSender(senderLower, isPersonal)) {
-      shouldFetchFull = true;
-    }
-    // C. For all other senders, require placement keywords in subject
-    else {
-      const isPlacementRelevant =
-        /shortlist|selection|online\s+test|coding\s+test|assessment|interview|ppt|pre-placement|super\s+dream|dream\s+core|registration|internship|placement\s+drive|campus\s+drive|hiring|cdc\s+info|candidate\s+information|offer|joining|onboarding/i.test(
-          `${subj}\n${snippet}`
-        );
-      if (!isPlacementRelevant) {
+      // STRICT SENDER ENFORCEMENT:
+      // Personal: ONLY noreply.cdcinfo@vitstudent.ac.in
+      // College: ONLY vitlions2027@vitbhopal.ac.in (+ noreply.cdcinfo@vitstudent.ac.in)
+      // Discard all other senders immediately (<1ms) without downloading full body
+      if (!isTrustedPlacementSender(senderLower, isPersonal) || BLOCKED_SENDERS.test(senderLower)) {
         shouldFetchFull = false;
       }
-    }
 
-    if (!shouldFetchFull) {
-      ctx.liveTracker.processedMessages++;
-      return result;
-    }
+      if (!shouldFetchFull) {
+        ctx.liveTracker.processedMessages++;
+        return result;
+      }
 
-    // Stage 2: Full message detail & attachments
-    const parsedEmail = await withQuotaBackoff(() => fetchMessageDetail(gmail, msgId));
+      // Stage 2: Full message detail & attachments
+      parsedEmail = await withQuotaBackoff(() => fetchMessageDetail(gmail, msgId));
+    }
     const t2 = Date.now();
 
     ctx.onProgress?.({
@@ -488,7 +493,8 @@ async function processSingleMessage(
         const { count } = await supabase
           .from('emails')
           .select('id', { count: 'exact', head: true })
-          .eq('company_id', companyId);
+          .eq('user_id', userId)
+          .eq('placement_drive_id', placementDriveId);
 
         if (count === 0) {
           result.newCompanies++;
@@ -531,10 +537,15 @@ async function processSingleMessage(
             backlog_requirement: driveMetadata.backlogRequirement || null,
           };
           
-          await supabase.from('applications').insert({
-            ...baseApp,
-            placement_drive_id: applicationScope.placementDriveId,
-          });
+            const { error: applicationInsertError } = await supabase
+              .from('applications')
+              .insert({
+                ...baseApp,
+                placement_drive_id: applicationScope.placementDriveId,
+              });
+            if (applicationInsertError && applicationInsertError.code !== '23505') {
+              throw applicationInsertError;
+            }
         }
       }
     }
@@ -555,33 +566,34 @@ async function processSingleMessage(
           !isPersonal && isTrustedSender(parsedEmail.senderEmail || parsedEmail.sender, isPersonal) ? 50000 : 10000
         ),
         classification: classification.classification,
-        is_processed: true,
+        is_processed: false,
         is_relevant: classification.classification !== 'irrelevant',
-        processed_at: new Date().toISOString(),
+        processed_at: null,
         placement_drive_id: placementDriveId,
         assignment_state: driveAssignmentState,
         assignment_confidence: driveAssignmentConfidence,
         assignment_source: driveAssignmentSource,
       };
-    const emailWrite = ctx.existingEmailId === msgId
+    const emailWrite = ctx.existingEmailId
       ? await supabase.from('emails').update(emailPayload).eq('id', ctx.existingEmailId).select('id').single()
       : await supabase.from('emails').insert(emailPayload).select('id').single();
     const insertedEmail = emailWrite.data;
     const insertError = emailWrite.error;
 
-    if (insertError) {
-      if (insertError.code === '23505') {
-        result.skippedDuplicates++;
-        ctx.liveTracker.skippedDuplicates++;
-      } else {
-        result.errors.push(insertError.message);
-      }
+      if (insertError) {
+        if (insertError.code === '23505') {
+          result.skippedDuplicates++;
+          ctx.liveTracker.skippedDuplicates++;
+        } else {
+          result.errors.push(insertError.message);
+          result.retryable = true;
+        }
     } else {
       result.newEmails++;
       ctx.liveTracker.newEmails++;
 
       // Stage 5: Status engine (with hard 8s timeout — prevents AI retry loops from stalling a page)
-      if (companyId && insertedEmail && applicationScope?.kind === 'drive') {
+        if (companyId && insertedEmail && applicationScope?.kind === 'drive') {
         if (placementDriveId) {
           await supabase.from('email_drive_links').upsert({
             user_id: userId,
@@ -631,17 +643,18 @@ async function processSingleMessage(
         deps.companyLocks.set(operationLockKey, nextLock);
 
         // The current message awaits the race (with timeout)
-        await existingLock.then(runStatusEngine).catch(statusErr => {
-          const errMsg = statusErr instanceof Error ? statusErr.message : String(statusErr);
-          if (errMsg === 'ai_timeout') {
-            console.warn(`[processSingleMessage] Status engine timed out for msg ${msgId} ("${parsedEmail.subject.slice(0, 60)}") — skipped to protect sync budget.`);
-          } else {
-            console.error(`[processSingleMessage] Status engine error for msg ${msgId}:`, statusErr);
-          }
-        });
-      } else if (insertedEmail) {
-        console.info(`[processSingleMessage] Stored ${driveAssignmentState} email ${msgId} without operational mutation.`);
-      }
+          await existingLock.then(runStatusEngine);
+        } else if (insertedEmail) {
+          console.info(`[processSingleMessage] Stored ${driveAssignmentState} email ${msgId} without operational mutation.`);
+        }
+
+        if (insertedEmail) {
+          const { error: processedError } = await supabase
+            .from('emails')
+            .update({ is_processed: true, processed_at: new Date().toISOString() })
+            .eq('id', insertedEmail.id);
+          if (processedError) throw processedError;
+        }
     }
 
     const t5 = Date.now();
@@ -658,6 +671,7 @@ async function processSingleMessage(
     if (!isQuota) {
       result.errors.push(errMsg);
     }
+    result.retryable = true;
   }
 
   return result;
@@ -745,6 +759,7 @@ export async function processAllowlistedExistingMessages(params: {
 export async function processPage(
   supabase: ReturnType<typeof createAdminClient>,
   userId: string,
+  runId: string,
   account: GmailAccount,
   page: SyncPageRow,
   timeBudgetMs: number,
@@ -761,11 +776,20 @@ export async function processPage(
   globalDeadline?: number,
   totalPagesCount?: number
 ): Promise<ProcessPageResult> {
-  // Mark page in_progress
-  await supabase
-    .from('sync_pages')
-    .update({ status: 'in_progress', updated_at: new Date().toISOString() })
-    .eq('id', page.id);
+  const updateCheckpoint = async (nextOffset: number, status?: SyncPageRow['status']) => {
+    const { data, error } = await supabase.rpc('update_sync_page_checkpoint', {
+      p_user_id: userId,
+      p_run_id: runId,
+      p_page_id: page.id,
+      p_next_offset: nextOffset,
+      p_status: status || null,
+    });
+    if (error || data !== true) {
+      throw new Error(error?.message || 'Sync lease no longer owns page checkpoint');
+    }
+  };
+
+  await updateCheckpoint(page.next_offset || 0, 'in_progress');
 
   // Messages are already chronologically sorted (oldest-to-newest) in planSyncPages
   const chronoSortedMsgIds = [...page.message_ids];
@@ -774,7 +798,7 @@ export async function processPage(
 
   const isPersonal = account.account_type === 'personal';
   const isAccountInitialSync = !account.last_history_id;
-  const BATCH_SIZE = 5;
+  const BATCH_SIZE = 8;
   const INTER_BATCH_DELAY_MS = 0;
 
   const { gmail } = await createGmailClient(account);
@@ -783,11 +807,20 @@ export async function processPage(
   // Pre-check: IDs in this page already in emails table
   const { data: existingRows } = await supabase
     .from('emails')
-    .select('gmail_message_id')
+    .select('id, gmail_message_id, is_processed')
     .eq('gmail_account_id', account.id)
     .in('gmail_message_id', chronoSortedMsgIds);
 
-  const existingInDb = new Set((existingRows || []).map((r) => r.gmail_message_id));
+  const existingInDb = new Set(
+    (existingRows || [])
+      .filter((r) => r.is_processed)
+      .map((r) => r.gmail_message_id)
+  );
+  const existingEmailIds = new Map(
+    (existingRows || [])
+      .filter((r) => !r.is_processed)
+      .map((r) => [r.gmail_message_id, r.id])
+  );
 
   let emailsProcessedCount = 0;
   let newEmailsCount = 0;
@@ -810,14 +843,7 @@ export async function processPage(
     // Check if time budget or global deadline exceeded before processing next batch
     if ((elapsed >= timeBudgetMs || isDeadlineReached) && i > startIndex) {
       console.log(`[processPage] Time budget/deadline reached for page ${page.page_index} at offset ${i}/${chronoSortedMsgIds.length}. Pausing page.`);
-      await supabase
-        .from('sync_pages')
-        .update({
-          next_offset: i,
-          status: 'pending',
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', page.id);
+      await updateCheckpoint(i, 'pending');
 
       return {
         completed: false,
@@ -830,10 +856,63 @@ export async function processPage(
     }
 
     const batch = chronoSortedMsgIds.slice(i, i + BATCH_SIZE);
-    currentIndex += batch.length;
+
+    // Concurrently prefetch metadata and (if placement-relevant) full detail for the entire batch
+    const prefetchResults = await Promise.allSettled(
+      batch.map(async (msgId) => {
+        if (existingInDb.has(msgId) && !existingEmailIds.get(msgId)) {
+          return { msgId, isSkippedDup: true, parsedEmail: null };
+        }
+
+        const metadata = await withQuotaBackoff(() => fetchMessageMetadata(gmail, msgId));
+        const subj = (metadata.subject || '').toLowerCase();
+        const snippet = (metadata.snippet || '').toLowerCase();
+        const senderLower = (metadata.senderEmail || '').toLowerCase();
+
+        let shouldFetchFull = true;
+        // STRICT SENDER ENFORCEMENT:
+        if (!isTrustedPlacementSender(senderLower, isPersonal) || BLOCKED_SENDERS.test(senderLower)) {
+          shouldFetchFull = false;
+        }
+
+        if (!shouldFetchFull) {
+          return { msgId, isSkippedDup: false, parsedEmail: null };
+        }
+
+        const parsedEmail = await withQuotaBackoff(() => fetchMessageDetail(gmail, msgId));
+        return { msgId, isSkippedDup: false, parsedEmail };
+      })
+    );
 
     // Process batch sequentially to ensure deterministic causal order and eliminate concurrency races
-    for (const msgId of batch) {
+    for (let batchOffset = 0; batchOffset < batch.length; batchOffset++) {
+      const msgId = batch[batchOffset];
+      const settled = prefetchResults[batchOffset];
+
+      if (settled.status === 'rejected') {
+        const errMsg = settled.reason instanceof Error ? settled.reason.message : String(settled.reason);
+        const isQuota = /quota exceeded|rate.?limit|units.?per.?minute/i.test(errMsg);
+        if (!isQuota) {
+          errorsList.push(errMsg);
+        }
+        break;
+      }
+
+      const item = settled.value;
+      if (item.isSkippedDup) {
+        skippedDuplicatesCount++;
+        liveTracker.skippedDuplicates++;
+        liveTracker.processedMessages++;
+        currentIndex = i + batchOffset + 1;
+        continue;
+      }
+
+      if (!item.parsedEmail) {
+        liveTracker.processedMessages++;
+        currentIndex = i + batchOffset + 1;
+        continue;
+      }
+
       try {
         const singleResult = await processSingleMessage(msgId, {
           supabase,
@@ -844,12 +923,14 @@ export async function processPage(
           isPersonal,
           isAccountInitialSync,
           existingInDb,
+          existingEmailId: existingEmailIds.get(msgId),
           deps,
           pageIndex: page.page_index,
           totalPagesCount,
           totalMessages: chronoSortedMsgIds.length,
           onProgress,
           liveTracker,
+          prefetchedEmail: item.parsedEmail,
         });
 
         emailsProcessedCount += singleResult.emailsProcessed;
@@ -857,12 +938,17 @@ export async function processPage(
         newCompaniesCount += singleResult.newCompanies;
         skippedDuplicatesCount += singleResult.skippedDuplicates;
         errorsList.push(...singleResult.errors);
+        if (singleResult.retryable) {
+          break;
+        }
+        currentIndex = i + batchOffset + 1;
       } catch (singleErr) {
         const errMsg = singleErr instanceof Error ? singleErr.message : String(singleErr);
         const isQuota = /quota exceeded|rate.?limit|units.?per.?minute/i.test(errMsg);
         if (!isQuota) {
           errorsList.push(errMsg);
         }
+        break;
       }
     }
 
@@ -882,13 +968,7 @@ export async function processPage(
     });
 
     // Persist checkpoint after each batch to survive sudden shutdowns
-    await supabase
-      .from('sync_pages')
-      .update({
-        next_offset: currentIndex,
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', page.id);
+    await updateCheckpoint(currentIndex);
 
     if (INTER_BATCH_DELAY_MS > 0 && i + BATCH_SIZE < chronoSortedMsgIds.length) {
       await new Promise((r) => setTimeout(r, INTER_BATCH_DELAY_MS));
@@ -896,14 +976,7 @@ export async function processPage(
   }
 
   // Page exhausted! Mark complete
-  await supabase
-    .from('sync_pages')
-    .update({
-      next_offset: chronoSortedMsgIds.length,
-      status: 'complete',
-      updated_at: new Date().toISOString(),
-    })
-    .eq('id', page.id);
+  await updateCheckpoint(chronoSortedMsgIds.length, 'complete');
 
   return {
     completed: true,
@@ -987,9 +1060,18 @@ export async function runSync(
     );
   }
 
-  // 0. Concurrency Guard: In-memory lock (protects within same process)
-  if (activeSyncLocks.has(userId)) {
-    console.log(`[Sync Engine] In-memory sync lock active for user ${userId}. Gracefully skipping concurrent request.`);
+  const runId = randomUUID();
+  const { data: rpcAcquired, error: leaseError } = await supabase.rpc('acquire_sync_lease', {
+    p_user_id: userId,
+    p_run_id: runId,
+    p_lease_seconds: 120,
+  });
+
+  if (leaseError) {
+    throw new Error(`Failed to acquire sync lease: ${leaseError.message}`);
+  }
+
+  if (rpcAcquired !== true) {
     return {
       totalEmailsFetched: 0,
       totalEmailsProcessed: 0,
@@ -1002,39 +1084,6 @@ export async function runSync(
     };
   }
 
-  // Check Supabase sync_state table (protects across processes & external 15-min cron)
-  try {
-    const { data: dbLock } = await supabase
-      .from('sync_state')
-      .select('is_syncing, updated_at, phase')
-      .eq('user_id', userId)
-      .single();
-
-    if (dbLock?.is_syncing) {
-      const lastUpdated = new Date(dbLock.updated_at || 0).getTime();
-      // Active syncs touch updated_at every <= 15s. If untouched for > 90s, the process was killed/interrupted
-      const isStale = Date.now() - lastUpdated > 90 * 1000;
-      if (!isStale) {
-        console.log(`[Sync Engine] User ${userId} sync is already active in database (phase: ${dbLock.phase}, updated: ${dbLock.updated_at}). Gracefully skipping concurrent invocation.`);
-        return {
-          totalEmailsFetched: 0,
-          totalEmailsProcessed: 0,
-          newEmails: 0,
-          newCompanies: 0,
-          skippedDuplicates: 0,
-          errors: [],
-          alreadyRunning: true,
-          accounts: [],
-        };
-      } else {
-        console.warn(`[Sync Engine] Stale sync lock found for user ${userId} (>90s untouched, likely cloud timeout/restart). Overriding lock.`);
-      }
-    }
-  } catch {
-    // If sync_state table not yet created in Supabase, proceed with in-memory lock
-  }
-
-  // Acquire active lock
   activeSyncLocks.add(userId);
 
   // Global wall-clock deadline for this entire invocation
@@ -1079,6 +1128,7 @@ export async function runSync(
 
   let lastDbWriteTime = 0;
   let dbWriteChain: Promise<void> = Promise.resolve();
+  let leaseLost = false;
   const persistProgressToDb = (p: SyncProgress, force = false) => {
     activeSyncMap.set(userId, p);
     const now = Date.now();
@@ -1087,33 +1137,42 @@ export async function runSync(
     lastDbWriteTime = now;
     dbWriteChain = dbWriteChain.then(async () => {
       try {
-        await supabase.from('sync_state').upsert({
-          user_id: userId,
-          is_syncing: p.phase !== 'complete' && p.phase !== 'error',
-          phase: p.phase,
-          account_email: p.accountEmail,
-          account_type: p.accountType,
-          total_messages: p.totalMessages,
-          processed_messages: p.processedMessages,
-          new_emails: p.newEmails,
-          new_companies: p.newCompanies,
-          skipped_duplicates: p.skippedDuplicates,
-          current_subject: p.currentSubject || null,
-          is_initial_sync: isInitialSync,
-          current_page_index: p.currentPageIndex ?? 0,
-          total_pages: p.totalPagesCount ?? 1,
-          updated_at: new Date().toISOString(),
-          completed_at: p.phase === 'complete' ? new Date().toISOString() : null,
-          last_error: p.errors.length > 0 ? p.errors[p.errors.length - 1] : null,
+        const { data, error } = await supabase.rpc('update_sync_lease', {
+          p_user_id: userId,
+          p_run_id: runId,
+          p_lease_seconds: 120,
+          p_progress: {
+            phase: p.phase,
+            accountEmail: p.accountEmail,
+            accountType: p.accountType,
+            totalMessages: p.totalMessages,
+            processedMessages: p.processedMessages,
+            newEmails: p.newEmails,
+            newCompanies: p.newCompanies,
+            skippedDuplicates: p.skippedDuplicates,
+            currentSubject: p.currentSubject || null,
+            isInitialSync,
+            currentPageIndex: p.currentPageIndex ?? 0,
+            totalPagesCount: p.totalPagesCount ?? 1,
+            lastError: p.errors.length > 0 ? p.errors[p.errors.length - 1] : null,
+          },
         });
-      } catch {
-        // Gracefully ignore if sync_state table not yet created
+        if (error || data !== true) {
+          leaseLost = true;
+          throw new Error(error?.message || 'Sync lease is no longer owned');
+        }
+      } catch (error) {
+        if (error instanceof Error && error.message.includes('lease')) {
+          leaseLost = true;
+          console.error(`[Sync Engine] Sync lease lost for ${userId}:`, error.message);
+        }
       }
     });
     return dbWriteChain;
   };
 
   const notifyProgress = (p: SyncProgress, forceDb = false) => {
+    if (leaseLost) throw new Error('Sync lease lost; stopping this run');
     latestProgress = p;
     p.isInitialSync = isInitialSync;
     onProgress?.(p);
@@ -1121,6 +1180,11 @@ export async function runSync(
   };
 
   notifyProgress(latestProgress, true);
+  const heartbeatTimer = setInterval(() => {
+    persistProgressToDb(latestProgress, true).catch((error) => {
+      console.error(`[Sync Engine] Lease heartbeat failed for ${userId}:`, error);
+    });
+  }, 30_000);
 
   try {
     // Lazy caches for drive resolutions and circular catalog
@@ -1158,6 +1222,7 @@ export async function runSync(
 
     // 2. Process each account using count-based, resumable pages
     for (const account of sortedAccounts) {
+      if (leaseLost) throw new Error('Sync lease lost; stopping this run');
       if (Date.now() >= globalDeadline - 4000) {
         console.log(`[SyncEngine] Budget nearing expiry for user ${userId}. Pausing before account ${account.email}.`);
         break;
@@ -1219,16 +1284,28 @@ export async function runSync(
 
           if (account.account_type === 'personal') {
             // Personal account: master records for NeoPAT companies and registrations.
-            // There are only ~270 emails across the entire season (~200ms to fetch IDs).
-            // Always query all messages from 2026/07/01 so in-memory deduplication catches
-            // any missed emails from previous interruptions or history gaps.
-            const query = getPlacementSearchQuery('personal');
-            messageIds = await fetchMessageIds(gmail, query, 2500, onFetchBatch);
-            nextHistoryId = await getProfileHistoryId(gmail);
+            // Use history API if available to achieve zero-egress idle syncs (<200ms).
+            if (account.last_history_id) {
+              const historyResult = await fetchHistoryChanges(gmail, account.last_history_id);
+              if (!historyResult.historyExpired) {
+                const deletedIds = new Set(historyResult.deletedMessageIds);
+                messageIds = historyResult.messageIds.filter((id) => !deletedIds.has(id));
+                nextHistoryId = historyResult.latestHistoryId;
+              } else {
+                const query = getPlacementSearchQuery('personal');
+                messageIds = await fetchMessageIds(gmail, query, 2500, onFetchBatch);
+                nextHistoryId = historyResult.latestHistoryId || (await getProfileHistoryId(gmail));
+              }
+            } else {
+              const query = getPlacementSearchQuery('personal');
+              messageIds = await fetchMessageIds(gmail, query, 2500, onFetchBatch);
+              nextHistoryId = await getProfileHistoryId(gmail);
+            }
           } else if (account.last_history_id) {
             const historyResult = await fetchHistoryChanges(gmail, account.last_history_id);
             if (!historyResult.historyExpired) {
-              messageIds = historyResult.messageIds;
+              const deletedIds = new Set(historyResult.deletedMessageIds);
+              messageIds = historyResult.messageIds.filter((id) => !deletedIds.has(id));
               nextHistoryId = historyResult.latestHistoryId;
             } else {
               const afterDate = account.last_sync_at ? new Date(account.last_sync_at) : undefined;
@@ -1264,16 +1341,24 @@ export async function runSync(
             if (messageIds.length <= 500) {
               const { data: existingRows } = await supabase
                 .from('emails')
-                .select('gmail_message_id')
+                .select('gmail_message_id, is_processed')
                 .eq('gmail_account_id', account.id)
                 .in('gmail_message_id', messageIds);
-              existingSet = new Set((existingRows || []).map((r) => r.gmail_message_id));
+              existingSet = new Set(
+                (existingRows || [])
+                  .filter((r) => r.is_processed)
+                  .map((r) => r.gmail_message_id)
+              );
             } else {
               const { data: existingRows } = await supabase
                 .from('emails')
-                .select('gmail_message_id')
+                .select('gmail_message_id, is_processed')
                 .eq('gmail_account_id', account.id);
-              existingSet = new Set((existingRows || []).map((r) => r.gmail_message_id));
+              existingSet = new Set(
+                (existingRows || [])
+                  .filter((r) => r.is_processed)
+                  .map((r) => r.gmail_message_id)
+              );
             }
 
             newMsgIds = messageIds.filter((id) => !existingSet.has(id));
@@ -1319,6 +1404,7 @@ export async function runSync(
             let remainingPages = [...pendingPages].sort((a, b) => a.page_index - b.page_index);
 
             for (const targetPage of remainingPages) {
+              if (leaseLost) throw new Error('Sync lease lost; stopping this run');
               if (Date.now() >= globalDeadline) {
                 console.log(`[Cron Sync] Global deadline reached for account ${account.email}. Stopping page loop.`);
                 break;
@@ -1338,6 +1424,7 @@ export async function runSync(
               const pageRes = await processPage(
                 supabase,
                 userId,
+                runId,
                 account,
                 targetPage,
                 budgetForThisPage,
@@ -1409,6 +1496,7 @@ export async function runSync(
             let remainingPages = [...pendingPages].sort((a, b) => a.page_index - b.page_index);
 
             for (const targetPage of remainingPages) {
+              if (leaseLost) throw new Error('Sync lease lost; stopping this run');
               if (Date.now() >= globalDeadline - 4000) {
                 console.log(`[Manual Sync] Time budget nearing limit for ${account.email}. Pausing page loop.`);
                 break;
@@ -1428,6 +1516,7 @@ export async function runSync(
               const pageRes = await processPage(
                 supabase,
                 userId,
+                runId,
                 account,
                 targetPage,
                 budgetForThisPage,
@@ -1529,9 +1618,11 @@ export async function runSync(
       try {
         const { data: unlinkedEmails } = await supabase
           .from('emails')
-          .select('id, thread_id, subject, sender, received_at, body_snippet')
+          .select('id, thread_id, subject, sender, received_at, body_snippet, placement_drive_id')
           .eq('user_id', userId)
-          .is('company_id', null);
+          .is('placement_drive_id', null)
+          .order('received_at', { ascending: false })
+          .limit(30);
 
         if (unlinkedEmails && unlinkedEmails.length > 0) {
           const { data: allUserComps } = await supabase
@@ -1544,16 +1635,17 @@ export async function runSync(
             // Directionality guard: Only inherit if a thread has EXACTLY ONE unique company_id
             const { data: threadLinkedEmails } = await supabase
               .from('emails')
-              .select('thread_id, placement_drive_id')
+              .select('thread_id, placement_drive_id, placement_drives!inner(company_id)')
               .eq('user_id', userId)
               .not('thread_id', 'is', null)
               .not('placement_drive_id', 'is', null);
 
             const threadDriveMap = new Map<string, Set<string>>();
             for (const te of threadLinkedEmails || []) {
-              if (te.thread_id && te.placement_drive_id) {
+              const companyId = (te.placement_drives as { company_id?: string } | null)?.company_id;
+              if (te.thread_id && companyId) {
                 const set = threadDriveMap.get(te.thread_id) || new Set<string>();
-                set.add(te.placement_drive_id);
+                set.add(companyId);
                 threadDriveMap.set(te.thread_id, set);
               }
             }
@@ -1640,10 +1732,10 @@ export async function runSync(
                   // Ambiguous! Disambiguate using drive number if present
                   if (unlinkedDrive) {
                     for (const cand of matchedList) {
-                      const { data: candEmails } = await supabase
-                        .from('emails')
-                        .select('body_snippet')
-                        .eq('company_id', cand.id)
+                        const { data: candEmails } = await supabase
+                          .from('emails')
+                          .select('body_snippet, placement_drives!inner(company_id)')
+                          .eq('placement_drives.company_id', cand.id)
                         .not('body_snippet', 'is', null)
                         .ilike('body_snippet', '%pat-PL-%')
                         .limit(5);
@@ -1663,8 +1755,8 @@ export async function runSync(
                     // Check existing emails for candidate company
                     const { data: cEmails } = await supabase
                       .from('emails')
-                      .select('body_snippet')
-                      .eq('company_id', matched.id)
+                      .select('body_snippet, placement_drives!inner(company_id)')
+                      .eq('placement_drives.company_id', matched.id)
                       .not('body_snippet', 'is', null)
                       .ilike('body_snippet', '%pat-PL-%')
                       .limit(5);
@@ -1720,10 +1812,10 @@ export async function runSync(
                   // require the unlinked email to share that drive number OR pass a strict
                   // normalized-key name match. Prevents stale timing-only re-associations
                   // after a company's identity is already well-anchored.
-                  const { data: existingCompEmails } = await supabase
-                    .from('emails')
-                    .select('body_snippet')
-                    .eq('company_id', candidateCompanyId)
+                    const { data: existingCompEmails } = await supabase
+                      .from('emails')
+                      .select('body_snippet, placement_drives!inner(company_id)')
+                      .eq('placement_drives.company_id', candidateCompanyId)
                     .not('body_snippet', 'is', null)
                     .limit(5);
 
@@ -1754,10 +1846,28 @@ export async function runSync(
               }
 
               if (matchedCompanyId) {
+                const { data: matchedDrive } = await supabase
+                  .from('placement_drives')
+                  .select('id')
+                  .eq('user_id', userId)
+                  .eq('company_id', matchedCompanyId)
+                  .order('created_at', { ascending: false })
+                  .limit(1)
+                  .maybeSingle();
+                if (!matchedDrive) continue;
+
                 await supabase
                   .from('emails')
-                  .update({ company_id: matchedCompanyId, is_relevant: true })
-                  .eq('id', email.id);
+                  .update({
+                    placement_drive_id: matchedDrive.id,
+                    assignment_state: 'assigned',
+                    assignment_confidence: 'medium',
+                    assignment_source: 'reconciliation',
+                    is_relevant: true,
+                  })
+                  .eq('id', email.id)
+                  .eq('user_id', userId)
+                  .is('placement_drive_id', null);
 
                 // Register newly linked email to thread map for downstream emails in same pass
                 if (email.thread_id) {
@@ -1822,14 +1932,24 @@ export async function runSync(
       }
 
       // 5.4 Holistic Status Recalculation:
-      // The incremental per-email status engine can produce wrong statuses because it only
-      // sees one email at a time. After all pages are done, re-run the full holistic
-      // analysis (same logic as reprocess Phase 4) to correct any status errors.
-      try {
-        const { recalculateApplicationStatuses } = await import('@/app/api/sync/reprocess/route');
-        await recalculateApplicationStatuses(userId);
-      } catch (statusRecalcErr) {
-        console.warn('[Post-Sync Status Recalc] Non-critical error:', statusRecalcErr);
+      // ONLY run full holistic status recalculation and heavy attachment scanning when initial setup pages just completed!
+      // For regular incremental syncs (1-3 emails), statuses and events are already updated incrementally
+      // by processEmailForEventsAndStatus during page processing. Running full recalculation over all 1,500+ emails
+      // on incremental syncs is what caused 1m 44s runtimes, lease loss, and hundreds of MBs in egress.
+      if (hadCompletedInitialPages) {
+        try {
+          const { scanAndPersistCandidateMatches } = await import('@/lib/sync/attachment-scanner');
+          await scanAndPersistCandidateMatches(supabase, userId);
+        } catch (scanErr) {
+          console.warn('[Post-Sync Attachment Scan] Non-critical error:', scanErr);
+        }
+
+        try {
+          const { recalculateApplicationStatuses } = await import('@/app/api/sync/reprocess/route');
+          await recalculateApplicationStatuses(userId);
+        } catch (statusRecalcErr) {
+          console.warn('[Post-Sync Status Recalc] Non-critical error:', statusRecalcErr);
+        }
       }
 
       // 6. Automatic Google Calendar reconciliation:
@@ -1852,30 +1972,36 @@ export async function runSync(
       );
     }
 
+    // Reconcile elapsed event statuses (test_scheduled -> test_completed, etc.)
+    // Ensures scheduled rounds that conclude are promoted in DB even during idle cron runs
+    try {
+      const { reconcileElapsedEventStatuses } = await import('@/lib/sync/event-reconciliation');
+      const reconResult = await reconcileElapsedEventStatuses(supabase, userId);
+      if (reconResult.updatedCount > 0) {
+        console.log(`[SyncEngine] Reconciled ${reconResult.updatedCount} elapsed round(s) for user ${userId}`);
+      }
+    } catch (reconErr) {
+      console.warn('[SyncEngine] Elapsed events reconciliation non-critical error:', reconErr);
+    }
+
     return result;
   } finally {
+    clearInterval(heartbeatTimer);
     activeSyncLocks.delete(userId);
     activeSyncMap.delete(userId);
     try {
       await dbWriteChain;
       const isError = result.errors.length > 0 && result.totalEmailsProcessed === 0;
       const isComplete = !result.hasMorePagesPending;
-      await supabase.from('sync_state').upsert({
-        user_id: userId,
-        is_syncing: false,
-        phase: isError ? 'error' : (isComplete ? 'complete' : 'pending'),
-        total_messages: latestProgress.totalMessages,
-        processed_messages: latestProgress.processedMessages,
-        new_emails: result.newEmails,
-        new_companies: result.newCompanies,
-        skipped_duplicates: result.skippedDuplicates,
-        is_initial_sync: isInitialSync,
-        current_page_index: latestProgress.currentPageIndex ?? 0,
-        total_pages: latestProgress.totalPagesCount ?? 1,
-        completed_at: isComplete ? new Date().toISOString() : null,
-        updated_at: new Date().toISOString(),
-        last_error: result.errors.length > 0 ? result.errors[result.errors.length - 1] : null,
+      const { error: releaseError } = await supabase.rpc('release_sync_lease', {
+        p_user_id: userId,
+        p_run_id: runId,
+        p_phase: isError ? 'error' : (isComplete ? 'complete' : 'pending'),
+        p_last_error: result.errors.length > 0 ? result.errors[result.errors.length - 1] : null,
       });
+      if (releaseError && !leaseLost) {
+        console.error(`[Sync Engine] Failed to release sync lease for ${userId}:`, releaseError);
+      }
     } catch {
       // Ignore if sync_state table not yet created
     }

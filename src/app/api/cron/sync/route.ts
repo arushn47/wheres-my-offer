@@ -25,9 +25,8 @@ async function executeBackgroundSync(userIds: string[]) {
         console.log(`[Cron Sync] Successfully synced user ${userId}`);
       }
 
-      // Check if any placement rounds (tests/PPT/interviews) or deadlines require notifications
-      // Only run when new emails were actually processed to eliminate unnecessary Supabase queries every 15-min cron tick
-      if (!res?.alreadyRunning && (res?.newEmails ?? 0) > 0) {
+      // These checks are time-based and must run even when Gmail had no new mail.
+      if (!res?.alreadyRunning) {
         const { checkAndNotifyLiveEvents, checkAndNotifyRegistrationDeadlines } = await import(
           '@/lib/notifications/service'
         );
@@ -48,20 +47,21 @@ async function executeBackgroundSync(userIds: string[]) {
 export async function GET(req: NextRequest) {
   // Verify secret authorization header or query parameter if configured
   const secret = process.env.CRON_SECRET;
-  if (secret) {
-    const authHeader = req.headers.get('authorization');
-    const xSecret = req.headers.get('x-cron-secret');
-    const querySecret = req.nextUrl.searchParams.get('secret') || req.nextUrl.searchParams.get('key');
+  if (!secret) {
+    return NextResponse.json({ error: 'Cron authentication is not configured' }, { status: 503 });
+  }
+  const authHeader = req.headers.get('authorization');
+  const xSecret = req.headers.get('x-cron-secret');
+  const querySecret = req.nextUrl.searchParams.get('secret') || req.nextUrl.searchParams.get('key');
 
-    const isAuthorized =
-      authHeader === `Bearer ${secret}` ||
-      authHeader === secret ||
-      xSecret === secret ||
-      querySecret === secret;
+  const isAuthorized =
+    authHeader === `Bearer ${secret}` ||
+    authHeader === secret ||
+    xSecret === secret ||
+    querySecret === secret;
 
-    if (!isAuthorized) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
+  if (!isAuthorized) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
   try {
@@ -92,13 +92,11 @@ export async function GET(req: NextRequest) {
             syncResults.push({ userId, status: 'skipped_already_running', message: 'Sync already in progress' });
           } else {
             syncResults.push({ userId, status: 'success', result });
-            if ((result?.newEmails ?? 0) > 0) {
-              const { checkAndNotifyLiveEvents, checkAndNotifyRegistrationDeadlines } = await import(
-                '@/lib/notifications/service'
-              );
-              await checkAndNotifyLiveEvents(userId);
-              await checkAndNotifyRegistrationDeadlines(userId);
-            }
+            const { checkAndNotifyLiveEvents, checkAndNotifyRegistrationDeadlines } = await import(
+              '@/lib/notifications/service'
+            );
+            await checkAndNotifyLiveEvents(userId);
+            await checkAndNotifyRegistrationDeadlines(userId);
           }
         } catch (err: any) {
           console.error(`[Cron Sync] Failed for user ${userId}:`, err);

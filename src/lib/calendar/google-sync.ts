@@ -3,6 +3,7 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { decrypt } from '@/lib/crypto/tokens';
 import { getNotificationPreferences } from '@/lib/notifications/preferences';
 import { isInactiveStatus } from '@/lib/stages';
+import { deriveEventEndTime } from '@/lib/event-duration';
 
 export interface SyncCalendarEventParams {
   userId: string;
@@ -69,13 +70,14 @@ export async function pushEventToGoogleCalendar(params: SyncCalendarEventParams)
     const startDate = new Date(params.startTime);
     if (isNaN(startDate.getTime())) return null;
 
+    const fallbackEndDate = deriveEventEndTime(null, params.title, startDate);
     let endDate = params.endTime && !isNaN(new Date(params.endTime).getTime())
       ? new Date(params.endTime)
-      : new Date(startDate.getTime() + 60 * 60 * 1000); // 1 hour default
+      : fallbackEndDate || new Date(startDate.getTime() + 60 * 60 * 1000);
 
     // Guard: Enforce positive duration if parsed endTime <= startTime
     if (endDate.getTime() <= startDate.getTime()) {
-      endDate = new Date(startDate.getTime() + 60 * 60 * 1000);
+      endDate = fallbackEndDate || new Date(startDate.getTime() + 60 * 60 * 1000);
     }
 
     // Fetch user reminder preferences for Google Calendar alert popups
@@ -493,13 +495,14 @@ export async function reconcileUserGoogleCalendar(userId: string): Promise<Recon
       // Valid event -> Update in place
       matchedAppEventIds.add(match.id);
       const startDate = new Date(match.startTime);
+      const fallbackEndDate = deriveEventEndTime(null, match.title, startDate);
       let endDate = match.endTime && !isNaN(new Date(match.endTime).getTime())
         ? new Date(match.endTime)
-        : new Date(startDate.getTime() + 60 * 60 * 1000);
+        : fallbackEndDate || new Date(startDate.getTime() + 60 * 60 * 1000);
 
       // Guard: Enforce positive duration if parsed endTime <= startTime
       if (endDate.getTime() <= startDate.getTime()) {
-        endDate = new Date(startDate.getTime() + 60 * 60 * 1000);
+        endDate = fallbackEndDate || new Date(startDate.getTime() + 60 * 60 * 1000);
       }
 
       try {
@@ -556,13 +559,14 @@ export async function reconcileUserGoogleCalendar(userId: string): Promise<Recon
   const toInsert = eligibleEvents.filter((e) => !matchedAppEventIds.has(e.id));
   for (const ins of toInsert) {
     const startDate = new Date(ins.startTime);
+    const fallbackEndDate = deriveEventEndTime(null, ins.title, startDate);
     let endDate = ins.endTime && !isNaN(new Date(ins.endTime).getTime())
       ? new Date(ins.endTime)
-      : new Date(startDate.getTime() + 60 * 60 * 1000);
+      : fallbackEndDate || new Date(startDate.getTime() + 60 * 60 * 1000);
 
     // Guard: Enforce positive duration if parsed endTime <= startTime
     if (endDate.getTime() <= startDate.getTime()) {
-      endDate = new Date(startDate.getTime() + 60 * 60 * 1000);
+      endDate = fallbackEndDate || new Date(startDate.getTime() + 60 * 60 * 1000);
     }
 
     try {

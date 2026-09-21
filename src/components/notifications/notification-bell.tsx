@@ -195,6 +195,12 @@ export default function NotificationBell({
   const handleMarkAllRead = async () => {
     setNotifications((prev) => prev.map((n) => ({ ...n, is_read: true })));
     setUnreadCount(0);
+    if (cachedNotificationData) {
+      cachedNotificationData = {
+        notifications: cachedNotificationData.notifications.map((n) => ({ ...n, is_read: true })),
+        unreadCount: 0,
+      };
+    }
     try {
       await fetch('/api/notifications', { method: 'POST', keepalive: true });
     } catch (err) {
@@ -209,6 +215,12 @@ export default function NotificationBell({
       prev.map((n) => (n.id === id ? { ...n, is_read: true } : n))
     );
     setUnreadCount((c) => Math.max(0, c - 1));
+    if (cachedNotificationData) {
+      cachedNotificationData = {
+        notifications: cachedNotificationData.notifications.map((n) => (n.id === id ? { ...n, is_read: true } : n)),
+        unreadCount: Math.max(0, cachedNotificationData.unreadCount - 1),
+      };
+    }
     try {
       await fetch(`/api/notifications/${id}/read`, { method: 'PATCH', keepalive: true });
     } catch (err) {
@@ -219,6 +231,13 @@ export default function NotificationBell({
   // Clear all marked-as-read notifications
   const handleClearRead = async () => {
     setNotifications((prev) => prev.filter((n) => !n.is_read));
+    if (cachedNotificationData) {
+      const remaining = cachedNotificationData.notifications.filter((n) => !n.is_read);
+      cachedNotificationData = {
+        notifications: remaining,
+        unreadCount: remaining.length,
+      };
+    }
     try {
       await fetch('/api/notifications?readOnly=true', { method: 'DELETE', keepalive: true });
     } catch (err) {
@@ -234,6 +253,13 @@ export default function NotificationBell({
       setUnreadCount((c) => Math.max(0, c - 1));
     }
     setNotifications((prev) => prev.filter((n) => n.id !== id));
+    if (cachedNotificationData) {
+      const remaining = cachedNotificationData.notifications.filter((n) => n.id !== id);
+      cachedNotificationData = {
+        notifications: remaining,
+        unreadCount: remaining.filter((n) => !n.is_read).length,
+      };
+    }
     try {
       await fetch(`/api/notifications/${id}`, { method: 'DELETE', keepalive: true });
     } catch (err) {
@@ -248,6 +274,14 @@ export default function NotificationBell({
         prev.map((n) => (n.id === notif.id ? { ...n, is_read: true } : n))
       );
       setUnreadCount((c) => Math.max(0, c - 1));
+      if (cachedNotificationData) {
+        cachedNotificationData = {
+          notifications: cachedNotificationData.notifications.map((n) =>
+            n.id === notif.id ? { ...n, is_read: true } : n
+          ),
+          unreadCount: Math.max(0, cachedNotificationData.unreadCount - 1),
+        };
+      }
       try {
         fetch(`/api/notifications/${notif.id}/read`, { method: 'PATCH', keepalive: true }).catch(console.error);
       } catch (err) {

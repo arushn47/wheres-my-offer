@@ -52,6 +52,19 @@ export async function PATCH(
 
   let targetDriveId: string | null = requestedDriveId || null;
 
+  if (targetDriveId) {
+    const { data: ownedDrive } = await supabase
+      .from('placement_drives')
+      .select('id, company_id')
+      .eq('id', targetDriveId)
+      .eq('user_id', session.userId)
+      .maybeSingle();
+    if (!ownedDrive) {
+      return NextResponse.json({ error: { message: 'Placement drive not found', code: 'drive_not_found' } }, { status: 404 });
+    }
+    targetDriveId = ownedDrive.id;
+  }
+
   // Resolve whether companyOrDriveId is a placement_drive id or company id
   if (!targetDriveId) {
     const { data: directDrive } = await supabase
@@ -74,6 +87,15 @@ export async function PATCH(
       if (drives && drives.length > 0) {
         targetDriveId = drives[0].id;
       } else {
+        const { data: ownedCompany } = await supabase
+          .from('companies')
+          .select('id')
+          .eq('id', companyOrDriveId)
+          .eq('user_id', session.userId)
+          .maybeSingle();
+        if (!ownedCompany) {
+          return NextResponse.json({ error: { message: 'Company not found', code: 'company_not_found' } }, { status: 404 });
+        }
         // Create initial drive for this company
         const { data: newDrive } = await supabase
           .from('placement_drives')

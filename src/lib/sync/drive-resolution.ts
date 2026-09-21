@@ -159,12 +159,43 @@ export async function resolvePlacementDrive(params: {
 
   const { data: companyDrives } = await params.supabase
     .from('placement_drives')
-    .select('id, company_id')
+    .select('id, company_id, drive_name, created_at')
     .eq('user_id', params.userId)
     .eq('company_id', params.companyId)
-    .in('identity_state', ['assigned', 'manually_assigned']);
+    .in('identity_state', ['assigned', 'manually_assigned'])
+    .order('created_at', { ascending: false });
 
+  // 1. If exactly one drive exists for this company, resolve directly to it
+  if (companyDrives && companyDrives.length === 1) {
+    return {
+      placementDriveId: companyDrives[0].id,
+      state: 'assigned',
+      confidence: 'high',
+      source: 'company_only',
+      normalizedDriveNumber: null,
+    };
+  }
 
+  // 2. If multiple drives exist, attempt matching by driveName
+  if (companyDrives && companyDrives.length > 1 && params.driveName) {
+    const cleanParamName = params.driveName.toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (cleanParamName.length >= 3) {
+      const matched = companyDrives.find((d) => {
+        if (!d.drive_name) return false;
+        const cleanDbName = d.drive_name.toLowerCase().replace(/[^a-z0-9]/g, '');
+        return cleanDbName.includes(cleanParamName) || cleanParamName.includes(cleanDbName);
+      });
+      if (matched) {
+        return {
+          placementDriveId: matched.id,
+          state: 'assigned',
+          confidence: 'high',
+          source: 'existing_drive_match',
+          normalizedDriveNumber: null,
+        };
+      }
+    }
+  }
 
   return {
     placementDriveId: null,

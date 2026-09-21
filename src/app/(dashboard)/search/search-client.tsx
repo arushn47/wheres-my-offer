@@ -282,17 +282,12 @@ export default function SearchClient({ data }: SearchClientProps) {
               const loc = cleanLocationString(c.location);
               const cleanCategory = c.category ? c.category.replace(/\b(internship|offer|placement|drive)\b/gi, '').trim() : '';
 
-              const driveQuery = new URLSearchParams(
-                Object.entries({
-                  appId: c.appId || '',
-                  driveId: c.driveId || '',
-                }).filter(([_, v]) => v !== '')
-              ).toString();
+              const driveQuery = c.driveId ? `?driveId=${c.driveId}` : '';
 
               return (
                 <Link
-                  key={`${c.id}-${c.driveId || ''}-${c.appId || ''}`}
-                  href={`/companies/${c.id}${driveQuery ? `?${driveQuery}` : ''}`}
+                  key={`${c.id}-${c.driveId || ''}`}
+                  href={`/companies/${c.id}${driveQuery}`}
                   className="flex flex-col justify-between p-4 bg-[#101018]/90 backdrop-blur-xl border border-zinc-800/80 hover:border-emerald-500/40 rounded-2xl transition-all duration-200 hover:-translate-y-0.5 group shadow-sm min-w-0"
                 >
                   {/* Top: Avatar, Name, Drive Number, Category, Status */}

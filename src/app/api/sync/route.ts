@@ -90,7 +90,7 @@ export async function POST(req: Request) {
             sendEvent('progress', progress);
           },
           {
-            timeBudgetMs: process.env.NODE_ENV === 'development' ? 120_000 : 45_000,
+            timeBudgetMs: process.env.NODE_ENV === 'development' ? 60_000 : 32_000,
           }
         );
 

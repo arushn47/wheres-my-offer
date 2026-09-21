@@ -290,7 +290,11 @@ export async function recalculateApplicationStatuses(
     const emailIds = new Set(companyEmails.map((e) => e.id));
     const matchedEmailIds = new Set(
       (candidateMatches || [])
-        .filter((cm) => emailIds.has((cm as unknown as { email_id: string }).email_id))
+        .filter((cm) => {
+          const match = cm as unknown as { email_id: string; match_type?: string; matched_value?: string | null };
+          if (!emailIds.has(match.email_id) || match.match_type === 'xlsx_applied_list') return false;
+          return !/applied[\s_-]*list|opt[\s_-]*in[\s_-]*list|opt_in|registration[\s_-]*list|applied[\s_-]*(?:student|candidate)/i.test(match.matched_value || '');
+        })
         .map((cm) => (cm as unknown as { email_id: string }).email_id)
     );
 
@@ -330,14 +334,18 @@ export async function recalculateApplicationStatuses(
               (cm) => (cm as unknown as { email_id: string }).email_id === email.id
             );
             if (!matchExists) {
-              await supabase.from('candidate_matches').insert({
+              const { error: candidateMatchError } = await supabase.from('candidate_matches').insert({
                 user_id: userId,
                 email_id: email.id,
+                placement_drive_id: drive.id,
                 neo_id: userNeoId || userEmail,
                 match_type: 'xlsx_cell',
                 matched_value: gMatch.details,
                 confidence: 'high',
               });
+              if (candidateMatchError && candidateMatchError.code !== '23505') {
+                throw candidateMatchError;
+              }
             }
 
             if (gMatch.eventDate) {
@@ -746,10 +754,6 @@ export async function recalculateApplicationStatuses(
       isMatchedInTest = true;
     }
 
-    const hasGSheetTestEvent = gsheetEventsForCompany.some((g) => g.eventType === 'online_test');
-    if (hasGSheetTestEvent) {
-      isMatchedInTest = true;
-    }
 
     const allExtractedEvents = activeDriveEmails.flatMap((e) =>
       extractEvents({
@@ -905,7 +909,35 @@ export async function recalculateApplicationStatuses(
       computedStatus = 'not_shortlisted';
     }
 
-    const finalStatus = existingApp?.manual_override ? existingApp.status : computedStatus;
+    const STATUS_PRIORITY: Record<string, number> = {
+      unknown: 0,
+      not_applied: 1,
+      applied: 2,
+      ppt_scheduled: 3,
+      shortlisted: 4,
+      test_scheduled: 5,
+      test_completed: 6,
+      interview_scheduled: 7,
+      interview_completed: 8,
+      selected: 9,
+      offer_received: 10,
+      not_shortlisted: 11,
+      rejected: 12,
+      withdrawn: 13,
+      declined: 13,
+    };
+    const existingPriority = STATUS_PRIORITY[existingApp?.status || 'unknown'] ?? 0;
+    const computedPriority = STATUS_PRIORITY[computedStatus] ?? 0;
+    const hasPriorCandidateEvidence = matchedShortlistEmailIds.size > 0;
+    const isEvidenceBackedTerminal =
+      ['rejected', 'selected', 'offer_received'].includes(computedStatus) &&
+      hasPriorCandidateEvidence;
+    const monotonicStatus =
+      existingApp?.manual_override ||
+      (existingApp?.status && computedPriority < existingPriority && !isEvidenceBackedTerminal)
+        ? existingApp.status
+        : computedStatus;
+    const finalStatus = monotonicStatus;
 
     let finalRole = existingApp?.manual_override ? existingApp.role : extractedJob.role;
     finalRole = cleanRoleTitle(finalRole);
@@ -1804,6 +1836,14 @@ export async function performReprocess(
     }
   }
 
+  // Scan Excel shortlist attachments for any missing candidate matches
+  try {
+    const { scanAndPersistCandidateMatches } = await import('@/lib/sync/attachment-scanner');
+    await scanAndPersistCandidateMatches(supabase, userId);
+  } catch (scanErr) {
+    console.warn('[performReprocess] Attachment scan non-critical error:', scanErr);
+  }
+
   // 6. Phase 4: Recalculate Stage Progression & Events for Official NeoPAT Drives
   const phase4Res = await recalculateApplicationStatuses(userId, onProgress);
   const updatedAppsCount = phase4Res.updatedCount;
@@ -1972,5 +2012,5 @@ export async function POST(req: Request) {
 }
 
 export async function GET(req: Request) {
-  return POST(req);
+  return NextResponse.json({ error: 'Method not allowed' }, { status: 405 });
 }

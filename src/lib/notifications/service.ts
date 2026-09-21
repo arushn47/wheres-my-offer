@@ -117,44 +117,43 @@ export async function sendNotification(
     return { inAppCreated: false, pushSent: false };
   }
 
-  // Insert into in-app notifications if in-app notifications are enabled
-  if (prefs.inAppEnabled) {
-    const { data: inserted, error: insertError } = await supabase
-      .from('notifications')
-      .insert({
-        user_id: userId,
-        placement_drive_id: placementDriveId || null,
-        event_id: eventId || null,
-        type,
-        title,
-        message: body,
-        body,
-        link: link || (placementDriveId ? `/companies/search?drive=${placementDriveId}` : '/'),
-        dedupe_key: dedupeKey,
-        is_read: false,
-      })
-      .select('id')
-      .single();
+  // Always persist the dedupe row even if in-app notifications are disabled so
+  // we never double-send notifications or re-trigger dedupe logic
+  const { data: inserted, error: insertError } = await supabase
+    .from('notifications')
+    .insert({
+      user_id: userId,
+      placement_drive_id: placementDriveId || null,
+      event_id: eventId || null,
+      type,
+      title,
+      message: body,
+      body,
+      link: link || (placementDriveId ? `/companies/${placementDriveId}` : '/'),
+      dedupe_key: dedupeKey,
+      is_read: !prefs.inAppEnabled,
+    })
+    .select('id')
+    .single();
 
-    if (insertError) {
-      if (insertError.code === '23505') {
-        // Fallback catch if race condition occurred
-        inAppCreated = false;
-        return { inAppCreated: false, pushSent: false };
-      } else {
-        console.error('[Notification Service] In-app insert error:', insertError);
-      }
-    } else if (inserted) {
-      inAppCreated = true;
+  if (insertError) {
+    if (insertError.code === '23505') {
+      // Fallback catch if race condition occurred
+      inAppCreated = false;
+      return { inAppCreated: false, pushSent: false };
+    } else {
+      console.error('[Notification Service] In-app insert error:', insertError);
     }
+  } else if (inserted) {
+    inAppCreated = prefs.inAppEnabled;
   }
 
-  // 3. Dispatch Web Push notification asynchronously if browser push is enabled
+  // 3. Dispatch Web Push only after provider success. A failed send must not
+  // be reported as delivered; a future retry path can then attempt it again.
   let pushSent = false;
   if (prefs.browserPushEnabled) {
-    const targetLink = link || (placementDriveId ? `/companies/search?drive=${placementDriveId}` : '/');
-    // Non-blocking fire-and-forget push with internal timeout protection
-    sendPushToUser(userId, {
+    const targetLink = link || (placementDriveId ? `/companies/${placementDriveId}` : '/');
+    const pushResult = await sendPushToUser(userId, {
       ...pushPayload,
       title,
       body,
@@ -165,10 +164,8 @@ export async function sendNotification(
         eventId: eventId || undefined,
         type,
       },
-    }).catch((err) => {
-      console.warn('[Push] Background push error:', err);
     });
-    pushSent = true;
+    pushSent = pushResult.sent > 0;
   }
 
   return { inAppCreated, pushSent };
@@ -219,7 +216,7 @@ export async function notifyStatusChange(params: {
     title,
     body,
     placementDriveId,
-    link: `/companies/search?drive=${placementDriveId}`,
+    link: `/companies/${placementDriveId}`,
     dedupeKey,
   });
 }
@@ -245,7 +242,7 @@ export async function notifyShortlistMatch(params: {
     title: `🎉 ${companyName} Shortlist Match!`,
     body: `Your Neo ID (${neoId}) was found in the official ${companyName} shortlist!`,
     placementDriveId,
-    link: `/companies/search?drive=${placementDriveId}`,
+    link: `/companies/${placementDriveId}`,
     dedupeKey,
   });
 }
@@ -296,13 +293,13 @@ export async function notifyNewDrive(params: {
     title,
     body,
     placementDriveId,
-    link: `/companies/search?drive=${placementDriveId}`,
+    link: `/companies/${placementDriveId}`,
     dedupeKey,
     pushPayload: {
       title,
       body,
       data: {
-        url: `/companies/search?drive=${placementDriveId}`,
+        url: `/companies/${placementDriveId}`,
         type: 'new_company',
       },
     },
@@ -399,7 +396,7 @@ export async function notifyEventScheduled(params: {
     
     placementDriveId,
     eventId,
-    link: eventType === 'registration_deadline' ? `/companies/search?drive=${placementDriveId}` : `/calendar`,
+    link: eventType === 'registration_deadline' ? `/companies/${placementDriveId}` : `/calendar`,
     dedupeKey,
   });
 }

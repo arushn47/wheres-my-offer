@@ -34,15 +34,15 @@ export async function GET(request: Request) {
     );
   }
 
-  let accountType = 'personal';
-  if (stateStr) {
-    try {
-      const state = JSON.parse(stateStr);
-      accountType = state.account_type || 'personal';
-    } catch {
-      // Invalid state — default to personal
-    }
+  const cookieStore = await cookies();
+  const expectedState = cookieStore.get('oauth_state')?.value;
+  const requestedAccountType = cookieStore.get('oauth_account_type')?.value;
+  if (!stateStr || !expectedState || stateStr !== expectedState) {
+    return NextResponse.redirect(`${appUrl}/login?error=invalid_oauth_state`);
   }
+  cookieStore.set('oauth_state', '', { maxAge: 0, path: '/api/auth/callback' });
+  cookieStore.set('oauth_account_type', '', { maxAge: 0, path: '/api/auth/callback' });
+  const accountType = requestedAccountType === 'college' ? 'college' : 'personal';
 
   try {
     // Exchange code for tokens
@@ -68,7 +68,6 @@ export async function GET(request: Request) {
     const supabase = createAdminClient();
 
     // 1. Check if user is already logged in (linking a secondary account)
-    const cookieStore = await cookies();
     const token = cookieStore.get('session')?.value;
     
     let existingUserId: string | null = null;

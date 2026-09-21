@@ -18,30 +18,44 @@ import {
 import Link from 'next/link';
 import { StatusChip } from '@/components/ui/status-chip';
 
-export interface AnalyticsApplication {
+export interface AnalyticsDrive {
   id: string;
-
   placement_drive_id?: string | null;
+  company_id?: string | null;
+  company_name?: string;
+  drive_number?: string | null;
   status: string;
   notes?: string | null;
   ctc: string | null;
   stipend?: string | null;
   category?: string | null;
-  applied_at: string | null;
-  last_updated: string | null;
+  role?: string | null;
+  location?: string | null;
+  applied_at?: string | null;
+  last_updated?: string | null;
+  manual_override?: boolean;
 }
+
+export type AnalyticsApplication = AnalyticsDrive;
 
 export interface AnalyticsEvent {
   id: string;
-
   placement_drive_id?: string | null;
   event_type: string;
   start_time: string | null;
 }
 
+export interface AnalyticsMatch {
+  id: string;
+  email_id?: string | null;
+  placement_drive_id?: string | null;
+}
+
 interface AnalyticsClientProps {
-  applications: AnalyticsApplication[];
+  drives?: AnalyticsDrive[];
+  applications?: AnalyticsDrive[];
   events: AnalyticsEvent[];
+  candidateMatches?: AnalyticsMatch[];
   companiesCount: number;
   emailsCount: number;
   matchesCount: number;
@@ -52,8 +66,10 @@ interface AnalyticsClientProps {
 }
 
 export default function AnalyticsClient({
+  drives,
   applications,
   events,
+  candidateMatches = [],
   companiesCount,
   emailsCount,
   matchesCount,
@@ -62,14 +78,17 @@ export default function AnalyticsClient({
   campus,
   branch,
 }: AnalyticsClientProps) {
+  const driveList = drives || applications || [];
+
   // 1. Calculate Funnel Data
   const {
     appliedCount,
+    withdrawnCount,
+    notAppliedCount,
     shortlistedCount,
     clearedAssessmentCount,
     interviewCount,
     offerCount,
-    optedOutCount,
     rejectedCount,
     superDreamCount,
     dreamCount,
@@ -81,11 +100,12 @@ export default function AnalyticsClient({
     appliedCtcCount,
   } = useMemo(() => {
     let applied = 0;
+    let withdrawn = 0;
+    let notApplied = 0;
     let shortlisted = 0;
     let clearedAssessment = 0;
     let interviewed = 0;
     let selected = 0;
-    let optedOut = 0;
     let rejected = 0;
 
     let superDream = 0;
@@ -97,24 +117,36 @@ export default function AnalyticsClient({
     let maxCtc = 0;
     let maxCtcStr = 'TBA';
 
-    // Index events by operational identity; legacy rows use an explicit key.
+    // Index candidate_matches by placement_drive_id
+    const shortlistedDriveIds = new Set(
+      (candidateMatches || []).map((m) => m.placement_drive_id).filter(Boolean)
+    );
+
+    // Index events by placement_drive_id
     const eventsByDrive = new Map<string, AnalyticsEvent[]>();
-    events.forEach((ev) => {
+    (events || []).forEach((ev) => {
       const key = ev.placement_drive_id || '';
       const list = eventsByDrive.get(key) || [];
       list.push(ev);
       eventsByDrive.set(key, list);
     });
 
-    applications.forEach((app) => {
-      const s = (app.status || '').toLowerCase();
-      if (['withdrawn', 'declined', 'not_applied'].includes(s)) {
-        optedOut++;
+    driveList.forEach((drive) => {
+      const s = (drive.status || '').toLowerCase();
+      const driveId = drive.placement_drive_id || drive.id || '';
+
+      if (s === 'withdrawn' || s === 'declined') {
+        withdrawn++;
         return;
       }
+      if (s === 'not_applied') {
+        notApplied++;
+        return;
+      }
+
       applied++;
 
-      const compEvents = eventsByDrive.get(app.placement_drive_id || '') || [];
+      const compEvents = eventsByDrive.get(driveId) || [];
       const hasTestEvent = compEvents.some((e) =>
         /test|coding|assessment|hackerearth|mettl|shl/i.test(`${e.event_type || ''}`)
       );
@@ -122,49 +154,59 @@ export default function AnalyticsClient({
         /interview/i.test(`${e.event_type || ''}`)
       );
 
+      const hasMatch = shortlistedDriveIds.has(driveId);
+      const hasEliminatedRoundNote =
+        /eliminated in (test|interview|assessment)/i.test(drive.notes || '') ||
+        ['rejected_test', 'rejected_interview', 'test_eliminated', 'interview_eliminated'].includes(s);
+
       // Shortlisted for OA / Test:
-      // Even if a candidate wrote a test and failed, they were still shortlisted for OA!
       const isShortlistedForOA =
         [
           'shortlisted',
           'test',
           'test_scheduled',
+          'test_ongoing',
           'test_completed',
           'interview',
           'interview_scheduled',
+          'interview_ongoing',
           'interview_completed',
           'selected',
           'offer',
           'offer_received',
         ].includes(s) ||
         hasTestEvent ||
-        (s === 'rejected' && (hasTestEvent || /test|assessment|interview/i.test(app.notes || '')));
+        hasMatch ||
+        hasEliminatedRoundNote ||
+        (s === 'rejected' && (hasTestEvent || /test|assessment|interview/i.test(drive.notes || '')));
 
       // Assessments Cleared:
-      // Candidate ONLY clears an assessment if they successfully advanced to the next round (Interviews or Offers)!
-      // "Test Completed · Awaiting Results" is NOT cleared yet!
       const isAssessmentCleared =
         [
           'interview',
           'interview_scheduled',
+          'interview_ongoing',
           'interview_completed',
           'selected',
           'offer',
           'offer_received',
         ].includes(s) ||
-        (s === 'rejected' && (hasInterviewEvent || /interview/i.test(app.notes || '')));
+        hasInterviewEvent ||
+        /interview/i.test(drive.notes || '');
 
       // Interviews Reached:
       const isInterviewed =
         [
           'interview',
           'interview_scheduled',
+          'interview_ongoing',
           'interview_completed',
           'selected',
           'offer',
           'offer_received',
         ].includes(s) ||
-        (s === 'rejected' && (hasInterviewEvent || /interview/i.test(app.notes || '')));
+        hasInterviewEvent ||
+        /interview/i.test(drive.notes || '');
 
       // Offers Won:
       const isSelected = ['selected', 'offer', 'offer_received'].includes(s);
@@ -176,7 +218,7 @@ export default function AnalyticsClient({
       if (s === 'rejected' || s === 'not_shortlisted') rejected++;
 
       // CTC extraction: handles both fixed ("14 LPA") and ranged ("6.25 - 21 LPA")
-      const ctcStr = app.ctc || '';
+      const ctcStr = drive.ctc || '';
       const rangeMatch = ctcStr.match(
         /(\d+(?:\.\d+)?)\s*(?:-|to|–|—)\s*(\d+(?:\.\d+)?)\s*(?:lpa|lac|lakh)?/i
       );
@@ -185,14 +227,11 @@ export default function AnalyticsClient({
       if (rangeMatch) {
         const minVal = parseFloat(rangeMatch[1]);
         const maxVal = parseFloat(rangeMatch[2]);
-        // Use balanced midpoint for average calculation
         appliedCtcs.push((minVal + maxVal) / 2);
-        // Track absolute ceiling for peak CTC
         if (maxVal > maxCtc) {
           maxCtc = maxVal;
           maxCtcStr = `₹${maxVal} LPA`;
         }
-        // Classify tier by ceiling
         if (maxVal >= 10) superDream++;
         else if (maxVal >= 6) dream++;
         else regular++;
@@ -207,7 +246,7 @@ export default function AnalyticsClient({
         else if (val >= 6) dream++;
         else regular++;
       } else {
-        const cat = (app.category || '').toLowerCase();
+        const cat = (drive.category || '').toLowerCase();
         if (cat.includes('super')) superDream++;
         else if (cat.includes('dream')) dream++;
         else if (cat.includes('regular') || cat.includes('core')) regular++;
@@ -222,11 +261,12 @@ export default function AnalyticsClient({
 
     return {
       appliedCount: applied,
+      withdrawnCount: withdrawn,
+      notAppliedCount: notApplied,
       shortlistedCount: shortlisted,
       clearedAssessmentCount: clearedAssessment,
       interviewCount: interviewed,
       offerCount: selected,
-      optedOutCount: optedOut,
       rejectedCount: rejected,
       superDreamCount: superDream,
       dreamCount: dream,
@@ -237,7 +277,7 @@ export default function AnalyticsClient({
       avgAppliedCtc: avgApplied ? `₹${avgApplied} LPA` : '—',
       appliedCtcCount: appliedCtcs.length,
     };
-  }, [applications, events]);
+  }, [driveList, events, candidateMatches]);
 
   const shortlistRate = appliedCount > 0 ? Math.round((shortlistedCount / appliedCount) * 100) : 0;
   const interviewRate = shortlistedCount > 0 ? Math.round((interviewCount / shortlistedCount) * 100) : 0;
@@ -308,7 +348,7 @@ export default function AnalyticsClient({
         </Link>
       </div>
 
-      {/* 4 Funnel Metric Cards (Emergent Card Design) */}
+      {/* 4 Funnel Metric Cards */}
       <div className="grid grid-cols-2 gap-2.5 sm:gap-3 sm:grid-cols-4">
         <motion.div
           initial={{ opacity: 0, y: 14 }}
@@ -320,10 +360,10 @@ export default function AnalyticsClient({
             Drives Synced
           </div>
           <div className="font-tabular mt-1.5 sm:mt-2 font-display text-2xl sm:text-3xl font-extrabold text-white">
-            {companiesCount || applications.length}
+            {companiesCount || driveList.length}
           </div>
           <div className="mt-1 font-mono text-[10px] sm:text-[11px] text-zinc-500 truncate">
-            {appliedCount} applied · {Math.max(0, (companiesCount || applications.length) - appliedCount)} opted out
+            {appliedCount} applied · {withdrawnCount} withdrawn{notAppliedCount > 0 ? ` · ${notAppliedCount} not applied` : ''}
           </div>
         </motion.div>
 
@@ -401,7 +441,7 @@ export default function AnalyticsClient({
         </div>
 
         <div className="mt-6 space-y-4">
-          {funnelSteps.map((s, idx) => (
+          {funnelSteps.map((s) => (
             <div key={s.label} className="space-y-1.5">
               <div className="flex items-center justify-between text-xs">
                 <span className="font-semibold text-zinc-200">{s.label}</span>
@@ -528,7 +568,7 @@ export default function AnalyticsClient({
                   <Building2 className="h-4 w-4 text-emerald-400 shrink-0" />
                   <span className="text-xs text-zinc-300 font-medium truncate">Tracked Drives</span>
                 </div>
-                <span className="font-mono text-xs font-bold text-zinc-100 shrink-0 whitespace-nowrap">{(companiesCount || 0).toLocaleString()}</span>
+                <span className="font-mono text-xs font-bold text-zinc-100 shrink-0 whitespace-nowrap">{(companiesCount || driveList.length || 0).toLocaleString()}</span>
               </div>
 
               <div className="flex items-center justify-between gap-2 rounded-xl border border-zinc-800/80 bg-zinc-900/40 p-4">

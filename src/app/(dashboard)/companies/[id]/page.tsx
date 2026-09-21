@@ -1,5 +1,5 @@
 import type { Metadata } from 'next';
-import { notFound } from 'next/navigation';
+import { notFound, redirect } from 'next/navigation';
 import { requireSession } from '@/lib/auth';
 import { createAdminClient } from '@/lib/supabase/admin';
 import CompanyDetailClient, { type CompanyDetail } from './company-detail-client';
@@ -67,7 +67,7 @@ export default async function CompanyDetailPage(props: {
   let resolvedDriveId = urlDriveId || null;
 
   if (!company) {
-    // Try resolving if params.id was a placement_drive_id
+    // Canonical Redirect: If params.id was a placement_drive_id, normalize to /companies/[companyId]?driveId=[driveId]
     const { data: drive } = await supabase
       .from('placement_drives')
       .select('id, company_id')
@@ -75,14 +75,14 @@ export default async function CompanyDetailPage(props: {
       .eq('user_id', session.userId)
       .maybeSingle();
     if (drive) {
-      resolvedDriveId = drive.id;
-      const { data: comp } = await supabase
-        .from('companies')
-        .select('id, name, aliases')
-        .eq('id', drive.company_id)
-        .eq('user_id', session.userId)
-        .maybeSingle();
-      company = comp;
+      const sp = new URLSearchParams();
+      sp.set('driveId', drive.id);
+      for (const [k, v] of Object.entries(searchParams)) {
+        if (k !== 'driveId' && k !== 'appId' && typeof v === 'string') {
+          sp.set(k, v);
+        }
+      }
+      redirect(`/companies/${drive.company_id}?${sp.toString()}`);
     }
   }
 
@@ -324,6 +324,7 @@ export default async function CompanyDetailPage(props: {
           eventType: e.event_type,
           title: e.title,
           startTime: e.start_time,
+          endTime: e.end_time,
           venue: e.venue,
           mode: e.mode,
         }));
@@ -338,6 +339,7 @@ export default async function CompanyDetailPage(props: {
             eventType: 'registration_deadline',
             title: 'Registration Deadline',
             startTime: application.registration_deadline,
+            endTime: null,
             venue: 'NeoPAT Portal / Online Form',
             mode: 'online',
           });

@@ -332,7 +332,7 @@ export default function TermsClient() {
                 <div className="rounded-xl border border-zinc-800/80 bg-zinc-900/40 p-3.5">
                   <div className="flex items-center justify-between gap-2 mb-1">
                     <span className="font-mono font-bold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20">
-                      calendar.events
+                      calendar.events.owned
                     </span>
                     <span className="font-mono text-zinc-500 text-[10px]">Optional Scope</span>
                   </div>

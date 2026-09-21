@@ -25,7 +25,6 @@ export default async function CompaniesPage() {
     { data: applications },
     { data: events },
     { data: matches },
-    { data: emails },
     { data: accounts },
   ] = await Promise.all([
     supabase
@@ -46,7 +45,7 @@ export default async function CompaniesPage() {
 
     supabase
       .from('events')
-      .select('id, placement_drive_id, event_type, title, start_time, venue, mode')
+      .select('id, placement_drive_id, event_type, title, start_time, end_time, venue, mode')
       .eq('user_id', session.userId)
       .order('start_time', { ascending: true }),
 
@@ -55,11 +54,6 @@ export default async function CompaniesPage() {
       .select('id, placement_drive_id, email_id')
       .eq('user_id', session.userId)
       .neq('match_type', 'xlsx_applied_list'),
-
-    supabase
-      .from('emails')
-      .select('id, placement_drive_id, received_at')
-      .eq('user_id', session.userId),
 
     supabase
       .from('gmail_accounts')
@@ -186,30 +180,6 @@ export default async function CompaniesPage() {
     }
   }
 
-  // Group emails by entityId
-  const emailCountMap = new Map<string, number>();
-  const latestEmailMap = new Map<string, string>();
-  if (emails) {
-    for (const email of emails) {
-      const matchingEntities = entities.filter(ent => {
-        if (email.placement_drive_id) {
-          return ent.drive?.id === email.placement_drive_id;
-        }
-        return ent.type === 'legacy_app' && !email.placement_drive_id && ent.app?.placement_drive_id === email.placement_drive_id;
-      });
-      
-      for (const ent of matchingEntities) {
-        emailCountMap.set(ent.entityId, (emailCountMap.get(ent.entityId) || 0) + 1);
-        if (email.received_at) {
-          const prev = latestEmailMap.get(ent.entityId);
-          if (!prev || new Date(email.received_at) > new Date(prev)) {
-            latestEmailMap.set(ent.entityId, email.received_at);
-          }
-        }
-      }
-    }
-  }
-
   const matchedEmailIds = new Set((matches || []).map((m) => m.email_id).filter(Boolean));
   const matchedDriveIds = new Set((matches || []).map((m: any) => m.placement_drive_id).filter(Boolean));
 
@@ -218,6 +188,7 @@ export default async function CompaniesPage() {
     const { drive, app, entityId } = ent;
     const companyId = drive?.company_id || ent.company?.id || (app as any)?.company_id;
     const comp = companyId ? compMap.get(companyId) : undefined;
+    const effectiveLatestDate = drive?.updated_at || app?.last_updated || comp?.updated_at || drive?.created_at || new Date().toISOString();
     
     return {
       id: comp?.id || companyId || entityId, 
@@ -228,8 +199,8 @@ export default async function CompaniesPage() {
       aliases: comp?.aliases || ent.company?.aliases || null,
       drive_number: drive?.drive_number || null,
       drive_name: drive?.drive_name || null,
-      updated_at: drive?.updated_at || comp?.updated_at || ent.company?.updated_at || new Date().toISOString(),
-      latestEmailDate: latestEmailMap.get(entityId) || comp?.updated_at || ent.company?.updated_at,
+      updated_at: effectiveLatestDate,
+      latestEmailDate: effectiveLatestDate,
       application: app ? {
         id: app.id,
         status: app.status,
@@ -261,7 +232,7 @@ export default async function CompaniesPage() {
       latestEvent: eventMap.get(entityId) || null,
       events: allEventsByEntity.get(entityId) || [],
       neoIdMatched: drive ? matchedDriveIds.has(drive.id) : (app?.placement_drive_id ? matchedDriveIds.has(app.placement_drive_id) : false),
-      emailCount: emailCountMap.get(entityId) || 0,
+      emailCount: 0,
     };
   });
 

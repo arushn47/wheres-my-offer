@@ -1,5 +1,6 @@
 import type { ParsedEmail } from '@/lib/gmail/client';
 import { stripQuotedContent } from '@/lib/sync/body';
+import { deriveEventEndTime } from '@/lib/event-duration';
 
 export interface ExtractedEvent {
   eventType:
@@ -282,36 +283,49 @@ export function extractEvents(email: ParsedEmail): ExtractedEvent[] {
     : new Date();
 
   // 0. Check for Registration Deadline or Form/Preference Submission Deadline
-  const formOrRegDeadlineMatch =
-    cleanNormalizedText.match(
-      /(?:fill\s*(?:out|in)?\s*(?:the\s*)?(?:google\s*form|form|preference\s*form|survey)|submit\s*(?:the\s*)?(?:google\s*form|form|preference\s*form)|location\s*preference[\s\S]{0,50}?google\s*form)[\s\S]{0,100}?(?:on\s+or\s+before|by|before)\s*[:\-–—\t]*\s*([^\n\r]{1,80})/i
-    ) ||
-    cleanNormalizedText.match(
-      /(?:last\s+date\s+for\s+registration|registration\s+deadline|register\s+(?:in\s+the\s+neo\s*pat\s+)?on\s+or\s+before|apply\s+before)\s*[:\-–—\t]*\s*([^\n\r]{1,80})/i
-    );
+  const regDeadlinePatterns = [
+    // Pattern A: Explicit registration portal deadline (often has exact time)
+    /(?:last\s+date\s+(?:for\s+)?registration|registration\s+deadline|register[\s\S]{0,90}?(?:on\s*(?:or)?\s*before|by|before))\s*[:\-–—\t]*\s*([^\n\r]{1,100})/gi,
+    // Pattern B: Google Form / Survey / Preference form deadline
+    /(?:fill\s*(?:out|in)?\s*(?:the\s*)?(?:google\s*form|form|preference\s*form|survey)|submit\s*(?:the\s*)?(?:google\s*form|form|preference\s*form)|location\s*preference[\s\S]{0,50}?google\s*form)[\s\S]{0,100}?(?:on\s*(?:or)?\s*before|by|before)\s*[:\-–—\t]*\s*([^\n\r]{1,100})/gi,
+    // Pattern C: Application formalities / General application deadline
+    /(?:apply\s+(?:on\s*(?:or)?\s*before|by|before)|complete[\s\S]{0,50}?application[\s\S]{0,30}?(?:by|before|on\s*(?:or)?\s*before))\s*[:\-–—\t]*\s*([^\n\r]{1,100})/gi,
+  ];
 
-  if (formOrRegDeadlineMatch && formOrRegDeadlineMatch[1]) {
-    const rawCandidate = formOrRegDeadlineMatch[1].replace(/[*_`>#]/g, ' ').trim();
-    const cleanCandidate = rawCandidate.split(/\b(?:website|job|eligibility|jd|note|mandatory|no\s+manual)\b/i)[0].trim();
-    const parsed = parseDateTimeWithConfidence(cleanCandidate, refDate);
-    if (parsed.date) {
-      const isLocPref = /location\s*preference|preference\s*form/i.test(cleanNormalizedText);
-      const isGForm = /google\s*form|survey/i.test(cleanNormalizedText);
-      events.push({
-        eventType: 'registration_deadline',
-        title: isLocPref
-          ? 'Location Preference Deadline'
-          : isGForm
-          ? 'Google Form Submission Deadline'
-          : 'Registration Deadline',
-        startTime: parsed.date,
-        endTime: new Date(parsed.date.getTime() + 30 * 60 * 1000),
-        venue: isGForm || isLocPref ? 'Google Form / NeoPAT' : 'NeoPAT Portal / Online Form',
-        mode: 'online',
-        confidence: 'high',
-        hasExplicitTime: parsed.hasExplicitTime,
-      });
+  let bestRegParsed: { date: Date | null; hasExplicitTime: boolean } = { date: null, hasExplicitTime: false };
+
+  for (const pat of regDeadlinePatterns) {
+    const matches = Array.from(cleanNormalizedText.matchAll(pat));
+    for (const m of matches) {
+      if (!m[1]) continue;
+      const rawCandidate = m[1].replace(/[*_`>#]/g, ' ').trim();
+      const cleanCandidate = rawCandidate.split(/\b(?:website|job|eligibility|jd|note|mandatory|no\s+manual|company(?:'s)?\s*link|company(?:'s)?\s*registration|both\s+the\s+registration)\b/i)[0].trim();
+      const parsed = parseDateTimeWithConfidence(cleanCandidate, refDate);
+      if (parsed.date) {
+        if (!bestRegParsed.date || (!bestRegParsed.hasExplicitTime && parsed.hasExplicitTime)) {
+          bestRegParsed = parsed;
+        }
+      }
     }
+  }
+
+  if (bestRegParsed.date) {
+    const isLocPref = /location\s*preference|preference\s*form/i.test(cleanNormalizedText);
+    const isGForm = /google\s*form|survey/i.test(cleanNormalizedText);
+    events.push({
+      eventType: 'registration_deadline',
+      title: isLocPref
+        ? 'Location Preference Deadline'
+        : isGForm
+        ? 'Google Form Submission Deadline'
+        : 'Registration Deadline',
+      startTime: bestRegParsed.date,
+      endTime: deriveEventEndTime('registration_deadline', 'Registration Deadline', bestRegParsed.date),
+      venue: isGForm || isLocPref ? 'Google Form / NeoPAT' : 'NeoPAT Portal / Online Form',
+      mode: 'online',
+      confidence: 'high',
+      hasExplicitTime: bestRegParsed.hasExplicitTime,
+    });
   }
 
   // 1. Check for Pre-Placement Talk (PPT)
@@ -349,7 +363,7 @@ export function extractEvents(email: ParsedEmail): ExtractedEvent[] {
         eventType: 'ppt',
         title: 'Pre-Placement Talk (PPT)',
         startTime: parsed.date,
-        endTime: new Date(parsed.date.getTime() + 60 * 60 * 1000), // +1 hour
+        endTime: deriveEventEndTime('ppt', 'Pre-Placement Talk (PPT)', parsed.date),
         venue,
         mode: determineMode(snippetForPpt, venue),
         confidence: 'high',
@@ -385,7 +399,7 @@ export function extractEvents(email: ParsedEmail): ExtractedEvent[] {
             eventType: 'ppt',
             title: 'Pre-Placement Talk (PPT)',
             startTime: parsedPpt.date,
-            endTime: new Date(parsedPpt.date.getTime() + 60 * 60 * 1000),
+            endTime: deriveEventEndTime('ppt', 'Pre-Placement Talk (PPT)', parsedPpt.date),
             venue: pptVenue,
             mode: determineMode(pptInVisit[1], pptVenue),
             confidence: parsedPpt.hasExplicitTime ? 'high' : 'medium',
@@ -439,7 +453,7 @@ export function extractEvents(email: ParsedEmail): ExtractedEvent[] {
         eventType: 'online_test',
         title: /coding/i.test(cleanNormalizedText) ? 'Coding Test' : 'Online Assessment',
         startTime: parsed.date,
-        endTime: new Date(parsed.date.getTime() + 90 * 60 * 1000), // +1.5 hours
+        endTime: deriveEventEndTime('online_test', 'Online Assessment', parsed.date),
         venue: venue || 'Online Link / Mettl / HackerRank',
         mode: 'online',
         confidence: parsed.hasExplicitTime ? 'high' : 'medium',
@@ -488,7 +502,7 @@ export function extractEvents(email: ParsedEmail): ExtractedEvent[] {
           ? 'HR Interview'
           : 'Interview Round',
         startTime: parsed.date,
-        endTime: new Date(parsed.date.getTime() + 60 * 60 * 1000),
+        endTime: deriveEventEndTime(isTech ? 'technical_interview' : isHr ? 'hr_interview' : 'technical_interview', 'Interview', parsed.date),
         venue,
         mode: determineMode(cleanNormalizedText, venue),
         confidence: parsed.hasExplicitTime ? 'high' : 'medium',
@@ -506,9 +520,9 @@ export function extractEvents(email: ParsedEmail): ExtractedEvent[] {
   if (pptEvent && testEvent && pptEvent.startTime && testEvent.startTime) {
     const diffMs = Math.abs(testEvent.startTime.getTime() - pptEvent.startTime.getTime());
     if (diffMs < 30 * 60 * 1000) {
-      pptEvent.endTime = new Date(pptEvent.startTime.getTime() + 90 * 60 * 1000); // 1.5 hours (3:30 PM - 5:00 PM)
+      pptEvent.endTime = deriveEventEndTime('ppt', 'Pre-Placement Talk (PPT)', pptEvent.startTime);
       testEvent.startTime = new Date(pptEvent.startTime.getTime() + 2.5 * 60 * 60 * 1000); // +2.5 hours (e.g. 6:00 PM)
-      testEvent.endTime = new Date(testEvent.startTime.getTime() + 90 * 60 * 1000); // 1.5 hours (6:00 PM - 7:30 PM)
+      testEvent.endTime = deriveEventEndTime('online_test', 'Online Assessment', testEvent.startTime);
     }
   }
 
@@ -999,6 +1013,8 @@ export function cleanRoleTitle(rawRole: string | null | undefined): string | nul
 
   // 2. Strip repeated leading labels like "Designation : ", "Job Role : ", "Role - ", "Job Profile: "
   role = role.replace(/^(?:(?:Job\s+)?(?:Designation|Role|Position|Profile|Title)\s*[:\-–—\t]\s*)+/gi, '').trim();
+  role = role.replace(/^(?:Service\s+line\s*[-–—]?\s*)?Position\s+Title\s*[:\-–—\t]\s*/gi, '').trim();
+  role = role.replace(/^(?:Service\s+line\s*[:\-–—\t]\s*)/gi, '').trim();
 
   // 3. Strip leading narrative phrases like "in the role of ", "role of ", "position of "
   role = role.replace(/^(?:(?:in\s+)?the\s+role\s+of|role\s+of|position\s+of)\s+/i, '').trim();
@@ -1012,14 +1028,18 @@ export function cleanRoleTitle(rawRole: string | null | undefined): string | nul
   // 6. Strip trailing suffixes like " - Full Time" or " / Full Time" or apprenticeship notes
   role = role.replace(/(?:\s*\/)?\s*[-–—]?\s*(?:Full\s+Time|Internship\b|\d+\s*(?:months?|weeks?)\s+Apprenticeship).*$/i, '').trim();
 
+  // Strip trailing role / position words (e.g. "Software Development Engineer role" -> "Software Development Engineer")
+  role = role.replace(/\s+(?:role|position|profile|title)$/i, '').trim();
+  role = role.replace(/\s*,\s*etc\.?$/i, '').trim();
+
   // 7. Strip trailing label boundaries or trailing punctuation
   role = role.replace(/\s*(?:[-–—]\s*)?(?:JD|Location|Eligible|Eligibility|Selection|CTC|Stipend|Process|Note|Registration|Date|Duration|As\s+part|We\s+would)\b.*$/i, '').trim();
   role = role.replace(/[()\[\]{}*,\.\s>\-–—:;_\\/|#?!=+]+$/, '').trim();
 
   if (role.length < 2) return null;
 
-  // 8. Single generic header words alone (e.g. "Details", "Skill", "Skills", "Note")
-  if (/^(?:details|skill|skills|note|notes|role|roles|position|positions|title|profile|job|jobs|description|qualification|qualifications|requirement|requirements|experience|criteria|eligibility|overview|summary|responsibilities|duties|tasks|information|important|mandatory|general|category|type)$/i.test(role)) {
+  // 8. Single generic header words alone (e.g. "Details", "Skill", "Skills", "Note", "Starting designation")
+  if (/^(?:details|skill|skills|note|notes|role|roles|position|positions|title|profile|job|jobs|description|qualification|qualifications|requirement|requirements|experience|criteria|eligibility|overview|summary|responsibilities|duties|tasks|information|important|mandatory|general|category|type|starting\s+designation|initial\s+designation|tentative\s+designation|proposed\s+designation|starting\s+role|initial\s+role)$/i.test(role)) {
     return null;
   }
 
@@ -1065,7 +1085,7 @@ export function cleanRoleTitle(rawRole: string | null | undefined): string | nul
 
   // 15. Reject blacklisted procedural, administrative, or email prose phrases
   if (
-    /\byou\b|\bwe\b|\bi\b|dear\s|greetings|hi\s+|hello\s|upcoming|forwarded|scheduled|eligible|please|kindly|hereby|\binform(?:ing|ed|s)?\b|congratulat|registr|passout|batch|drive\b|placement|interview|assessment|\btest\b|portal\b|career\s+portal|complete\s+application|\bhiring\b|\brecruitment\b|shared\s+at\s+the\s+earliest|further\s+details|reserve\s+a\s+position|expect\s+them|next\s+round|depends\s+on/i.test(role)
+    /\byou\b|\bwe\b|\bi\b|dear\s|greetings|hi\s+|hello\s|upcoming|forwarded|scheduled|eligible|please|kindly|hereby|\binform(?:ing|ed|s)?\b|congratulat|registr|passout|batch|drive\b|placement|interview|assessment|\btest\b|portal\b|career\s+portal|complete\s+application|\bhiring\b|\brecruitment\b|shared\s+at\s+the\s+earliest|further\s+details|reserve\s+a\s+position|expect\s+them|next\s+round|depends\s+on|starting\s+designation/i.test(role)
   ) {
     return null;
   }
@@ -1140,17 +1160,24 @@ export function extractJobDetails(text: string): ExtractedJobDetails {
   let stipend: string | null = null;
   let location: string | null = null;
 
-  // Clean HTML tags, styles, CSS hex color codes (e.g. #333333, #666666), and excess whitespace
-  const noHtml = text
+  // Clean HTML tags, styles, CSS hex color codes (e.g. #333333, #666666), preserving block newlines
+  const htmlWithNewlines = text
     .replace(/<style[\s\S]*?<\/style>/gi, ' ')
     .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<\/(?:p|div|tr|li|h[1-6]|table)>/gi, '\n')
+    .replace(/<br\s*\/?>/gi, '\n')
     .replace(/<[^>]+>/g, ' ')
     .replace(/#[0-9a-fA-F]{3,8}\b/g, ' ');
 
-  const cleanText = noHtml
+  const noHtml = htmlWithNewlines;
+
+  const cleanWithLines = htmlWithNewlines
     .replace(/[*_`>#]/g, ' ')
+    .replace(/[ \t]+/g, ' ')
     .replace(/&nbsp;/gi, ' ')
-    .replace(/&amp;/gi, '&')
+    .replace(/&amp;/gi, '&');
+
+  const cleanText = cleanWithLines
     .replace(/\s+/g, ' ');
 
   const unannouncedPattern = /will be (?:announced|informed|shared) later|tba|tbd|to be (?:announced|disclosed)|not disclosed/i;
@@ -1217,12 +1244,6 @@ export function extractJobDetails(text: string): ExtractedJobDetails {
     // 1.2. Structured TCTC (Total Cost To Company) Table Mapping:
     // When an email has a breakdown table with columns like "Fixed Pay", "Bonus", "TCTC@Target", "TCTC @MEP" (e.g. American Express),
     // extract values directly from the TCTC columns!
-    const cleanWithLines = noHtml
-      .replace(/[*_`>#]/g, ' ')
-      .replace(/&nbsp;/gi, ' ')
-      .replace(/&amp;/gi, '&')
-      .replace(/[ \t]+/g, ' ');
-
     const tctcHeaderIndex = cleanWithLines.search(/\b(?:TCTC|Total\s+CTC)\b/i);
     if (tctcHeaderIndex !== -1) {
       const beforeTctc = cleanWithLines.slice(0, tctcHeaderIndex);
@@ -1441,15 +1462,32 @@ export function extractJobDetails(text: string): ExtractedJobDetails {
 
   // Role / Designation Extraction:
   // Uses clean text with preserved line breaks so newline-terminated titles extract cleanly
-  const cleanWithLines = noHtml
-    .replace(/[*_`>#]/g, ' ')
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/&amp;/gi, '&')
-    .replace(/[ \t]+/g, ' ');
-
   const explicitIstRole = cleanWithLines.match(/\bIS&T\s+((?:SDET|SRE)\s+Intern)\b/i);
   if (explicitIstRole) {
     role = cleanRoleTitle(`IS&T ${explicitIstRole[1]}`);
+  }
+
+  // Check for inline sentence descriptions with role lists like:
+  // "Starting designation are as Discipline Engineer (...), Data Analyst, Sales Account Manager, Market developer, etc."
+  if (!role) {
+    const listIntroMatch = cleanText.match(/\b(?:starting\s+)?designations?\s+(?:are\s+as|is\s+as|are|is|include)\s*[:\-–—\t]?\s*([^.]+)/i);
+    if (listIntroMatch) {
+      const withoutParens = listIntroMatch[1].replace(/\s*\([^)]*\)/g, ' ').replace(/\betc\.?\b/gi, '').trim();
+      const rawRoles = withoutParens
+        .split(/[,;\/]+/)
+        .map((s) => s.trim())
+        .filter((s) => s.length >= 2);
+      const validRoles: string[] = [];
+      for (const r of rawRoles) {
+        const cleaned = cleanRoleTitle(r);
+        if (cleaned && !validRoles.includes(cleaned)) {
+          validRoles.push(cleaned);
+        }
+      }
+      if (validRoles.length > 0) {
+        role = validRoles.join(' / ');
+      }
+    }
   }
 
   // 1. Explicit headers: Designation, Job Role, Job Profile, Role, Position, Job Designation Offered, Title
@@ -1507,12 +1545,20 @@ export function extractJobDetails(text: string): ExtractedJobDetails {
   // 4. Job Location Extraction (extracts clean cities, states, and countries without internship/drive noise)
   // Must NOT match test venue phrases like "@ Own location You can write from LC 103"
   // Supports Office Location, Work Location, Job Location, Tentative Location, Place of Posting, with or without colons/markdown asterisks
-  const explicitWorkLocationMatch = cleanText.match(
+  const explicitWorkLocationMatch = cleanWithLines.match(
+    /\b(?:Work|Job|Office)\s+Location(?:s)?\b\s*[:\-–—\t|=]?\s*([^\n\r]{2,160})/i
+  ) || cleanWithLines.match(
+    /\bLocation\b\s*[:\-–—\t|=]\s*([^\n\r]{2,160})/i
+  ) || cleanText.match(
     /\b(?:Work|Job|Office)\s+Location(?:s)?\b\s*[:\-–—\t|=]?\s*([^\n\r]{2,160})/i
   ) || cleanText.match(
     /\bLocation\b\s*[:\-–—\t|=]\s*([^\n\r]{2,160})/i
   );
-  const locMatch = explicitWorkLocationMatch || cleanText.match(
+  const locMatch = explicitWorkLocationMatch || cleanWithLines.match(
+    /(?<!@\s*|own\s+)\b(?:Office|Work|Job|Posting|Hiring|Base|Tentative|Placement|Expected|Preferred|Internship)?\s*Locations?\b\s*[:\-–—\t|=]?\s*(?:will\s+be\s*[:\-–—]?|is\s*[:\-–—]?|is\s+at\s*[:\-–—]?)?\s*[*_~`\s]*([^\n\r<>{}_]{2,120})/i
+  ) || cleanWithLines.match(
+    /\b(?:Place\s+of\s+(?:Posting|Work))\b\s*[:\-–—\t|]?\s*[*_~`\s]*([^\n\r<>{}_]{2,120})/i
+  ) || cleanText.match(
     /(?<!@\s*|own\s+)\b(?:Office|Work|Job|Posting|Hiring|Base|Tentative|Placement|Expected|Preferred|Internship)?\s*Locations?\b\s*[:\-–—\t|=]?\s*(?:will\s+be\s*[:\-–—]?|is\s*[:\-–—]?|is\s+at\s*[:\-–—]?)?\s*[*_~`\s]*([^\n\r<>{}_]{2,120})/i
   ) || cleanText.match(
     /\b(?:Place\s+of\s+(?:Posting|Work))\b\s*[:\-–—\t|]?\s*[*_~`\s]*([^\n\r<>{}_]{2,120})/i
@@ -1520,7 +1566,8 @@ export function extractJobDetails(text: string): ExtractedJobDetails {
 
   if (locMatch) {
     let rawLoc = locMatch[1]
-      .replace(/\s*(?:(?:\d+\.?\s*)?(?:Start\s+Date|Note|Eligibility|Criteria|Requirements?|Registration|CTC|Stipend|Internship\s+Duration|Joining\s+Date|Joining|Graduation\s+Year|Graduation|Batch|Timeline|Internship|Placement|Offer|Process|Website|Warm|Kind|Selection|Designation|Role|Job|JD|Position|Skills|Service|All\s+the|Work\s+Mode|Economy|On\s+Wed|For\s+more|PPO|About|Mandatory|depending\s+on|Fluent\s+English|Communication|You\s+can|Write\s+from|Forwarded|Queries|LC\s*\d|PRP|SJT|Anna|Lab|Hall|Venue|Whether|Academic\s+gap|Gap\s+allowed|Allowed|Backlog|Standing\s+arrear|History\s+of\s+arrear|---)|[•*]).*$/i, '')
+      .replace(/\s*(?:(?:\d+\.?\s*)?(?:Start\s+Date|Note|Eligibility|Criteria|Requirements?|Registration|CTC|Stipend|Internship\s+Duration|Joining\s+Date|Joining|Graduation\s+Year|Graduation|Batch|Timeline|Internship|Placement|Offer|Process|Website|Warm|Kind|Selection|Designation|Role|Job|JD|Position|Skills|Service|All\s+the|Work\s+Mode|Economy|On\s+Wed|For\s+more|PPO|About|Mandatory|depending\s+on|Fluent\s+English|Communication|You\s+can|Write\s+from|Forwarded|Queries|LC\s*\d|PRP|SJT|Anna|Lab|Hall|Venue|Whether|Academic\s+gap|Gap\s+allowed|Allowed|Backlog|Standing\s+arrear|History\s+of\s+arrear|Students?|Candidates?|Kindly|Please|Below\s+attachment|Refer\s+attachment|Allocated|Will\s+be\s+allocated|---)|[•*]).*$/i, '')
+      .replace(/\.\s+[A-Z].*$/, '')
       .replace(/\b(?:whether|academic\s+gap|gap\s+allowed|backlogs?|standing\s+arrears?|history\s+of\s+arrears?|allowed\s*:|allowed\b).*$/i, '')
       .replace(/\s*\(?(?:work\s+from\s+office|wfo|in\s+person|on\s*site|remote|hybrid|in\s+office)\)?/gi, '')
       .replace(/\b(?:internship|placement|drive|hiring|offer|job|role|any\s+honeywell\s+site|only|based|preferred|fluent\s+english|communication)\b/gi, '')

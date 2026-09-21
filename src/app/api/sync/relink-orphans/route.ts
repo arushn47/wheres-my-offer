@@ -141,7 +141,7 @@ export async function POST() {
               assignment_source: 'relink_orphans',
               confidence: 'medium',
             },
-            { onConflict: 'email_id,placement_drive_id' }
+            { onConflict: 'email_id,placement_drive_id,link_type' }
           );
 
         linked++;

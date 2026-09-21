@@ -16,24 +16,28 @@ export default async function AnalyticsPage() {
   const session = await requireSession();
   const supabase = createAdminClient();
 
-  // Fetch applications, events, companies, emails, candidate matches, accounts
+  // Fetch placement_drives, applications, events, companies, emails, candidate matches, accounts
   const [
+    { data: placementDrives },
     { data: applications },
     { data: events },
     { data: companies },
-    { data: placementDrives },
     { count: emailsCount },
     { data: candidateMatches },
     { data: userProfile },
     { data: accounts },
   ] = await Promise.all([
     supabase
+      .from('placement_drives')
+      .select('id, company_id, drive_number, drive_name, role, category, ctc, stipend, location')
+      .eq('user_id', session.userId),
+    supabase
       .from('applications')
-      .select('id, placement_drive_id, status, notes, ctc, stipend, category, applied_at, last_updated')
+      .select('id, placement_drive_id, status, role, category, ctc, stipend, location, notes, manual_override, applied_at, last_updated, registration_deadline')
       .eq('user_id', session.userId),
     supabase
       .from('events')
-      .select('id, placement_drive_id, event_type, start_time')
+      .select('id, placement_drive_id, event_type, title, start_time')
       .eq('user_id', session.userId)
       .order('start_time', { ascending: true }),
     supabase
@@ -41,16 +45,12 @@ export default async function AnalyticsPage() {
       .select('id, name')
       .eq('user_id', session.userId),
     supabase
-      .from('placement_drives')
-      .select('id')
-      .eq('user_id', session.userId),
-    supabase
       .from('emails')
       .select('id', { count: 'exact', head: true })
       .eq('user_id', session.userId),
     supabase
       .from('candidate_matches')
-      .select('id, email_id')
+      .select('id, email_id, placement_drive_id')
       .eq('user_id', session.userId)
       .neq('match_type', 'xlsx_applied_list'),
     supabase
@@ -64,19 +64,84 @@ export default async function AnalyticsPage() {
       .eq('user_id', session.userId),
   ]);
 
-  // Resolve unique shortlisted company count
-  let uniqueMatchesCount = 0;
-  if (candidateMatches && candidateMatches.length > 0) {
-    const matchedEmailIds = candidateMatches.map((m) => m.email_id).filter(Boolean);
-    if (matchedEmailIds.length > 0) {
-      const { data: matchedEmails } = await supabase
-        .from('emails')
-        .select('placement_drive_id')
-        .in('id', matchedEmailIds);
-      const uniqueMatchIds = new Set(
-        (matchedEmails || []).map((e) => e.placement_drive_id).filter(Boolean)
-      );
-      uniqueMatchesCount = uniqueMatchIds.size;
+  const compMap = new Map((companies || []).map((c) => [c.id, c.name]));
+  const appMap = new Map((applications || []).map((a) => [a.placement_drive_id, a]));
+
+  const unifiedDrives = (placementDrives || []).map((drive) => {
+    const app = appMap.get(drive.id);
+    const companyName =
+      compMap.get(drive.company_id) ||
+      ((drive as any).companies as { name?: string } | null)?.name ||
+      drive.drive_name ||
+      'Placement Drive';
+
+    return {
+      id: app?.id || drive.id,
+      placement_drive_id: drive.id,
+      company_id: drive.company_id,
+      company_name: companyName,
+      drive_number: drive.drive_number,
+      status: app?.status || 'not_applied',
+      notes: app?.notes || null,
+      ctc: app?.ctc || drive.ctc || null,
+      stipend: app?.stipend || drive.stipend || null,
+      category: app?.category || drive.category || null,
+      role: app?.role || drive.role || null,
+      location: app?.location || drive.location || null,
+      applied_at: app?.applied_at || null,
+      last_updated: app?.last_updated || null,
+      manual_override: app?.manual_override || false,
+    };
+  });
+
+  // Also include any legacy applications that don't have placement_drive_id (if any)
+  if (applications) {
+    for (const app of applications) {
+      if (!app.placement_drive_id) {
+        unifiedDrives.push({
+          id: app.id,
+          placement_drive_id: null,
+          company_id: null,
+          company_name: 'Opportunity',
+          drive_number: null,
+          status: app.status || 'not_applied',
+          notes: app.notes || null,
+          ctc: app.ctc || null,
+          stipend: app.stipend || null,
+          category: app.category || null,
+          role: app.role || null,
+          location: app.location || null,
+          applied_at: app.applied_at || null,
+          last_updated: app.last_updated || null,
+          manual_override: app.manual_override || false,
+        });
+      }
+    }
+  }
+
+  // Include any standalone company that doesn't have a placement drive yet
+  const companiesWithDrives = new Set((placementDrives || []).map((d: any) => d.company_id));
+  if (companies) {
+    for (const comp of companies) {
+      if (!companiesWithDrives.has(comp.id)) {
+        unifiedDrives.push({
+          id: comp.id,
+          placement_drive_id: null,
+          company_id: comp.id,
+          company_name: comp.name,
+          drive_number: null,
+          status: 'not_applied',
+          notes: null,
+          ctc: null,
+          stipend: null,
+          category: null,
+          role: null,
+          location: null,
+          applied_at: null,
+          last_updated: null,
+          manual_override: false,
+        });
+      }
     }
   }
 
@@ -84,22 +149,23 @@ export default async function AnalyticsPage() {
   const personalEmail = accounts?.find((a) => a.account_type === 'personal')?.email || session.email;
   const campus = detectCampus(collegeEmail || personalEmail);
   const branch = detectBranch(collegeEmail);
-  const driveEntityCount = new Set([
-    ...(placementDrives || []).map((drive) => `drive:${drive.id}`),
-    ...(applications || [])
-      .filter((application) => !application.placement_drive_id)
-      .map((application) => `legacy:${application.placement_drive_id}`),
-  ]).size;
+
+  // Compute unique shortlisted drives from candidate_matches
+  const uniqueMatchIds = new Set(
+    (candidateMatches || []).map((m: any) => m.placement_drive_id).filter(Boolean)
+  );
 
   return (
     <div className="mx-auto max-w-6xl w-full">
       <AnalyticsClient
-        applications={applications || []}
+        drives={unifiedDrives}
+        applications={unifiedDrives}
         events={events || []}
-        companiesCount={driveEntityCount}
+        candidateMatches={candidateMatches || []}
+        companiesCount={unifiedDrives.length}
         emailsCount={emailsCount || 0}
         matchesCount={candidateMatches?.length || 0}
-        uniqueMatchesCount={uniqueMatchesCount}
+        uniqueMatchesCount={uniqueMatchIds.size}
         neoId={userProfile?.neo_id || null}
         campus={campus}
         branch={branch}

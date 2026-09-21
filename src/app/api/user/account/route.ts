@@ -53,7 +53,7 @@ export async function DELETE(req: Request) {
     }
 
     // 2. Explicitly clean up related tables before user deletion (to ensure clean cascade even without foreign key triggers)
-    await Promise.allSettled([
+    const cleanupResults = await Promise.all([
       supabase.from('events').delete().eq('user_id', userId),
       supabase.from('candidate_matches').delete().eq('user_id', userId),
       supabase.from('notifications').delete().eq('user_id', userId),
@@ -66,11 +66,23 @@ export async function DELETE(req: Request) {
       supabase.from('sync_state').delete().eq('user_id', userId),
       supabase.from('gmail_accounts').delete().eq('user_id', userId),
     ]);
+    const cleanupError = cleanupResults.find((result) => result.error)?.error;
+    if (cleanupError) {
+      console.error('[Account Deletion] Cleanup failed:', cleanupError);
+      return NextResponse.json(
+        { error: 'Account deletion incomplete; no final deletion confirmation was issued' },
+        { status: 500 }
+      );
+    }
 
     // 3. Delete user from public.users table
     const { error: deleteUserErr } = await supabase.from('users').delete().eq('id', userId);
     if (deleteUserErr) {
       console.error('[Account Deletion] Failed to delete user from public.users:', deleteUserErr);
+      return NextResponse.json(
+        { error: 'Account deletion incomplete; user record could not be removed' },
+        { status: 500 }
+      );
     }
 
     // 4. Try cleaning up auth user if created via Supabase Auth

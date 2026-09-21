@@ -220,6 +220,16 @@ export default function DashboardClient({
       .slice(0, 4);
   }, [activeApplications, upcomingEvents]);
 
+  const next24hEvents = useMemo(() => {
+    const now = Date.now();
+    const limit = now + 24 * 60 * 60 * 1000;
+    return upcomingEvents.filter((e) => {
+      if (!e.start_time) return false;
+      const t = new Date(e.start_time).getTime();
+      return t >= now - 60 * 60 * 1000 && t <= limit;
+    });
+  }, [upcomingEvents]);
+
   const appliedCount = stats.total_applied ?? stats.applied;
   const totalShortlisted = stats.total_shortlisted ?? stats.shortlisted;
   const activeShortlisted = stats.active_shortlisted ?? 0;
@@ -357,7 +367,7 @@ export default function DashboardClient({
       </div>
 
       {/* Upcoming Strip (Next 24 hrs) */}
-      {upcomingEvents.length > 0 && (
+      {next24hEvents.length > 0 && (
         <motion.div
           initial={{ opacity: 0, y: 14 }}
           animate={{ opacity: 1, y: 0 }}
@@ -367,7 +377,7 @@ export default function DashboardClient({
         >
           <CalendarClock className="h-4 w-4 shrink-0 text-amber-400" />
           <span className="shrink-0 font-mono text-[10px] uppercase tracking-widest text-amber-300">Next 24 hrs</span>
-          {upcomingEvents.slice(0, 5).map((e) => (
+          {next24hEvents.slice(0, 5).map((e) => (
             <span
               key={e.id}
               className="flex shrink-0 items-center gap-2 rounded-full border border-zinc-800 bg-zinc-900/70 px-2.5 sm:px-3 py-1 text-[10px] sm:text-[11px] text-zinc-300"

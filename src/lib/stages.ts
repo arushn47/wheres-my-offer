@@ -1,3 +1,5 @@
+import { deriveEventEndTime } from '@/lib/event-duration';
+
 export interface StageDefinition {
   id: string;
   label: string;
@@ -111,17 +113,9 @@ export function getEffectiveStage(
     return t ? new Date(t).getTime() : null;
   };
 
-  // Realistic placement event durations:
-  // Tests / OAs typically run 120 min (2 hours).
-  // Pre-Placement Talks (PPT) run ~90 min (1.5 hours).
-  // Interviews run ~60 min (1 hour).
-  const getEventDurationMs = (e: EventLike) => {
-    const typeStr = getEvtType(e);
-    if (/ppt|pre[\s-]*placement/i.test(typeStr)) return 90 * 60 * 1000;
-    if (/interview/i.test(typeStr)) return 60 * 60 * 1000;
-    return 120 * 60 * 1000;
-  };
-
+  // Canonical fallback durations live in one place so the database, sync
+  // engine, reprocess engine and UI derive the same end time:
+  // PPT = 1.5h, tests/assessments = 2h, interviews = 1.5h.
   const getEventEndTime = (e: EventLike) => {
     const endT = e.end_time || e.endTime;
     if (endT) {
@@ -129,10 +123,9 @@ export function getEffectiveStage(
       if (!isNaN(t)) return t;
     }
     const startT = getEventTime(e);
-    if (startT !== null) {
-      return startT + getEventDurationMs(e);
-    }
-    return null;
+    if (startT === null) return null;
+    const derived = deriveEventEndTime(getEvtType(e), getEvtType(e), new Date(startT));
+    return derived ? derived.getTime() : null;
   };
 
   const isEventOngoing = (e: EventLike) => {
@@ -548,6 +541,36 @@ export function getEffectiveStage(
 
   // 4. Generic Rejected fallback (no notes, no events -> screened out before test)
   if (s === 'rejected') {
+    if (hasInterview && isInterviewCompleted) {
+      return {
+        stageIndex: 4,
+        effectiveStatus: 'rejected_interview',
+        eliminatedStage: 4,
+        furthestPassedStage: 3,
+        statusSubtitle: 'Interviewed · Not Selected',
+        hasPpt,
+        hasTest,
+        hasInterview,
+        isTestCompleted,
+        isPptCompleted,
+        isInterviewCompleted,
+      };
+    }
+    if (hasTest && isTestCompleted) {
+      return {
+        stageIndex: 3,
+        effectiveStatus: 'rejected_test',
+        eliminatedStage: 3,
+        furthestPassedStage: 2,
+        statusSubtitle: 'Eliminated in Test Round',
+        hasPpt,
+        hasTest,
+        hasInterview,
+        isTestCompleted,
+        isPptCompleted,
+        isInterviewCompleted,
+      };
+    }
     return {
       stageIndex: 2,
       effectiveStatus: 'not_shortlisted',

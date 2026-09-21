@@ -1136,7 +1136,8 @@ export function cleanCompanyName(name: string): string {
   let str = cleanSubjectNoise(name);
 
   // Fix known CDC typos / misspellings in company names
-  str = str.replace(/\bunthikable\b/gi, 'Unthinkable');
+  str = str.replace(/\bunthikable(?:\s+solutions)?\b/gi, 'Unthinkable');
+  str = str.replace(/\bunthinkable\s+solutions\b/gi, 'Unthinkable');
 
   // Strip leading date change / update noise if any slipped through
   str = str.replace(/^(?:date\s+change\s+(?:for|:)?|rescheduled\s+(?:for|:)?)/i, '').trim();
@@ -1168,9 +1169,9 @@ export function cleanCompanyName(name: string): string {
   // 2. Remove parenthetical subsidiary / owner notes: e.g. "(A Siemens Company)"
   str = str.replace(/\((?:a|an|the)?\s*[^)]*?(?:company|group|subsidiary|division)[^)]*\)/gi, ' ').trim();
 
-  // 3. Strip only generic noise in parentheses (numbers, batch years, categories, academic levels, campuses)
-  // Preserves legitimate brand names in parentheses like "Eternal (Zomato)", "Responsive (RFP Software)"
-  const NOISE_PARENTHETICAL_REGEX = /\((?:\d+|super\s+dream|dream|regular|core|internship|placement|drive|ppo|fte|off\s+campus|on\s+campus|ug|pg|b\.?tech|m\.?tech|mca|mba|india|vellore|bhopal|chennai|ap|\d{4}(?:\s*batch)?)\)/gi;
+  // 3. Strip only generic noise in parentheses (numbers, batch years, categories, academic levels, campuses, acronyms)
+  // Preserves legitimate brand names in parentheses like "Eternal (Zomato)"
+  const NOISE_PARENTHETICAL_REGEX = /\((?:\d+|super\s+dream|dream|regular|core|internship|placement|drive|ppo|fte|off\s+campus|on\s+campus|ug|pg|b\.?tech|m\.?tech|mca|mba|india|vellore|bhopal|chennai|ap|se|wtw\s+india|rfp\s+software|ernst\s*&\s*young|[a-z]{1,3}|\d{4}(?:\s*batch)?)\)/gi;
   str = str.replace(NOISE_PARENTHETICAL_REGEX, '').trim();
 
   // Strip trailing corporate legal entity suffixes (e.g. "Euler Motors Pvt. Ltd." -> "Euler Motors")

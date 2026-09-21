@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { cleanEventTitle, cleanRoleTitle, extractJobDetails } from './events';
+import { cleanEventTitle, cleanRoleTitle, extractJobDetails, extractEvents } from './events';
 
 describe('cleanRoleTitle', () => {
   it('cleans role prefixes like "Designation : " or "Job Role : "', () => {
@@ -60,6 +60,14 @@ describe('cleanRoleTitle', () => {
     expect(cleanRoleTitle('Skill')).toBeNull();
     expect(cleanRoleTitle('Skills')).toBeNull();
     expect(cleanRoleTitle('Note')).toBeNull();
+    expect(cleanRoleTitle('Starting designation')).toBeNull();
+    expect(cleanRoleTitle('Initial designation')).toBeNull();
+  });
+
+  it('strips prefixes and trailing role/position words', () => {
+    expect(cleanRoleTitle('Service line - Position Title: Consulting – Technology')).toBe('Consulting – Technology');
+    expect(cleanRoleTitle('Software Development Engineer role')).toBe('Software Development Engineer');
+    expect(cleanRoleTitle('Forward Deployed Engineer position')).toBe('Forward Deployed Engineer');
   });
 
   it('rejects candidate shortlist snippets containing Neo IDs', () => {
@@ -125,6 +133,22 @@ Kindly check your NEO PAT portal for the registration link.
     const details = extractJobDetails(text);
     expect(details.role).toBe('Software Developer / Technical Product Analyst');
   });
+
+  it('extracts comma-separated roles from ExxonMobil narrative designation text', () => {
+    const text = `
+*Job location:* *Bangalore, Mumbai and Gurgaon*
+
+*Designation : * Depends on the function that employee would join.
+Starting designation
+are as Discipline Engineer (eg Electrical Engineer in Electrical
+Engineering function), Data Analyst, Sales Account Manager, Market
+developer, etc.
+
+*Service Agreement: Yes, every employee has to sign a general employment
+    `;
+    const details = extractJobDetails(text);
+    expect(details.role).toBe('Discipline Engineer / Data Analyst / Sales Account Manager / Market developer');
+  });
 });
 
 describe('cleanEventTitle', () => {
@@ -161,3 +185,44 @@ describe('cleanEventTitle', () => {
     expect(cleanEventTitle('   ', 'Google', 'Online Test')).toBe('Online Test');
   });
 });
+
+describe('extractEvents registration_deadline', () => {
+  it('extracts registration deadline from CDC circulars with flexible phrasing and explicit times (e.g. L&T)', () => {
+    const email = {
+      subject: 'Larsen & Toubro Limited : Registration : Dream Offer - 2027 Batch',
+      receivedAt: new Date('2026-09-21T10:28:41Z'),
+      bodySnippet: `*Registration:*
+*All the interested and eligible students should register in the below company's link & Neo pat portal on before
+*25-09-2026 (09:00 am)*
+Company's Registration Link - https://campus.lntedutech.com/...`,
+    } as any;
+
+    const events = extractEvents(email);
+    const regEvent = events.find((e) => e.eventType === 'registration_deadline');
+
+    expect(regEvent).toBeDefined();
+    expect(regEvent?.hasExplicitTime).toBe(true);
+    expect(regEvent?.startTime).toEqual(new Date('2026-09-25T03:30:00.000Z'));
+  });
+});
+
+describe('isTrustedPlacementSender', () => {
+  it('strictly restricts allowed placement senders and rejects unauthorized senders', async () => {
+    const { isTrustedPlacementSender } = await import('./engine');
+
+    // Personal account: strictly noreply.cdcinfo@vitstudent.ac.in
+    expect(isTrustedPlacementSender('noreply.cdcinfo@vitstudent.ac.in', true)).toBe(true);
+    expect(isTrustedPlacementSender('CDC Info <noreply.cdcinfo@vitstudent.ac.in>', true)).toBe(true);
+    expect(isTrustedPlacementSender('vitlions2027@vitbhopal.ac.in', true)).toBe(false);
+    expect(isTrustedPlacementSender('professor@vitbhopal.ac.in', true)).toBe(false);
+    expect(isTrustedPlacementSender('careers@google.com', true)).toBe(false);
+
+    // College account: vitlions2027@vitbhopal.ac.in or noreply.cdcinfo@vitstudent.ac.in
+    expect(isTrustedPlacementSender('vitlions2027@vitbhopal.ac.in', false)).toBe(true);
+    expect(isTrustedPlacementSender('Placement Cell <vitlions2027@vitbhopal.ac.in>', false)).toBe(true);
+    expect(isTrustedPlacementSender('noreply.cdcinfo@vitstudent.ac.in', false)).toBe(true);
+    expect(isTrustedPlacementSender('professor@vitbhopal.ac.in', false)).toBe(false);
+    expect(isTrustedPlacementSender('notifications@github.com', false)).toBe(false);
+  });
+});
+

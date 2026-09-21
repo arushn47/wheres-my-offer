@@ -19,7 +19,8 @@ export function cleanLocationString(raw: string | null | undefined): string {
 
   let cleaned = raw
     .replace(/<[^>]+>/g, ' ')
-    .replace(/\s*(?:Criteria|Eligibility|Requirements?|Note|Job\s+Description|JD|Mandatory|Fluent\s+English|Communication|Service\s+Agreement|Bond|Selection|Process|Registration|CTC|Stipend|Designation|Role|PPO|About|Whether|Academic\s+gap|Gap\s+allowed|Allowed|Backlogs?|Standing\s+arrears?|History\s+of\s+arrears?|Cut-?off|Aggregate|CGPA|Branch(?:es)?\s+eligible|Eligible\s+branch(?:es)?|Gender|Batch|Tentative|Internship\s+duration|Joining|Duration|Mode\s+of\s+selection|Assessment|Test\s+date|Interview|Venue|Date\s+of\s+visit)\b.*$/i, '')
+    .replace(/\s*(?:Criteria|Eligibility|Requirements?|Note|Job\s+Description|JD|Mandatory|Fluent\s+English|Communication|Service\s+Agreement|Bond|Selection|Process|Registration|CTC|Stipend|Designation|Role|PPO|About|Whether|Academic\s+gap|Gap\s+allowed|Allowed|Backlogs?|Standing\s+arrears?|History\s+of\s+arrears?|Cut-?off|Aggregate|CGPA|Branch(?:es)?\s+eligible|Eligible\s+branch(?:es)?|Gender|Batch|Tentative|Internship\s+duration|Joining|Duration|Mode\s+of\s+selection|Assessment|Test\s+date|Interview|Venue|Date\s+of\s+visit|Students?|Candidates?|Kindly|Please|Below\s+attachment|Refer\s+attachment|Allocated|Will\s+be\s+allocated)\b.*$/i, '')
+    .replace(/\.\s+[A-Z].*$/, '')
     .replace(/\b(?:fluent\s+english|english\s+communication|communication\s+skills?|good\s+communication)\b.*$/i, '')
     .replace(/\b(?:whether|academic\s+gap|gap\s+allowed|backlogs?|standing\s+arrears?|history\s+of\s+arrears?|allowed\s*:|allowed\b).*$/i, '')
     .replace(/\s*\(?(?:work\s+from\s+office|wfo|in\s+person|on\s*site|in\s+office)\)?/gi, '')

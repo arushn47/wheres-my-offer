@@ -116,7 +116,16 @@ export async function scanGoogleSheetForCandidate(
         try {
           const tabCtrl = new AbortController();
           const tabTimeout = setTimeout(() => tabCtrl.abort(), 6000);
-          const sRes = await fetch(s.pageUrl, { signal: tabCtrl.signal });
+          let tabUrl: URL;
+          try {
+            tabUrl = new URL(s.pageUrl, pubhtmlUrl);
+          } catch {
+            continue;
+          }
+          if (tabUrl.protocol !== 'https:' || tabUrl.hostname !== 'docs.google.com') {
+            continue;
+          }
+          const sRes = await fetch(tabUrl, { signal: tabCtrl.signal, redirect: 'error' });
           clearTimeout(tabTimeout);
           if (!sRes.ok) continue;
           sheetHtml = await sRes.text();

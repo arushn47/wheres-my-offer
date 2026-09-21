@@ -2,6 +2,7 @@ import type { ParsedEmail } from '@/lib/gmail/client';
 import { extractEvents, extractJobDetails, type ExtractedEvent } from '@/lib/sync/events';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { isInactiveStatus } from '@/lib/stages';
+import { deriveEventEndTime } from '@/lib/event-duration';
 
 /**
  * Converts HTML email content to clean plain text so table cells, divs, and paragraphs
@@ -159,7 +160,7 @@ export async function processEmailForEventsAndStatus(
   // Compute isShortlistEmail early — needed both for attachment scanning context (below)
   // and for status computation logic further down.
   const isAppliedOrOptInRoster =
-    /attached\s+(?:applied|opt[\s-]*in|registered)\s+(?:students?|candidates?)\s+list|opt[\s-]*in\s+list/i.test(fullText) &&
+    /attached\s+(?:(?:final|updated|revised)\s+)?(?:applied|opt[\s-]*in|registered)\s+(?:students?|candidates?)\s+list|opt[\s-]*in\s+list/i.test(fullText) &&
     !/shortlist|shortlisted/i.test(subjLower);
 
   const hasShortlistAttachment = Boolean(
@@ -185,6 +186,15 @@ export async function processEmailForEventsAndStatus(
     /shortlisted\s+(?:students?|candidates?)\s+list/i.test(fullText);
 
   const isShortlistEmail = (hasShortlistAttachment || isExplicitShortlistNotice) && !isAppliedOrOptInRoster;
+
+  // Body-level ID matches in application/registration rosters are not
+  // candidate participation evidence. This must run before status promotion.
+  if (isAppliedOrOptInRoster && isNeoMatched) {
+    isNeoMatched = false;
+    isInAppliedList = true;
+    matchType = 'xlsx_applied_list';
+    matchDetail = matchDetail || 'Candidate found in applied/registered roster';
+  }
 
   // 2. Scan Excel attachments whenever the email contains a shortlist/test/candidate list.
   // CRITICAL: Even if a student previously withdrew or opted out on NeoPAT, CDC often fails to
@@ -298,14 +308,18 @@ export async function processEmailForEventsAndStatus(
 
   if (isNeoMatched) {
     // Only record genuine shortlist matches (never applied/opt-in rosters)
-    await supabase.from('candidate_matches').insert({
+    const { error: candidateMatchError } = await supabase.from('candidate_matches').insert({
       user_id: userId,
       email_id: emailDbId,
+      placement_drive_id: targetDriveId,
       neo_id: userNeoId || userEmail,
       match_type: matchType,
       matched_value: matchDetail || email.subject.slice(0, 100),
       confidence: 'high',
     });
+    if (candidateMatchError && candidateMatchError.code !== '23505') {
+      throw candidateMatchError;
+    }
   }
 
   // 3. Extract Events (PPT, Test, Interview) with Deduplication
@@ -346,7 +360,8 @@ export async function processEmailForEventsAndStatus(
       const { deleteEventFromGoogleCalendar } = await import('@/lib/calendar/google-sync');
       for (const ev of toDelete) {
         if (ev.gcal_event_id) {
-          deleteEventFromGoogleCalendar({ userId, companyName: '', eventId: ev.gcal_event_id }).catch(() => {});
+          const deleted = await deleteEventFromGoogleCalendar({ userId, companyName: '', eventId: ev.gcal_event_id });
+          if (!deleted) return;
         }
       }
     }
@@ -609,9 +624,14 @@ export async function processEmailForEventsAndStatus(
       newStatus = 'interview_scheduled';
     } else if (isTestCompletedShortlist) {
       // The test round is already complete! Candidate completed the test and is in the post-test form / preference stage.
-      newStatus = 'test_scheduled';
+      newStatus = 'test_completed';
     } else if (/online\s+test|coding\s+test|assessment|test/i.test(subjLower) || /next\s+round/i.test(subjLower) || (matchDetail?.includes('Google Sheet') && !/ppt|pre[\s-]*placement/i.test(subjLower))) {
-      newStatus = 'test_scheduled';
+      const hasPastTest = extractedEvents.some((e) => {
+        if (!['online_test', 'coding_test'].includes(e.eventType) || !e.startTime) return false;
+        const endTime = e.endTime || deriveEventEndTime(e.eventType, e.title, e.startTime);
+        return Boolean(endTime) && endTime!.getTime() <= Date.now();
+      });
+      newStatus = hasPastTest ? 'test_completed' : 'test_scheduled';
     } else if (/ppt|pre[\s-]*placement/i.test(subjLower)) {
       newStatus = 'ppt_scheduled';
     } else {
@@ -720,11 +740,29 @@ export async function processEmailForEventsAndStatus(
       hasExplicitTestScheduleInSubject;
     const hasPpt = extractedEvents.some((e) => /ppt/i.test(e.eventType));
 
-    if (hasTest && !isShortlistEmail && ['applied', 'ppt_scheduled'].includes(current)) {
-      newStatus = 'test_scheduled';
+    if (hasTest && isNeoMatched && ['applied', 'ppt_scheduled'].includes(current)) {
+      const hasPastTest = extractedEvents.some((e) => {
+        if (!['online_test', 'coding_test'].includes(e.eventType) || !e.startTime) return false;
+        const endTime = e.endTime || deriveEventEndTime(e.eventType, e.title, e.startTime);
+        return Boolean(endTime) && endTime!.getTime() <= Date.now();
+      });
+      newStatus = hasPastTest ? 'test_completed' : 'test_scheduled';
     } else if (hasPpt && current === 'applied') {
       newStatus = 'ppt_scheduled';
     }
+  }
+
+  // Persist the elapsed test transition instead of deriving it only in the UI.
+  if (
+    (!newStatus || newStatus === 'test_scheduled') &&
+    ['test_scheduled', 'test_ongoing'].includes(newStatus || existingApp?.status || '') &&
+    extractedEvents.some((event) => {
+      if (!['online_test', 'coding_test'].includes(event.eventType) || !event.startTime) return false;
+      const endTime = event.endTime || deriveEventEndTime(event.eventType, event.title, event.startTime);
+      return Boolean(endTime) && endTime!.getTime() <= Date.now();
+    })
+  ) {
+    newStatus = 'test_completed';
   }
 
 
@@ -875,7 +913,8 @@ export async function processEmailForEventsAndStatus(
         const { deleteEventFromGoogleCalendar } = await import('@/lib/calendar/google-sync');
         for (const ev of toDelete) {
           if (ev.gcal_event_id) {
-            deleteEventFromGoogleCalendar({ userId, companyName: '', eventId: ev.gcal_event_id }).catch(() => {});
+            const deleted = await deleteEventFromGoogleCalendar({ userId, companyName: '', eventId: ev.gcal_event_id });
+            if (!deleted) return;
           }
         }
       }
@@ -897,7 +936,8 @@ export async function processEmailForEventsAndStatus(
         const { deleteEventFromGoogleCalendar } = await import('@/lib/calendar/google-sync');
         for (const ev of toDelete) {
           if (ev.gcal_event_id) {
-            deleteEventFromGoogleCalendar({ userId, companyName: '', eventId: ev.gcal_event_id }).catch(() => {});
+            const deleted = await deleteEventFromGoogleCalendar({ userId, companyName: '', eventId: ev.gcal_event_id });
+            if (!deleted) return;
           }
         }
       }
@@ -948,6 +988,26 @@ export async function processEmailForEventsAndStatus(
     Boolean(jobDetails.ctc || jobDetails.role);
   const isInitialApplication = !existingApp || existingApp.status === 'not_applied';
 
+  // Safely persist application
+  const { data: existingAppRow } = await supabase
+    .from('applications')
+    .select('id')
+    .eq('user_id', userId)
+    .eq('placement_drive_id', targetDriveId)
+    .maybeSingle();
+
+  if (existingAppRow?.id) {
+    const { error: applicationError } = await supabase.from('applications').update(appUpdate).eq('id', existingAppRow.id);
+    if (applicationError && applicationError.code !== '23505') {
+      throw applicationError;
+    }
+  } else {
+    const { error: applicationError } = await supabase.from('applications').insert(appUpdate);
+    if (applicationError && applicationError.code !== '23505') {
+      throw applicationError;
+    }
+  }
+
   if (isRecentEmail && isDriveDiscoveryEmail && isInitialApplication) {
     const { notifyNewDrive } = await import('@/lib/notifications/service');
     const { getDriveMode } = await import('@/lib/utils');
@@ -964,19 +1024,5 @@ export async function processEmailForEventsAndStatus(
       category: (appUpdate.category as string) || null,
       sourceEmailId: emailDbId,
     });
-  }
-
-  // Safely persist application
-  const { data: existingAppRow } = await supabase
-    .from('applications')
-    .select('id')
-    .eq('user_id', userId)
-    .eq('placement_drive_id', targetDriveId)
-    .maybeSingle();
-
-  if (existingAppRow?.id) {
-    await supabase.from('applications').update(appUpdate).eq('id', existingAppRow.id);
-  } else {
-    await supabase.from('applications').insert(appUpdate);
   }
 }

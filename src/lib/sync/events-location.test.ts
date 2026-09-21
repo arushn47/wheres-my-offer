@@ -17,6 +17,28 @@ describe('drive work-location extraction', () => {
       .toBe('Bangalore / Hyderabad / Noida');
   });
 
+  it('extracts Natwest job location from circular email', () => {
+    const email = `
+CTC: 15 LPA
+Stipend: nil
+Last date for Registration: 19th September 2026 (3.00 pm)
+Website: www.natwestgroup.com
+Job location: Gurgaon & Bangalore
+**Students clearing the interview process will be allocated any of the two. Kindly inform this to all the eligible students so they can apply wisely and only interested ones come forward.
+Job Description : Below attachment
+Registration:
+*All the interested and eligible students should register in the NEO PAT on or before 19th September 2026 (3.00 pm)
+No Manual Registration & extension will be entertained.
+    `;
+    const details = extractJobDetails(email);
+    expect(details.location).toBe('Gurgaon & Bangalore');
+  });
+
+  it('extracts Natwest job location even when on a single flattened line with footnote notes', () => {
+    const singleLine = 'Job location: Gurgaon & Bangalore **Students clearing the interview process will be allocated any of the two. Kindly inform this to all the eligible students so they can apply wisely and only interested ones come forward.';
+    expect(extractJobDetails(singleLine).location).toBe('Gurgaon & Bangalore');
+  });
+
   it('does not infer a location from a company name or headquarters', () => {
     expect(extractJobDetails('Acme placement drive. CTC: 10 LPA.').location).toBeNull();
   });
