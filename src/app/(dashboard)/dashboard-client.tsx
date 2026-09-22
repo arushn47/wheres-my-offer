@@ -4,14 +4,11 @@ import { useMemo } from 'react';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
 import {
-  Building2,
-  Briefcase,
   Clock,
   MapPin,
   ArrowUpRight,
   Zap,
   CalendarClock,
-  FileSpreadsheet,
   CheckCircle2,
   Calendar,
   ArrowRight,
@@ -231,17 +228,6 @@ export default function DashboardClient({
   }, [upcomingEvents]);
 
   const appliedCount = stats.total_applied ?? stats.applied;
-  const totalShortlisted = stats.total_shortlisted ?? stats.shortlisted;
-  const activeShortlisted = stats.active_shortlisted ?? 0;
-  const completedShortlisted = Math.max(0, totalShortlisted - activeShortlisted);
-
-  const shortlistSub =
-    totalShortlisted === 0
-      ? 'radar tracking'
-      : activeShortlisted > 0
-        ? `${activeShortlisted} active · ${completedShortlisted} completed`
-        : 'cleared for tests / interviews';
-
   const funnelCards = [
     {
       id: 'total',
@@ -254,9 +240,9 @@ export default function DashboardClient({
     },
     {
       id: 'active',
-      label: 'Active Pipeline',
+      label: 'Active',
       value: stats.active_applications,
-      sub: 'currently in contention',
+      sub: 'still in contention',
       title: `${stats.active_applications} applications currently active in contention`,
       accent: 'sky' as const,
       href: '/companies?filter=active',
@@ -271,22 +257,22 @@ export default function DashboardClient({
       href: '/companies?filter=scheduled',
     },
     {
-      id: 'shortlists',
-      label: 'Shortlists Cracked',
-      value: totalShortlisted,
-      sub: shortlistSub,
-      title: `${totalShortlisted} total shortlists cracked across all placement drives (${activeShortlisted} active in round, ${completedShortlisted} completed)`,
+      id: 'test-shortlists',
+      label: 'Test Shortlists',
+      value: stats.test_shortlists,
+      sub: stats.test_shortlists > 0 ? 'reached a test shortlist' : 'waiting for shortlist results',
+      title: `${stats.test_shortlists} placement drives where you reached a test or assessment shortlist, including completed or eliminated rounds`,
       accent: 'violet' as const,
-      href: '/companies?filter=shortlisted',
+      href: '/companies?filter=test_shortlisted',
     },
     {
-      id: 'offers',
-      label: 'Offers Received',
-      value: stats.selected,
-      sub: stats.selected > 0 ? 'congratulations 🎉' : 'radar tracking',
-      title: `${stats.selected} placement offers secured`,
+      id: 'interview-shortlists',
+      label: 'Interview Shortlists',
+      value: stats.interview_shortlists,
+      sub: stats.interview_shortlists > 0 ? 'cleared for interviews' : 'no interview shortlist yet',
+      title: `${stats.interview_shortlists} placement drives where you cleared an interview shortlist`,
       accent: 'emerald' as const,
-      href: '/companies?filter=all',
+      href: '/companies?filter=interview_shortlisted',
     },
   ];
 
@@ -321,10 +307,11 @@ export default function DashboardClient({
       <InstallPwaBanner />
 
       {/* Page Header */}
-      <div>
-        <h1 className="font-display text-xl sm:text-3xl font-extrabold tracking-tight text-zinc-100">
-          Placement Pipeline
-        </h1>
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
+        <div>
+          <h1 className="font-display text-xl sm:text-3xl font-extrabold tracking-tight text-zinc-100">
+            Placement Pipeline
+          </h1>
         <p className="flex flex-wrap items-center gap-1.5 mt-1 text-xs sm:text-sm text-zinc-500">
           <span>2027 Placement Season</span>
           {neoId && (
@@ -340,6 +327,21 @@ export default function DashboardClient({
             </>
           )}
         </p>
+        </div>
+        <Link
+          href="/companies?filter=all"
+          className={cn(
+            'inline-flex w-fit items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold transition-colors',
+            stats.selected > 0
+              ? 'border-emerald-500/25 bg-emerald-500/10 text-emerald-300 hover:border-emerald-400/50 hover:bg-emerald-500/15'
+              : 'border-zinc-800 bg-zinc-900/60 text-zinc-500 hover:border-zinc-700 hover:bg-zinc-900 hover:text-zinc-300'
+          )}
+        >
+          <CheckCircle2 className="h-3.5 w-3.5" />
+          {stats.selected > 0
+            ? `${stats.selected} ${stats.selected === 1 ? 'offer' : 'offers'} secured`
+            : 'Offers secured: 0'}
+        </Link>
       </div>
 
       {/* Funnel Metrics Grid */}
@@ -513,7 +515,8 @@ export default function DashboardClient({
         ) : (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 w-full min-w-0 max-w-full">
             {spotlightDrives.map((c) => {
-              const category = c.category || (/1[0-9]\s*lpa|[2-9][0-9]\s*lpa/i.test(c.ctc || '') ? 'Super Dream' : 'Dream');
+              const rawCategory = c.category || (/1[0-9]\s*lpa|[2-9][0-9]\s*lpa/i.test(c.ctc || '') ? 'Super Dream' : 'Dream');
+              const category = rawCategory.replace(/\b(internship|offer|placement|drive)\b/gi, '').replace(/\s*\/\s*/g, ' ').replace(/\s+/g, ' ').trim() || rawCategory.trim();
               const initials = c.companyName.slice(0, 2).toUpperCase();
               const hue = getHue(c.companyName);
               const driveMode = c.driveMode || getDriveMode(c.notes, campus);

@@ -93,7 +93,7 @@ export default async function CompanyDetailPage(props: {
   // 2. Resolve all drives for this company
   const { data: companyDrives } = await supabase
     .from('placement_drives')
-    .select('id, drive_number, drive_name, role, category, ctc, stipend, location, registration_deadline, eligibility, branches, cgpa_requirement, backlog_requirement, created_at')
+    .select('id, drive_number, drive_name, role, category, ctc, stipend, location, registration_deadline, eligibility, branches, cgpa_requirement, backlog_requirement, source_email_id, created_at')
     .eq('company_id', company.id)
     .eq('user_id', session.userId);
 
@@ -204,15 +204,22 @@ export default async function CompanyDetailPage(props: {
       .eq('user_id', session.userId),
   ]);
 
-  // Determine the verified start date of this drive from its official records
-  const verifiedTimes = (assignedEmails || [])
-    .map((em: any) => new Date(em.received_at || 0).getTime())
-    .filter((t: number) => t > 0);
-  if (application?.applied_at) verifiedTimes.push(new Date(application.applied_at).getTime());
-  if (targetDrive?.created_at) verifiedTimes.push(new Date(targetDrive.created_at).getTime());
+  const sourceEmail = targetDrive?.source_email_id
+    ? (assignedEmails || []).find((email: any) => email.id === targetDrive.source_email_id)
+    : null;
 
-  const driveStartTime = verifiedTimes.length > 0 ? Math.min(...verifiedTimes) : null;
-  const driveMinAllowedTime = driveStartTime ? driveStartTime - 24 * 60 * 60 * 1000 : 0;
+  // Use the drive's official source email time as the cutoff anchor. Using the
+  // earliest assigned email would allow an old circular to move the window
+  // backwards and make unrelated historical emails appear in the timeline.
+  const driveStartTime = sourceEmail?.received_at
+    ? new Date(sourceEmail.received_at).getTime()
+    : targetDrive?.created_at
+      ? new Date(targetDrive.created_at).getTime()
+    : application?.applied_at
+      ? new Date(application.applied_at).getTime()
+      : null;
+  // Allow a small amount of clock drift, but never include older circulars.
+  const driveMinAllowedTime = driveStartTime ? driveStartTime - 15 * 60 * 1000 : 0;
 
   // Combine verified assigned emails
   const allEmailsMap = new Map<string, any>();

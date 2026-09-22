@@ -55,9 +55,11 @@ export function computeContentKey(senderEmail: string, subject: string, bodySnip
 }
 
 /**
- * Shadow-writes a canonical_emails row for a processed college broadcast email.
+ * Writes a canonical_emails row for a processed college broadcast email and links it
+ * back to the per-user emails row. Always awaited by the caller.
  * Failures are silently logged — this never throws or affects the main pipeline.
- * In Phase 2D, we will flip to reading canonical_emails before fetching Gmail bodies.
+ * Phase 2D will flip this to a cache-read: if a canonical row already exists for a
+ * given content_key, we skip fetchMessageDetail() entirely (zero Gmail API egress).
  */
 async function shadowWriteCanonical(
   supabase: ReturnType<typeof createAdminClient>,
@@ -739,15 +741,17 @@ async function processSingleMessage(
           // user-specific registration data. Only identical CDC circulars sent to all
           // students qualify.
           if (!isPersonal) {
-            // Fire-and-forget: shadow write must never block or throw into the main pipeline
-            shadowWriteCanonical(
+            // Awaited: shadowWriteCanonical has an internal try/catch and never throws.
+            // Must be awaited — Vercel freezes the container the moment runSync() returns,
+            // so a fire-and-forget upsert would be killed in-flight on every invocation.
+            await shadowWriteCanonical(
               supabase,
               parsedEmail,
               insertedEmail.id,
               classification,
               companyName || null,
               account
-            ).catch(() => {});
+            );
           }
         }
     }
@@ -1792,43 +1796,58 @@ export async function runSync(
               }
             }
 
-            // TEMPORAL FILTER: Build Drive Anchor Date map (company_id -> latest Anchor Date)
+            // TEMPORAL FILTER: Build Company Anchor Date map (company_id -> latest Anchor Date)
             // An Anchor Date is the latest received_at of a NeoPAT email or an email containing pat-PL-
             const { data: anchorEmails } = await supabase
               .from('emails')
-              .select('received_at, placement_drive_id')
+              .select('received_at, placement_drive_id, placement_drives!inner(company_id)')
               .eq('user_id', userId)
               .not('placement_drive_id', 'is', null)
               .or('sender.ilike.%noreply.cdcinfo@vitstudent.ac.in%,body_snippet.ilike.%pat-PL-%');
 
             const driveAnchorDates = new Map<string, number>();
             for (const ae of anchorEmails || []) {
-              if (!ae.placement_drive_id || !ae.received_at) continue;
+              const compId = (ae.placement_drives as any)?.company_id;
+              if (!compId || !ae.received_at) continue;
               const time = new Date(ae.received_at).getTime();
-              const current = driveAnchorDates.get(ae.placement_drive_id) || 0;
+              const current = driveAnchorDates.get(compId) || 0;
               if (time > current) {
-                driveAnchorDates.set(ae.placement_drive_id, time);
+                driveAnchorDates.set(compId, time);
               }
             }
 
             // B. Build NeoPAT registration timeline map for timing correlation (±24h window)
             const { data: neoPatEmails } = await supabase
               .from('emails')
-              .select('received_at, placement_drive_id')
+              .select('received_at, placement_drive_id, placement_drives!inner(company_id)')
               .eq('user_id', userId)
               .not('placement_drive_id', 'is', null)
               .ilike('sender', '%noreply.cdcinfo@vitstudent.ac.in%');
 
             const neoPatTimelines = (neoPatEmails || []).map((ne) => {
-              const comp = allUserComps.find((c) => c.id === ne.placement_drive_id);
+              const compId = (ne.placement_drives as any)?.company_id;
+              const comp = allUserComps.find((c) => c.id === compId);
               return {
-                companyId: ne.placement_drive_id as string,
+                companyId: compId as string,
                 companyName: comp ? comp.name : '',
                 time: new Date(ne.received_at).getTime(),
               };
             }).filter((n) => n.companyName.length > 0);
 
             const WINDOW_MS = 24 * 60 * 60 * 1000; // ±24h window
+
+            const isStalePreDriveEmail = (emailItem: any, anchorTime: number | undefined): boolean => {
+              if (!anchorTime) return false;
+              const emailTime = emailItem.received_at ? new Date(emailItem.received_at).getTime() : 0;
+              // If email arrived > 24 hours before the drive anchor, it's definitely for an older drive/cycle
+              if (emailTime < anchorTime - 24 * 60 * 60 * 1000) return true;
+              // Events, tests, PPTs, interviews, and shortlists can never happen before the drive registration/announcement
+              const isPostRegistrationEvent =
+                ['test', 'interview', 'shortlist', 'ppt'].includes(emailItem.classification || '') ||
+                /(?:test|assessment|exam|interview|shortlist|ppt|pre-placement|selection\s+process)\b/i.test(emailItem.subject || '');
+              if (isPostRegistrationEvent && emailTime < anchorTime - 15 * 60 * 1000) return true;
+              return false;
+            };
 
             for (const email of unlinkedEmails) {
               let matchedCompanyId: string | null = null;
@@ -1913,10 +1932,9 @@ export async function runSync(
                   }
 
                   if (!driveConflict) {
-                    // TEMPORAL FILTER: Only accept if >= Anchor Date - 14 days
+                    // TEMPORAL FILTER: Reject emails sent before the drive existed/registered
                     const anchorTime = driveAnchorDates.get(matched.id);
-                    const emailTime = email.received_at ? new Date(email.received_at).getTime() : 0;
-                    if (!anchorTime || emailTime >= anchorTime - 14 * 24 * 60 * 60 * 1000) {
+                    if (!isStalePreDriveEmail(email, anchorTime)) {
                       matchedCompanyId = matched.id;
                     }
                   }
@@ -1929,8 +1947,7 @@ export async function runSync(
                 if (candidateSet && candidateSet.size === 1) {
                   const candId = Array.from(candidateSet)[0];
                   const anchorTime = driveAnchorDates.get(candId);
-                  const emailTime = email.received_at ? new Date(email.received_at).getTime() : 0;
-                  if (!anchorTime || emailTime >= anchorTime - 14 * 24 * 60 * 60 * 1000) {
+                  if (!isStalePreDriveEmail(email, anchorTime)) {
                     matchedCompanyId = candId;
                   }
                 }
@@ -1978,8 +1995,7 @@ export async function runSync(
 
                   if (timingMatchOk) {
                     const anchorTime = driveAnchorDates.get(candidateCompanyId);
-                    const emailTime = email.received_at ? new Date(email.received_at).getTime() : 0;
-                    if (!anchorTime || emailTime >= anchorTime - 14 * 24 * 60 * 60 * 1000) {
+                    if (!isStalePreDriveEmail(email, anchorTime)) {
                       matchedCompanyId = candidateCompanyId;
                     }
                   }
@@ -1990,18 +2006,66 @@ export async function runSync(
               if (matchedCompanyId) {
                 const { data: matchedDrive } = await supabase
                   .from('placement_drives')
-                  .select('id')
+                  .select('id, source_email_id, created_at')
                   .eq('user_id', userId)
                   .eq('company_id', matchedCompanyId)
-                  .order('created_at', { ascending: false })
-                  .limit(1)
-                  .maybeSingle();
-                if (!matchedDrive) continue;
+                  .order('created_at', { ascending: false });
+                if (!matchedDrive || matchedDrive.length === 0) continue;
+
+                // Company-only college circulars do not carry a NeoPAT drive
+                // number. Route them to the latest drive that had already
+                // been announced, rather than relying on database import time.
+                let targetDrive = matchedDrive[0];
+                const isSelectionList =
+                  /selection\s+list|selection-list|\bset\s*[-#]?\s*\d+\b/i.test(
+                    `${email.subject || ''}\n${email.body_snippet || ''}`
+                  );
+
+                // Selection-list batches are a continuation of the drive that
+                // produced the earlier batches (SET 1, SET 2, ...), even when
+                // a newer drive for the same company has since opened.
+                if (isSelectionList) {
+                  const { data: priorSelectionEmails } = await supabase
+                    .from('emails')
+                    .select('placement_drive_id, received_at')
+                    .eq('user_id', userId)
+                    .in('placement_drive_id', matchedDrive.map((drive) => drive.id))
+                    .or('subject.ilike.%selection list%,subject.ilike.%shortlist%,subject.ilike.%selected students%')
+                    .not('placement_drive_id', 'is', null)
+                    .order('received_at', { ascending: false })
+                    .limit(1);
+                  const priorDriveId = priorSelectionEmails?.[0]?.placement_drive_id;
+                  const priorDrive = matchedDrive.find((drive) => drive.id === priorDriveId);
+                  if (priorDrive) targetDrive = priorDrive;
+                }
+
+                const sourceIds = matchedDrive
+                  .map((drive) => drive.source_email_id)
+                  .filter((id): id is string => Boolean(id));
+                if (!isSelectionList && sourceIds.length > 0 && email.received_at) {
+                  const { data: sourceEmails } = await supabase
+                    .from('emails')
+                    .select('id, received_at')
+                    .in('id', sourceIds);
+                  const emailTime = new Date(email.received_at).getTime();
+                  const announcedDrives = matchedDrive
+                    .map((drive) => {
+                      const source = (sourceEmails || []).find((item) => item.id === drive.source_email_id);
+                      return source?.received_at
+                        ? { drive, time: new Date(source.received_at).getTime() }
+                        : null;
+                    })
+                    .filter((item): item is { drive: typeof matchedDrive[number]; time: number } =>
+                      item !== null && item.time <= emailTime + 15 * 60 * 1000
+                    )
+                    .sort((a, b) => b.time - a.time);
+                  if (announcedDrives.length > 0) targetDrive = announcedDrives[0].drive;
+                }
 
                 await supabase
                   .from('emails')
                   .update({
-                    placement_drive_id: matchedDrive.id,
+                    placement_drive_id: targetDrive.id,
                     assignment_state: 'assigned',
                     assignment_confidence: 'medium',
                     assignment_source: 'reconciliation',

@@ -54,9 +54,9 @@ export default async function DashboardPage() {
       .select('neo_id')
       .eq('id', session.userId)
       .single(),
-    supabase
-      .from('candidate_matches')
-      .select('id, email_id, placement_drive_id')
+     supabase
+       .from('candidate_matches')
+      .select('id, email_id, placement_drive_id, match_type')
       .eq('user_id', session.userId)
       .neq('match_type', 'xlsx_applied_list'),
   ]);
@@ -84,6 +84,8 @@ export default async function DashboardPage() {
     not_shortlisted: 0,
     upcoming_tests: 0,
     upcoming_interviews: 0,
+    test_shortlists: 0,
+    interview_shortlists: 0,
     rejected: 0,
     withdrawn: 0,
     selected: 0,
@@ -97,6 +99,9 @@ export default async function DashboardPage() {
       .map((cm: any) => cm.placement_drive_id)
       .filter(Boolean)
   );
+
+  const testShortlistDriveIds = new Set<string>();
+  const interviewShortlistDriveIds = new Set<string>();
 
   const testOrInterviewCompanyIds = new Set(
     (rawUpcomingEvents || [])
@@ -151,6 +156,32 @@ export default async function DashboardPage() {
         }
       }
 
+      if (isApplied && [
+        'shortlisted',
+        'test_scheduled',
+        'test_ongoing',
+        'test_completed',
+        'interview',
+        'interview_scheduled',
+        'interview_ongoing',
+        'interview_completed',
+        'selected',
+        'offer',
+        'offer_received',
+        'rejected_test',
+        'test_eliminated',
+      ].includes(s) || (isApplied && /eliminated in (test|assessment)/i.test(notes))) {
+        testShortlistDriveIds.add(app.placement_drive_id);
+      }
+
+      if (isApplied && [
+        'interview_scheduled',
+        'interview_ongoing',
+        'interview_completed',
+      ].includes(s)) {
+        interviewShortlistDriveIds.add(app.placement_drive_id);
+      }
+
       if (s === 'not_shortlisted' || (s === 'rejected' && !isCracked)) stats.not_shortlisted++;
       if (isEliminatedStatus(s)) stats.rejected++;
       if (s === 'withdrawn' || s === 'declined') stats.withdrawn++;
@@ -158,6 +189,8 @@ export default async function DashboardPage() {
     }
 
     stats.shortlisted = stats.total_shortlisted;
+    stats.test_shortlists = testShortlistDriveIds.size;
+    stats.interview_shortlists = interviewShortlistDriveIds.size;
   }
 
   // Define what event types belong to which pipeline stage (in order)

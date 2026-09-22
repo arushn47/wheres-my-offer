@@ -170,20 +170,26 @@ export async function processEmailForEventsAndStatus(
       )
   );
 
+  const isSelectionOrResultNotice =
+    emailClass === 'result' ||
+    /selection\s*list|selected\s*candidates|final\s*selection|results?\s+announced|declared\s+the\s+results?/i.test(subjLower);
+
   const isExplicitShortlistNotice =
-    /shortlist|selection\s+list|selected\s+candidates|shortlisted\s+students|shortlist\s+for|candidates\s+shortlisted/i.test(
+    emailClass === 'shortlist' ||
+    isSelectionOrResultNotice ||
+    /shortlist|selected\s+candidates|shortlisted\s+students|shortlist\s+for|candidates\s+shortlisted/i.test(
       subjLower
     ) ||
     // Body patterns — order matters: more specific first
-    /find\s+the\s+below\s+shortlist|below\s+is\s+the\s+shortlist|attached\s+list\s+of\s+shortlisted|shortlist\s+for\s+next\s+round/i.test(
+    /find\s+the\s+(?:below\s+)?shortlist|below\s+is\s+the\s+shortlist|attached\s+list\s+of\s+shortlisted|shortlist\s+for\s+next\s+round/i.test(
       fullText
     ) ||
     // "attached shortlisted students/candidates list" (word "shortlisted" between "attached" and "students")
-    /attached\s+(?:(?:updated|final|revised)\s+)?shortlisted\s+(?:students?|candidates?)(?:\s+list)?/i.test(fullText) ||
+    /attached\s+(?:(?:updated|final|revised)\s+)?(?:shortlisted|selected)\s+(?:students?|candidates?)(?:\s+list)?/i.test(fullText) ||
     // "attached students/candidates list" (no qualifier — generic attachment shortlist)
     /attached\s+(?:students?|candidates?)\s+list/i.test(fullText) ||
     // "shortlisted students/candidates list" anywhere in body (e.g. Gmail snippet)
-    /shortlisted\s+(?:students?|candidates?)\s+list/i.test(fullText);
+    /(?:shortlisted|selected)\s+(?:students?|candidates?)(?:\s+list)?/i.test(fullText);
 
   const isShortlistEmail = (hasShortlistAttachment || isExplicitShortlistNotice) && !isAppliedOrOptInRoster;
 
@@ -588,6 +594,7 @@ export async function processEmailForEventsAndStatus(
 
 
   let newStatus: string | null = null;
+  let hasConfirmedShortlistMatch = false;
 
   if (existingApp?.manual_override && !isNeoMatched) {
     // User has manually set their status — preserve it UNLESS there is fresh
@@ -667,9 +674,10 @@ export async function processEmailForEventsAndStatus(
     // Do NOT downgrade companies where the user never applied or has opted out / withdrawn.
     const currentStatus = existingApp?.status || 'not_applied';
     if (!['not_applied', 'withdrawn', 'declined'].includes(currentStatus)) {
-      // Check if this is a post-test round announcement (interview, next round, selection list)
+      // Check if this is a post-test round announcement (interview, next round, selection list, results)
       const isPostTestRound =
         emailClass === 'interview' ||
+        emailClass === 'result' ||
         /interview\s+(?:is\s+)?scheduled|technical\s+interview|hr\s+interview|final\s+interview|next\s+round\s+of\s+(?:the\s+)?(?:selection\s+process|selection|process|hiring)|selection\s+process\s+is\s+scheduled|physical\s+selection/i.test(subjLower) ||
         (/next\s+round/i.test(subjLower) && (
           /interview|in[\s-]*person|f2f|resumes?|formal\s+dress|blacklisted/i.test(fullText) ||
@@ -686,7 +694,8 @@ export async function processEmailForEventsAndStatus(
           .eq('user_id', userId)
           .eq('placement_drive_id', targetDriveId);
 
-        const hasConfirmedMatch = compMatches && compMatches.length > 0;
+        hasConfirmedShortlistMatch = Boolean(compMatches && compMatches.length > 0);
+        const hasConfirmedMatch = hasConfirmedShortlistMatch;
 
         // Check if there is an upcoming test event for this company that hasn't happened yet
         const { data: upcomingEvents } = await supabase
@@ -712,7 +721,7 @@ export async function processEmailForEventsAndStatus(
 
         const isEmailAfterTestMatch = !latestMatchTime || emailReceivedTime >= (latestMatchTime - 5 * 60 * 1000);
 
-        if (hasConfirmedMatch && ['test_scheduled', 'interview_scheduled'].includes(currentStatus) && !hasFutureTestEvent && isEmailAfterTestMatch) {
+        if (hasConfirmedMatch && ['test_scheduled', 'interview_scheduled', 'test_completed'].includes(currentStatus) && !hasFutureTestEvent && isEmailAfterTestMatch) {
           // User was in the test/interview and was eliminated in a subsequent round
           newStatus = 'rejected';
         } else if (hasConfirmedMatch && hasFutureTestEvent) {
@@ -873,6 +882,13 @@ export async function processEmailForEventsAndStatus(
     // Accumulate notes: travel requirement + AI review flags occupy the same column.
     // Build them separately and join so neither overwrites the other.
     const noteParts: string[] = [];
+    if (newStatus === 'rejected' && hasConfirmedShortlistMatch) {
+      if (['interview_scheduled', 'interview_completed'].includes(currentStatus)) {
+        noteParts.push('Interviewed · Not Selected');
+      } else {
+        noteParts.push('Eliminated in Test Round');
+      }
+    }
     const prevTravel = existingApp?.notes?.split('\n')[0]?.trim();
     const isEstablishedPhysical = ['vellore', 'chennai', 'ap', 'bhopal', 'bhopal_lab'].includes(prevTravel || '');
 
@@ -926,11 +942,19 @@ export async function processEmailForEventsAndStatus(
         .eq('placement_drive_id', targetDriveId)
         .neq('event_type', 'ppt');
     } else if (['withdrawn', 'declined', 'rejected'].includes(newStatus)) {
-      const { data: toDelete } = await supabase
+      const isTestEliminatedWithMatch = newStatus === 'rejected' && hasConfirmedShortlistMatch;
+      let deleteQuery = supabase
         .from('events')
         .select('id, gcal_event_id')
         .eq('user_id', userId)
         .eq('placement_drive_id', targetDriveId);
+
+      if (isTestEliminatedWithMatch) {
+        // Preserve historical test and ppt events so stages can display "Eliminated in Test Round"
+        deleteQuery = deleteQuery.not('event_type', 'in', '("online_test","coding_test","ppt")');
+      }
+
+      const { data: toDelete } = await deleteQuery;
 
       if (toDelete && toDelete.length > 0) {
         const { deleteEventFromGoogleCalendar } = await import('@/lib/calendar/google-sync');
@@ -942,7 +966,16 @@ export async function processEmailForEventsAndStatus(
         }
       }
 
-      await supabase.from('events').delete().eq('user_id', userId).eq('placement_drive_id', targetDriveId);
+      if (isTestEliminatedWithMatch) {
+        await supabase
+          .from('events')
+          .delete()
+          .eq('user_id', userId)
+          .eq('placement_drive_id', targetDriveId)
+          .not('event_type', 'in', '("online_test","coding_test","ppt")');
+      } else {
+        await supabase.from('events').delete().eq('user_id', userId).eq('placement_drive_id', targetDriveId);
+      }
     }
 
     // Only notify if canonical status actually changed!

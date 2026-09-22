@@ -41,10 +41,10 @@ export async function scanAndPersistCandidateMatches(
   // 3. Fetch candidate test/shortlist circular emails linked to placement drives
   let emailQuery = supabase
     .from('emails')
-    .select('id, gmail_message_id, subject, placement_drive_id')
+    .select('id, gmail_message_id, subject, placement_drive_id, classification, body_snippet')
     .eq('user_id', userId)
     .not('placement_drive_id', 'is', null)
-    .or('subject.ilike.%shortlist%,subject.ilike.%online test%,subject.ilike.%coding test%,subject.ilike.%assessment%,subject.ilike.%pearl research park%,subject.ilike.%prp%,subject.ilike.%anna auditorium%');
+    .or('subject.ilike.%shortlist%,subject.ilike.%online test%,subject.ilike.%coding test%,subject.ilike.%assessment%,subject.ilike.%pearl research park%,subject.ilike.%prp%,subject.ilike.%anna auditorium%,classification.eq.shortlist');
 
   if (targetDriveIds && targetDriveIds.length > 0) {
     emailQuery = emailQuery.in('placement_drive_id', targetDriveIds);
@@ -96,7 +96,14 @@ export async function scanAndPersistCandidateMatches(
         continue;
       }
 
-      const isShortlistEmail = /shortlist|selection|selected/i.test(email.subject || '');
+      const isShortlistEmail =
+        email.classification === 'shortlist' ||
+        /shortlist|selection|selected|test\s+(?:is\s+)?scheduled|assessment\s+(?:is\s+)?scheduled|exam\s+(?:is\s+)?scheduled|coding\s+test|ppt\s+and\s+online\s+test/i.test(
+          email.subject || ''
+        ) ||
+        /shortlist|selection|selected|shortlisted\s+students/i.test(
+          email.body_snippet || ''
+        );
       const excelMatch = await scanExcelAttachmentsForNeoId(
         gmail,
         messageId,

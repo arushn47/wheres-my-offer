@@ -87,7 +87,8 @@ interface CompaniesClientProps {
 
 const FILTERS = [
   { id: 'active', label: 'Active' },
-  { id: 'eliminated', label: 'Eliminated' },
+  { id: 'test_shortlisted', label: 'Test' },
+  { id: 'interview_shortlisted', label: 'Interview' },
   { id: 'not_shortlisted', label: 'Not Shortlisted' },
   { id: 'withdrawn', label: 'Withdrawn' },
   { id: 'not_applied', label: 'Not Applied' },
@@ -143,6 +144,39 @@ const matchFilter = (status: string, filter: string, company?: CompanyWithDetail
       /eliminated in (test|interview|assessment)/i.test(notes);
     if (isPostShortlistElimination) return false;
     return isEliminatedStatus(s);
+  }
+  if (filter === 'test_shortlisted') {
+    return [
+      'shortlisted',
+      'test',
+      'test_scheduled',
+      'test_ongoing',
+      'test_completed',
+      'rejected_test',
+      'test_eliminated',
+      'interview',
+      'interview_scheduled',
+      'interview_ongoing',
+      'interview_completed',
+      'rejected_interview',
+      'interview_eliminated',
+      'selected',
+      'offer',
+      'offer_received',
+    ].includes(s) || /eliminated in (test|assessment)/i.test(company?.application?.notes || '');
+  }
+  if (filter === 'interview_shortlisted') {
+    return [
+      'interview',
+      'interview_scheduled',
+      'interview_ongoing',
+      'interview_completed',
+      'selected',
+      'offer',
+      'offer_received',
+      'rejected_interview',
+      'interview_eliminated',
+    ].includes(s);
   }
   if (filter === 'eliminated') {
     // Post-shortlist eliminations: candidate cracked shortlist / took test or interview, but eliminated in test or interview round
@@ -217,6 +251,7 @@ function formatShortCategory(cat?: string | null): string {
   if (!cat) return '';
   const cleaned = cat
     .replace(/\b(internship|offer|placement|drive)\b/gi, '')
+    .replace(/\s*\/\s*/g, ' ')   // collapse " / " separators
     .replace(/\s+/g, ' ')
     .trim();
   return cleaned || cat.trim();
@@ -313,7 +348,18 @@ export default function CompaniesClient({
       return [...list].sort((a, b) => {
         // 1. Any open registration deadline or confirmed upcoming round (Interview, Test, PPT) sorted by soonest date first
         const getNextRoundTime = (comp: CompanyWithDetails) => {
-          const regDeadline = getFutureRegistrationDeadline(comp);
+          const rawStatus = comp.application?.status || 'not_applied';
+          const effective = getEffectiveStage(
+            rawStatus,
+            comp.latestEvent,
+            comp.events,
+            comp.application?.notes,
+            comp.application?.manual_override
+          );
+          const registrationStillRelevant = ['not_applied', 'unknown', 'registration_open'].includes(
+            effective.effectiveStatus
+          );
+          const regDeadline = registrationStillRelevant ? getFutureRegistrationDeadline(comp) : null;
           const compEvents = comp.events || (comp.latestEvent ? [comp.latestEvent] : []);
           const upcoming = compEvents
             .filter((e) => {
@@ -412,7 +458,8 @@ export default function CompaniesClient({
       all: companies.length,
       active: 0,
       not_shortlisted: 0,
-      eliminated: 0,
+      test_shortlisted: 0,
+      interview_shortlisted: 0,
       withdrawn: 0,
       not_applied: 0,
     };
@@ -422,7 +469,8 @@ export default function CompaniesClient({
       const st = eff.effectiveStatus;
       if (matchFilter(st, 'active', c)) counts.active++;
       if (matchFilter(st, 'not_shortlisted', c)) counts.not_shortlisted++;
-      if (matchFilter(st, 'eliminated', c)) counts.eliminated++;
+      if (matchFilter(st, 'test_shortlisted', c)) counts.test_shortlisted++;
+      if (matchFilter(st, 'interview_shortlisted', c)) counts.interview_shortlisted++;
       if (matchFilter(st, 'withdrawn', c)) counts.withdrawn++;
       if (matchFilter(st, 'not_applied', c)) counts.not_applied++;
     }

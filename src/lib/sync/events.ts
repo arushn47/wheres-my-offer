@@ -1100,6 +1100,12 @@ export function cleanRoleTitle(rawRole: string | null | undefined): string | nul
     return null;
   }
 
+  // Multi-profile or overly detailed campus designations are not useful as a
+  // card title. Let the UI use its concise "Campus Placement Drive" fallback.
+  if (/(?:^|\n|\s)profile\s*\d+\s*[:.)-]/i.test(role) || role.length > 80) {
+    return null;
+  }
+
   return role;
 }
 

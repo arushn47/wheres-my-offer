@@ -280,7 +280,7 @@ export default function SearchClient({ data }: SearchClientProps) {
                 ? c.ctc.replace(/\*/g, '').trim()
                 : stipendDisplay || 'TBA';
               const loc = cleanLocationString(c.location);
-              const cleanCategory = c.category ? c.category.replace(/\b(internship|offer|placement|drive)\b/gi, '').trim() : '';
+              const cleanCategory = c.category ? c.category.replace(/\b(internship|offer|placement|drive)\b/gi, '').replace(/\s*\/\s*/g, ' ').replace(/\s+/g, ' ').trim() : '';
 
               const driveQuery = c.driveId ? `?driveId=${c.driveId}` : '';
 

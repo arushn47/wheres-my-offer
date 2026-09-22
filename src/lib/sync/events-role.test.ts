@@ -80,6 +80,11 @@ describe('cleanRoleTitle', () => {
     expect(cleanRoleTitle('focuses on long form content generation and localization, including')).toBeNull();
     expect(cleanRoleTitle('preference on NeoPAT on or before 29-07-2026')).toBeNull();
   });
+
+  it('uses the campus-drive fallback for multi-profile or oversized designations', () => {
+    expect(cleanRoleTitle('Profile 1: Deloitte South Asia - Technology & Transformation - Cyber - Analyst\nProfile 2: Deloitte South Asia - Technology & Transformation - EAD - Analyst')).toBeNull();
+    expect(cleanRoleTitle('Deloitte South Asia - Technology & Transformation - Cyber - Digital Privacy & Trust - Analyst')).toBeNull();
+  });
 });
 
 describe('extractJobDetails role extraction', () => {
@@ -225,4 +230,3 @@ describe('isTrustedPlacementSender', () => {
     expect(isTrustedPlacementSender('notifications@github.com', false)).toBe(false);
   });
 });
-

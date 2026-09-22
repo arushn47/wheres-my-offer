@@ -50,6 +50,8 @@ export interface DashboardStats {
   not_shortlisted: number;
   upcoming_tests: number;
   upcoming_interviews: number;
+  test_shortlists: number;
+  interview_shortlists: number;
   rejected: number;
   withdrawn: number;
   selected: number;

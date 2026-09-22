@@ -86,9 +86,9 @@ const CLASSIFICATION_RULES: ClassificationRule[] = [
     classification: 'result',
     confidence: 'high',
     match: (s, b) =>
-      /(result|selected|final\s*selection|offer\s*(letter|release))/i.test(s) &&
+      /(result|selected|selection\s*list|final\s*selection|offer\s*(letter|release))/i.test(s) &&
       !/not\s+selected/i.test(s),
-    reason: 'Subject mentions results or selection',
+    reason: 'Subject mentions results or selection list',
   },
   {
     classification: 'result',
@@ -725,6 +725,11 @@ export function extractCompanyAliases(rawName: string, canonicalName: string, dr
     add('super join finance');
   }
 
+  if (/^deloitte(?:\s+.*)?$/i.test(canonicalName.trim())) {
+    add('deliotte');
+    add('deloitte india');
+  }
+
   // Add collapsed alphanumeric form (e.g. "Value Labs" -> "valuelabs", "Squad Stack" -> "squadstack")
   const collapsed = canonicalName.toLowerCase().replace(/[^a-z0-9]/g, '');
   if (collapsed.length >= 3 && !ENGLISH_STOPWORDS.has(collapsed) && !isInvalidCompanyName(collapsed)) {
@@ -1138,6 +1143,7 @@ export function cleanCompanyName(name: string): string {
   // Fix known CDC typos / misspellings in company names
   str = str.replace(/\bunthikable(?:\s+solutions)?\b/gi, 'Unthinkable');
   str = str.replace(/\bunthinkable\s+solutions\b/gi, 'Unthinkable');
+  str = str.replace(/\bdeliotte\b/gi, 'Deloitte'); // CDC frequently misspells this
 
   // Strip leading date change / update noise if any slipped through
   str = str.replace(/^(?:date\s+change\s+(?:for|:)?|rescheduled\s+(?:for|:)?)/i, '').trim();

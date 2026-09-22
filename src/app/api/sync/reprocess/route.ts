@@ -269,7 +269,7 @@ export async function recalculateApplicationStatuses(
       ? Math.min(...verifiedTimes)
       : (drive.created_at ? new Date(drive.created_at).getTime() : null);
     const driveMinAllowedTime = verifiedDriveStartTime
-      ? verifiedDriveStartTime - 24 * 60 * 60 * 1000
+      ? verifiedDriveStartTime - 15 * 60 * 1000
       : 0;
 
     // Fallback: only pull unassigned college emails that match company name with strict word boundaries
@@ -611,6 +611,13 @@ export async function recalculateApplicationStatuses(
       const subj = e.subject || '';
       const body = e.body_snippet || '';
       const full = `${subj} ${body}`;
+
+      // If subject explicitly announces an online test/assessment (e.g. "WorkIndia online test and selection process is scheduled"),
+      // and does NOT explicitly say "interview", it is a test round email — NOT a next round / interview email!
+      if (/(?:online\s+)?test|assessment|coding\s+test|\bexam\b/i.test(subj) && !/interview/i.test(subj)) {
+        return false;
+      }
+
       if (nextRoundPattern.test(subj)) return true;
       if (/next\s+round/i.test(subj)) {
         if (/(?:online\s+)?test|assessment\s*\d|coding\s+test|\bshl\b|\bmettl\b|\bhackerrank\b/i.test(subj)) {
@@ -625,7 +632,11 @@ export async function recalculateApplicationStatuses(
     });
 
     const isInterviewOrSelectionEmail = (e: { subject?: string | null; body_snippet?: string | null }) => {
-      return nextRoundPattern.test(e.subject || '') || selectionListPattern.test(e.subject || '');
+      const s = e.subject || '';
+      if (/(?:online\s+)?test|assessment|coding\s+test|\bexam\b/i.test(s) && !/interview/i.test(s)) {
+        return false;
+      }
+      return nextRoundPattern.test(s) || selectionListPattern.test(s);
     };
 
     const isPptEmail = (e: { subject?: string | null }) => {
@@ -782,7 +793,10 @@ export async function recalculateApplicationStatuses(
     if (!isMatchedInTest) {
       isMatchedInTest = testShortlistEmails.some((e) => matchedEmailIds.has(e.id));
     }
-    if (hasDirectPersonalTestInvitation) {
+    // A personal test invitation email (e.g. Goldman Sachs direct link) only establishes shortlisting
+    // when NO explicit test shortlist roster (Excel/attachment) exists for this drive.
+    // If an explicit shortlist was published (e.g. Work India), only candidates actually in that shortlist were shortlisted.
+    if (!isMatchedInTest && hasDirectPersonalTestInvitation && testShortlistEmails.length === 0) {
       isMatchedInTest = true;
     }
 
@@ -849,29 +863,55 @@ export async function recalculateApplicationStatuses(
         const t = e.received_at ? new Date(e.received_at).getTime() : 0;
         return t > (nextRoundMatchTime + 30 * 60 * 1000);
       });
-      if (subsequentSelectionEmails.length > 0) {
+      const interviewEvents = allExtractedEvents.filter(
+        (e) => ['technical_interview', 'hr_interview', 'final_interview'].includes(e.eventType) && e.startTime
+      );
+      const hasUpcomingInterviewEvent = interviewEvents.some((e) => Boolean(e.startTime && e.startTime.getTime() > Date.now()));
+      const latestInterviewEventTime = interviewEvents.reduce(
+        (max, e) => Math.max(max, e.startTime ? e.startTime.getTime() : 0),
+        0
+      );
+      const interviewTime = latestInterviewEventTime || nextRoundMatchTime;
+
+       if (!hasUpcomingInterviewEvent && subsequentSelectionEmails.length > 0) {
         computedStatus = 'rejected';
         // User was interviewed (matched in next-round / interview shortlist) but a
         // selection list came out afterwards without them → Interviewed · Not Selected
         computedRejectionNote = 'Interviewed · Not Selected';
+      } else if (!hasUpcomingInterviewEvent && interviewTime > 0 && (Date.now() - interviewTime) > 14 * 24 * 60 * 60 * 1000) {
+        computedStatus = 'rejected';
+        computedRejectionNote = 'Interviewed · Not Selected';
+      } else if (!hasUpcomingInterviewEvent && interviewTime > 0 && interviewTime < Date.now()) {
+        computedStatus = 'interview_completed';
       } else {
         computedStatus = 'interview_scheduled';
       }
     } else if (isMatchedInTest) {
       const testMatchTime = Math.max(latestPositiveMatchEmailTime, latestGsheetTime);
-      const hasUpcomingTestEvent = allExtractedEvents.some((e) => {
-        const isTest = ['online_test', 'coding_test'].includes(e.eventType);
-        return isTest && e.startTime && e.startTime.getTime() > Date.now();
-      });
+      const testEvents = allExtractedEvents.filter(
+        (e) => ['online_test', 'coding_test'].includes(e.eventType) && e.startTime
+      );
+      const hasUpcomingTestEvent = testEvents.some((e) => Boolean(e.startTime && e.startTime.getTime() > Date.now()));
+      const latestTestEventTime = testEvents.reduce(
+        (max, e) => Math.max(max, e.startTime ? e.startTime.getTime() : 0),
+        0
+      );
+      const testTime = latestTestEventTime || testMatchTime;
+
       const subsequentPostTestEmails = [...selectionEmails, ...nextRoundEmails].filter((e) => {
         const t = e.received_at ? new Date(e.received_at).getTime() : 0;
         return t > (testMatchTime + 30 * 60 * 1000);
       });
-      if (!hasUpcomingTestEvent && subsequentPostTestEmails.length > 0) {
+
+       if (!hasUpcomingTestEvent && subsequentPostTestEmails.length > 0) {
         computedStatus = 'rejected';
         // User was shortlisted for the test (matched in test email) but a post-test
         // round email came without them → Eliminated in Test Round
         computedRejectionNote = 'Eliminated in Test Round';
+      } else if (!hasUpcomingTestEvent && testTime > 0 && testTime < Date.now()) {
+        // A completed test is not a rejection. Only an explicit result or a
+        // later shortlist/selection round can establish elimination.
+        computedStatus = 'test_completed';
       } else {
         computedStatus = 'test_scheduled';
       }
@@ -956,14 +996,22 @@ export async function recalculateApplicationStatuses(
     const existingPriority = STATUS_PRIORITY[existingApp?.status || 'unknown'] ?? 0;
     const computedPriority = STATUS_PRIORITY[computedStatus] ?? 0;
     const hasPriorCandidateEvidence = matchedShortlistEmailIds.size > 0;
+    const hasShortlistMatch = isMatchedInTest || isMatchedInNextRound || isMatchedInSelectionList;
+    const isPhantomRejection =
+      !existingApp?.manual_override &&
+      existingApp?.status === 'rejected' &&
+      computedStatus === 'not_shortlisted' &&
+      !hasShortlistMatch;
+
     const isEvidenceBackedTerminal =
       ['rejected', 'selected', 'offer_received'].includes(computedStatus) &&
       hasPriorCandidateEvidence;
     const monotonicStatus =
       existingApp?.manual_override ||
-      (existingApp?.status && computedPriority < existingPriority && !isEvidenceBackedTerminal)
+      (!isPhantomRejection && existingApp?.status && computedPriority < existingPriority && !isEvidenceBackedTerminal)
         ? existingApp.status
         : computedStatus;
+
     const finalStatus = monotonicStatus;
 
     let finalRole = existingApp?.manual_override ? existingApp.role : extractedJob.role;
@@ -1173,7 +1221,12 @@ export async function recalculateApplicationStatuses(
           continue;
         }
 
-        if (finalStatus === 'not_shortlisted' && normalizedKey !== 'ppt') {
+        // Candidates not shortlisted or not applied must NEVER receive test or interview events
+        if (
+          ['not_shortlisted', 'not_applied'].includes(finalStatus) &&
+          normalizedKey !== 'ppt' &&
+          normalizedKey !== 'registration_deadline'
+        ) {
           continue;
         }
         if (finalStatus === 'rejected') {

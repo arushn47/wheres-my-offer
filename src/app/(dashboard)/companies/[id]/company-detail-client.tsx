@@ -374,7 +374,8 @@ export default function CompanyDetailClient({
   // Role display: only show real, meaningful roles. Fallback to Campus Placement Drive if missing/generic.
   const displayRole = cleanRoleTitle(company.application?.role) || 'Campus Placement Drive';
 
-  const category = company.application?.category || (/1[0-9]\s*lpa|[2-9][0-9]\s*lpa/i.test(company.application?.ctc || '') ? 'Super Dream' : 'Dream');
+  const rawCategory = company.application?.category || (/1[0-9]\s*lpa|[2-9][0-9]\s*lpa/i.test(company.application?.ctc || '') ? 'Super Dream' : 'Dream');
+  const category = rawCategory.replace(/\b(internship|offer|placement|drive)\b/gi, '').replace(/\s*\/\s*/g, ' ').replace(/\s+/g, ' ').trim() || rawCategory.trim();
 
   const nextUpcomingEvent = company.events.find((e) => e.startTime && new Date(e.startTime).getTime() > Date.now());
 
