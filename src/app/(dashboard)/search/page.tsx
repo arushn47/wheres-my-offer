@@ -42,7 +42,7 @@ export default async function SearchPage() {
 
     supabase
       .from('emails')
-      .select('id, subject, sender, received_at, body_snippet, placement_drive_id')
+      .select('id, subject, sender, received_at, body_snippet, canonical_emails(body_text, body_snippet), placement_drive_id')
       .eq('user_id', session.userId)
       .order('received_at', { ascending: false })
       .limit(100),
@@ -177,7 +177,7 @@ export default async function SearchPage() {
         receivedAt: em.received_at,
         companyId: compId,
         companyName: comp?.name || drive?.drive_name || null,
-        snippet: em.body_snippet,
+        snippet: em.canonical_emails?.[0]?.body_text || em.canonical_emails?.[0]?.body_snippet || em.body_snippet,
       };
     }),
     events: (events || []).map((ev) => {

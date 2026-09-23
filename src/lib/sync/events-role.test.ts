@@ -210,6 +210,21 @@ Company's Registration Link - https://campus.lntedutech.com/...`,
     expect(regEvent?.hasExplicitTime).toBe(true);
     expect(regEvent?.startTime).toEqual(new Date('2026-09-25T03:30:00.000Z'));
   });
+
+  it('extracts a portal deadline phrased as on or before tomorrow', () => {
+    const email = {
+      subject: 'Conneqtion - Dream Internship - 2027 Batch',
+      receivedAt: new Date('2026-09-23T12:00:00Z'),
+      bodyPlain: 'The deadline in the NEOPAT portal is on or before 2 pm tomorrow',
+      bodySnippet: 'The deadline in the NEOPAT portal is on or before 2 pm tomorrow',
+    } as any;
+
+    const regEvent = extractEvents(email).find((e) => e.eventType === 'registration_deadline');
+
+    expect(regEvent).toBeDefined();
+    expect(regEvent?.hasExplicitTime).toBe(true);
+    expect(regEvent?.startTime).toEqual(new Date('2026-09-24T08:30:00.000Z'));
+  });
 });
 
 describe('isTrustedPlacementSender', () => {

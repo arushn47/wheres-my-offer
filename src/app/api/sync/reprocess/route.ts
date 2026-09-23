@@ -65,7 +65,9 @@ export async function recalculateApplicationStatuses(
     id: string;
     subject: string | null;
     sender: string | null;
-    body_snippet: string | null;
+     body_snippet: string | null;
+     canonical_email_id: string | null;
+     canonical_emails?: { body_text: string | null; body_snippet: string | null }[] | null;
     classification: string | null;
     placement_drive_id: string | null;
     received_at: string | null;
@@ -76,13 +78,16 @@ export async function recalculateApplicationStatuses(
   while (true) {
     const { data: chunk, error: chunkErr } = await supabase
       .from('emails')
-      .select('id, subject, sender, body_snippet, classification, placement_drive_id, received_at')
+      .select('id, subject, sender, body_snippet, canonical_email_id, canonical_emails(body_text, body_snippet), classification, placement_drive_id, received_at')
       .eq('user_id', userId)
       .order('received_at', { ascending: true })
       .range(page * pageSize, (page + 1) * pageSize - 1);
 
     if (chunkErr || !chunk || chunk.length === 0) break;
-    allEmails.push(...chunk);
+     allEmails.push(...chunk.map((email) => ({
+       ...email,
+       body_snippet: email.canonical_emails?.[0]?.body_text || email.canonical_emails?.[0]?.body_snippet || email.body_snippet,
+     })));
     if (chunk.length < pageSize) break;
     page++;
   }
@@ -202,7 +207,7 @@ export async function recalculateApplicationStatuses(
 
   const { data: candidateMatches } = await supabase
     .from('candidate_matches')
-    .select('id, match_type, email_id, matched_value')
+    .select('id, match_type, email_id, matched_value, matched_round_type')
     .eq('user_id', userId);
 
   const emailsByDriveId = new Map<string, typeof allEmails>();
@@ -258,18 +263,15 @@ export async function recalculateApplicationStatuses(
 
     const driveEmails = [...(emailsByDriveId.get(drive.id) || [])];
 
-    // Determine verified start date of this drive from its official assigned emails or drive creation
-    const verifiedPersonal = driveEmails.filter(isPersonalNeoPatEmail);
-    const verifiedCirculars = driveEmails.filter(isRegistrationCircular);
-    const verifiedTimes = [
-      ...verifiedPersonal.map((e) => new Date(e.received_at || 0).getTime()),
-      ...verifiedCirculars.map((e) => new Date(e.received_at || 0).getTime()),
-    ].filter((t) => t > 0);
+    // Determine verified start date of this drive from its official assigned emails
+    const verifiedTimes = driveEmails
+      .map((e) => new Date(e.received_at || 0).getTime())
+      .filter((t) => t > 0);
     const verifiedDriveStartTime = verifiedTimes.length > 0
       ? Math.min(...verifiedTimes)
-      : (drive.created_at ? new Date(drive.created_at).getTime() : null);
+      : null;
     const driveMinAllowedTime = verifiedDriveStartTime
-      ? verifiedDriveStartTime - 15 * 60 * 1000
+      ? verifiedDriveStartTime - 24 * 60 * 60 * 1000
       : 0;
 
     // Fallback: only pull unassigned college emails that match company name with strict word boundaries
@@ -759,15 +761,21 @@ export async function recalculateApplicationStatuses(
         .filter(Boolean)
     );
 
+    const roundForMatchedEmail = (emailId: string, round: 'test' | 'interview' | 'selected') =>
+      (candidateMatches || []).some((m) =>
+        m.email_id === emailId &&
+        (m as typeof m & { matched_round_type?: string | null }).matched_round_type === round &&
+        m.match_type !== 'xlsx_applied_list');
+
     const sortedSelectionEmails = [...selectionEmails].sort(
       (a, b) => (a.received_at ? new Date(a.received_at).getTime() : 0) - (b.received_at ? new Date(b.received_at).getTime() : 0)
     );
-    const isMatchedInSelectionList = sortedSelectionEmails.some((e) => matchedShortlistEmailIds.has(e.id));
+    const isMatchedInSelectionList = sortedSelectionEmails.some((e) => roundForMatchedEmail(e.id, 'selected'));
 
     const sortedNextRoundEmails = [...nextRoundEmails].sort(
       (a, b) => (a.received_at ? new Date(a.received_at).getTime() : 0) - (b.received_at ? new Date(b.received_at).getTime() : 0)
     );
-    const isMatchedInNextRound = sortedNextRoundEmails.some((e) => matchedShortlistEmailIds.has(e.id));
+    const isMatchedInNextRound = sortedNextRoundEmails.some((e) => roundForMatchedEmail(e.id, 'interview'));
 
     const hasCompanyCandidateMatch = activeDriveEmails.some((e) => matchedEmailIds.has(e.id));
 
@@ -778,20 +786,12 @@ export async function recalculateApplicationStatuses(
     let isMatchedInTest = false;
     if (sortedTestShortlists.length > 0) {
       const latestTestShortlistEmail = sortedTestShortlists[sortedTestShortlists.length - 1];
-      isMatchedInTest = matchedShortlistEmailIds.has(latestTestShortlistEmail.id);
+      isMatchedInTest = roundForMatchedEmail(latestTestShortlistEmail.id, 'test');
     }
     if (!isMatchedInTest) {
       isMatchedInTest =
-        testShortlistEmails.some((e) => matchedShortlistEmailIds.has(e.id)) ||
-        testEmails.some((e) => matchedShortlistEmailIds.has(e.id));
-    }
-    // FALLBACK: A candidate_match may have been stored as 'xlsx_applied_list' when the
-    // email body clearly indicates a shortlist (e.g. "Please find the attached shortlisted
-    // students list") but the filename lacked "shortlist" (e.g. "apex test 22-08-2026.xlsx").
-    // matchedEmailIds includes ALL match_types; testShortlistEmails is independently derived
-    // from body content — so if any match exists for a confirmed shortlist email, trust it.
-    if (!isMatchedInTest) {
-      isMatchedInTest = testShortlistEmails.some((e) => matchedEmailIds.has(e.id));
+        testShortlistEmails.some((e) => roundForMatchedEmail(e.id, 'test')) ||
+        testEmails.some((e) => roundForMatchedEmail(e.id, 'test'));
     }
     // A personal test invitation email (e.g. Goldman Sachs direct link) only establishes shortlisting
     // when NO explicit test shortlist roster (Excel/attachment) exists for this drive.
@@ -898,7 +898,7 @@ export async function recalculateApplicationStatuses(
       );
       const testTime = latestTestEventTime || testMatchTime;
 
-      const subsequentPostTestEmails = [...selectionEmails, ...nextRoundEmails].filter((e) => {
+      const subsequentPostTestEmails = nextRoundEmails.filter((e) => {
         const t = e.received_at ? new Date(e.received_at).getTime() : 0;
         return t > (testMatchTime + 30 * 60 * 1000);
       });
@@ -908,6 +908,9 @@ export async function recalculateApplicationStatuses(
         // User was shortlisted for the test (matched in test email) but a post-test
         // round email came without them → Eliminated in Test Round
         computedRejectionNote = 'Eliminated in Test Round';
+      } else if (!hasUpcomingTestEvent && selectionEmails.some((e) =>
+        Boolean(e.received_at && new Date(e.received_at).getTime() > testMatchTime + 30 * 60 * 1000))) {
+        computedStatus = 'not_shortlisted';
       } else if (!hasUpcomingTestEvent && testTime > 0 && testTime < Date.now()) {
         // A completed test is not a rejection. Only an explicit result or a
         // later shortlist/selection round can establish elimination.
@@ -1000,8 +1003,7 @@ export async function recalculateApplicationStatuses(
     const isPhantomRejection =
       !existingApp?.manual_override &&
       existingApp?.status === 'rejected' &&
-      computedStatus === 'not_shortlisted' &&
-      !hasShortlistMatch;
+      computedStatus === 'not_shortlisted';
 
     const isEvidenceBackedTerminal =
       ['rejected', 'selected', 'offer_received'].includes(computedStatus) &&
@@ -1389,7 +1391,7 @@ export async function performReprocess(
 
   const { data: initialDbDrives } = await supabase
     .from('placement_drives')
-    .select('id, company_id, drive_number, normalized_drive_number, drive_name, role, created_at')
+    .select('id, company_id, drive_number, normalized_drive_number, drive_name, role, created_at, source_email_id')
     .eq('user_id', userId);
 
   const companiesById = new Map<string, any>();
@@ -1415,9 +1417,6 @@ export async function performReprocess(
     const list = drivesByCompanyId.get(d.company_id) || [];
     list.push(d);
     drivesByCompanyId.set(d.company_id, list);
-    if (d.created_at) {
-      driveDateMap.set(d.id, new Date(d.created_at));
-    }
   }
 
   const validDriveIdSet = new Set<string>();
@@ -1590,7 +1589,7 @@ export async function performReprocess(
                   drive_name: driveName || comp.name,
                   created_at: emailDate.toISOString(),
                 })
-                .select('id, company_id, drive_number, normalized_drive_number, drive_name, role, created_at')
+                .select('id, company_id, drive_number, normalized_drive_number, drive_name, role, created_at, source_email_id')
                 .single();
               if (createdDrive) {
                 targetDrive = createdDrive;
@@ -1655,6 +1654,17 @@ export async function performReprocess(
         classification: classification.classification,
         is_relevant: false,
       });
+    }
+  }
+
+  // Preserve manually-linked, cross-user confirmed, or non-NeoPAT drives that have no source_email_id
+  // These are legitimate drives created without a NeoPAT registration email (e.g. KPMG, Rystad Energy)
+  for (const d of (initialDbDrives || [])) {
+    if (!validDriveIdSet.has(d.id) && !d.source_email_id) {
+      validDriveIdSet.add(d.id);
+      if (d.company_id) {
+        validCompanyIdSet.add(d.company_id);
+      }
     }
   }
 

@@ -109,6 +109,7 @@ CREATE TABLE IF NOT EXISTS public.applications (
   ctc TEXT,
   stipend TEXT,
   location TEXT,
+  work_mode TEXT CHECK (work_mode IS NULL OR work_mode IN ('remote', 'office', 'hybrid')),
   eligibility TEXT,
   branches TEXT[],
   cgpa_requirement TEXT,
@@ -131,6 +132,48 @@ CREATE TABLE IF NOT EXISTS public.applications (
 -- ============================================
 -- 6. emails
 -- ============================================
+-- Shared college-broadcast content. Receipt ownership remains in emails.
+CREATE TABLE IF NOT EXISTS public.canonical_emails (
+  id UUID NOT NULL DEFAULT gen_random_uuid(),
+  content_key TEXT NOT NULL UNIQUE,
+  sender_email TEXT NOT NULL,
+  subject TEXT NOT NULL,
+  body_snippet TEXT,
+  body_text TEXT,
+  message_id TEXT,
+  classification TEXT,
+  classification_confidence REAL,
+  parsed_company_name TEXT,
+  parsed_drive_numbers JSONB,
+  parsed_job_details JSONB,
+  parsed_events JSONB,
+  identity_version INTEGER NOT NULL DEFAULT 2,
+  parser_version INTEGER NOT NULL DEFAULT 1,
+  has_attachments BOOLEAN,
+  metadata_key TEXT,
+  processing_status TEXT NOT NULL DEFAULT 'pending' CHECK (processing_status IN ('pending', 'processing', 'complete', 'error')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT canonical_emails_pkey PRIMARY KEY (id)
+);
+
+CREATE TABLE IF NOT EXISTS public.canonical_attachments (
+  id UUID NOT NULL DEFAULT gen_random_uuid(),
+  canonical_email_id UUID NOT NULL REFERENCES public.canonical_emails(id) ON DELETE CASCADE,
+  gmail_message_id TEXT NOT NULL,
+  gmail_account_id UUID NOT NULL,
+  attachment_id TEXT NOT NULL,
+  filename TEXT,
+  size_bytes BIGINT,
+  content_hash TEXT UNIQUE,
+  extracted_rows JSONB,
+  parse_status TEXT NOT NULL DEFAULT 'pending' CHECK (parse_status IN ('pending', 'processing', 'complete', 'error')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT canonical_attachments_pkey PRIMARY KEY (id),
+  CONSTRAINT canonical_attachments_email_attachment_unique UNIQUE (canonical_email_id, attachment_id)
+);
+
 CREATE TABLE IF NOT EXISTS public.emails (
   id UUID NOT NULL DEFAULT uuid_generate_v4(),
   gmail_account_id UUID NOT NULL,
@@ -154,6 +197,8 @@ CREATE TABLE IF NOT EXISTS public.emails (
   assignment_state TEXT DEFAULT 'unassigned',
   assignment_confidence TEXT DEFAULT 'low',
   assignment_source TEXT,
+  rfc_message_id TEXT,
+  canonical_email_id UUID REFERENCES public.canonical_emails(id) ON DELETE SET NULL,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   CONSTRAINT emails_pkey PRIMARY KEY (id),
   CONSTRAINT emails_gmail_account_id_fkey FOREIGN KEY (gmail_account_id) REFERENCES public.gmail_accounts(id) ON DELETE CASCADE,
@@ -212,6 +257,7 @@ CREATE TABLE IF NOT EXISTS public.candidate_matches (
   placement_drive_id UUID NOT NULL,
   neo_id TEXT NOT NULL,
   match_type TEXT NOT NULL CHECK (match_type = ANY (ARRAY['xlsx_cell'::text, 'xlsx_applied_list'::text, 'pdf_text'::text, 'docx_text'::text, 'email_body'::text, 'email_subject'::text])),
+  matched_round_type TEXT CHECK (matched_round_type IS NULL OR matched_round_type IN ('test', 'interview', 'selected')),
   matched_value TEXT,
   match_location TEXT,
   confidence TEXT DEFAULT 'high'::text CHECK (confidence = ANY (ARRAY['high'::text, 'medium'::text, 'low'::text])),

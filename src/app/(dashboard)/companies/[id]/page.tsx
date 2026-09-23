@@ -163,7 +163,7 @@ export default async function CompanyDetailPage(props: {
 
     supabase
       .from('emails')
-      .select('id, subject, sender, received_at, body_snippet, classification, thread_id, gmail_message_id, gmail_account_id, placement_drive_id')
+      .select('id, subject, sender, received_at, body_snippet, canonical_emails(body_text, body_snippet), classification, thread_id, gmail_message_id, gmail_account_id, placement_drive_id')
       .in('placement_drive_id', driveFilterIds)
       .eq('user_id', session.userId)
       .order('received_at', { ascending: false }),
@@ -171,7 +171,7 @@ export default async function CompanyDetailPage(props: {
     substantiveAliases.length > 0
       ? supabase
           .from('emails')
-          .select('id, subject, sender, received_at, body_snippet, classification, thread_id, gmail_message_id, gmail_account_id, placement_drive_id')
+          .select('id, subject, sender, received_at, body_snippet, canonical_emails(body_text, body_snippet), classification, thread_id, gmail_message_id, gmail_account_id, placement_drive_id')
           .eq('user_id', session.userId)
           .is('placement_drive_id', null)
           .or(substantiveAliases.map((a) => `subject.ilike.%${a.replace(/,/g, '')}%`).join(','))
@@ -208,20 +208,24 @@ export default async function CompanyDetailPage(props: {
     ? (assignedEmails || []).find((email: any) => email.id === targetDrive.source_email_id)
     : null;
 
-  // Use the drive's official source email time as the cutoff anchor. Using the
-  // earliest assigned email would allow an old circular to move the window
-  // backwards and make unrelated historical emails appear in the timeline.
+  // Determine anchor time for unassigned fallback emails.
+  // Never use database record `created_at` as an email timestamp anchor!
+  const assignedEmailTimes = (assignedEmails || [])
+    .map((em: any) => em.received_at ? new Date(em.received_at).getTime() : 0)
+    .filter((t: number) => t > 0);
+
   const driveStartTime = sourceEmail?.received_at
     ? new Date(sourceEmail.received_at).getTime()
-    : targetDrive?.created_at
-      ? new Date(targetDrive.created_at).getTime()
+    : assignedEmailTimes.length > 0
+      ? Math.min(...assignedEmailTimes)
     : application?.applied_at
       ? new Date(application.applied_at).getTime()
       : null;
-  // Allow a small amount of clock drift, but never include older circulars.
-  const driveMinAllowedTime = driveStartTime ? driveStartTime - 15 * 60 * 1000 : 0;
 
-  // Combine verified assigned emails
+  // Allow circulars arriving up to 24h prior to the anchor time (matching sync engine ±24h grace window)
+  const driveMinAllowedTime = driveStartTime ? driveStartTime - 24 * 60 * 60 * 1000 : 0;
+
+  // Combine verified assigned emails (authoritative for this drive)
   const allEmailsMap = new Map<string, any>();
   for (const em of (assignedEmails || [])) {
     allEmailsMap.set(em.id, em);
@@ -234,18 +238,18 @@ export default async function CompanyDetailPage(props: {
   if (missingLinkedIds.length > 0) {
     const { data: extraEmails } = await supabase
       .from('emails')
-      .select('id, subject, sender, received_at, body_snippet, classification, thread_id, gmail_message_id, gmail_account_id, placement_drive_id')
+        .select('id, subject, sender, received_at, body_snippet, canonical_emails(body_text, body_snippet), classification, thread_id, gmail_message_id, gmail_account_id, placement_drive_id')
       .in('id', missingLinkedIds);
     for (const em of (extraEmails || [])) {
       allEmailsMap.set(em.id, em);
     }
   }
 
-  // Add unassigned fallback emails ONLY if they arrived on or after drive start date
+  // Add unassigned fallback emails ONLY if they arrived within this drive's active timeframe
   // AND match the company name with strict word boundaries
   for (const em of (unassignedEmailsResult?.data || [])) {
     const emTime = em.received_at ? new Date(em.received_at).getTime() : 0;
-    // RULE: Never check or include emails that arrived before this drive came!
+    // RULE: Never check or include unassigned emails that arrived before this drive came!
     if (driveMinAllowedTime > 0 && emTime < driveMinAllowedTime) {
       continue;
     }
@@ -259,13 +263,8 @@ export default async function CompanyDetailPage(props: {
     }
   }
 
-  // Final safety filter: enforce that no email before drive arrival is ever shown for this drive
+  // Sort verified and matched emails from newest to oldest
   const emails = Array.from(allEmailsMap.values())
-    .filter((e: any) => {
-      if (!driveMinAllowedTime) return true;
-      const t = e.received_at ? new Date(e.received_at).getTime() : 0;
-      return t >= driveMinAllowedTime;
-    })
     .sort((a, b) => {
       const tA = a.received_at ? new Date(a.received_at).getTime() : 0;
       const tB = b.received_at ? new Date(b.received_at).getTime() : 0;
@@ -359,7 +358,7 @@ export default async function CompanyDetailPage(props: {
       subject: em.subject || 'Campus Placement Notice',
       sender: em.sender || '',
       receivedAt: em.received_at || new Date().toISOString(),
-      snippet: em.body_snippet || '',
+       snippet: em.canonical_emails?.[0]?.body_text || em.canonical_emails?.[0]?.body_snippet || em.body_snippet || '',
       classification: em.classification || 'general',
       threadId: em.thread_id || null,
       gmailMessageId: em.gmail_message_id || null,

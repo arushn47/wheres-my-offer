@@ -29,6 +29,7 @@ export interface ExtractedJobDetails {
   ctc: string | null;
   stipend: string | null;
   location: string | null;
+  workMode: 'remote' | 'office' | 'hybrid' | null;
   eligibility: string | null;
   branches: string[] | null;
   cgpaRequirement: string | null;
@@ -290,6 +291,8 @@ export function extractEvents(email: ParsedEmail): ExtractedEvent[] {
     /(?:fill\s*(?:out|in)?\s*(?:the\s*)?(?:google\s*form|form|preference\s*form|survey)|submit\s*(?:the\s*)?(?:google\s*form|form|preference\s*form)|location\s*preference[\s\S]{0,50}?google\s*form)[\s\S]{0,100}?(?:on\s*(?:or)?\s*before|by|before)\s*[:\-–—\t]*\s*([^\n\r]{1,100})/gi,
     // Pattern C: Application formalities / General application deadline
     /(?:apply\s+(?:on\s*(?:or)?\s*before|by|before)|complete[\s\S]{0,50}?application[\s\S]{0,30}?(?:by|before|on\s*(?:or)?\s*before))\s*[:\-–—\t]*\s*([^\n\r]{1,100})/gi,
+    // Pattern D: Portal deadline wording without an explicit registration verb
+    /\bdeadline\b[\s\S]{0,100}?\bon\s*(?:or\s*)?before\s*[:\-–—\t]*\s*([^\n\r]{1,100})/gi,
   ];
 
   let bestRegParsed: { date: Date | null; hasExplicitTime: boolean } = { date: null, hasExplicitTime: false };
@@ -1165,6 +1168,7 @@ export function extractJobDetails(text: string): ExtractedJobDetails {
   let ctc: string | null = null;
   let stipend: string | null = null;
   let location: string | null = null;
+  let workMode: ExtractedJobDetails['workMode'] = null;
 
   // Clean HTML tags, styles, CSS hex color codes (e.g. #333333, #666666), preserving block newlines
   const htmlWithNewlines = text
@@ -1186,6 +1190,13 @@ export function extractJobDetails(text: string): ExtractedJobDetails {
   const cleanText = cleanWithLines
     .replace(/\s+/g, ' ');
 
+  // Only job-arrangement language: do not turn a virtual PPT or online test into remote work.
+  const workModeText = cleanWithLines.match(/\b(?:mode\s+of\s+work|work\s+mode|internship\s+mode)\b\s*[:\-–—]?\s*([^\r\n]{2,100})/i)?.[1] || '';
+  if (/\bhybrid\b/i.test(workModeText)) workMode = 'hybrid';
+  else if (/\bwork\s+from\s+office\b|\b(?:in[\s-]*person|on[\s-]*site)\b/i.test(workModeText) ||
+           /\ball\s+the\s+roles\s+are\s+work\s+from\s+office\b/i.test(cleanText)) workMode = 'office';
+  else if (/\bremote\b|\bwork\s+from\s+home\b/i.test(workModeText)) workMode = 'remote';
+
   const unannouncedPattern = /will be (?:announced|informed|shared) later|tba|tbd|to be (?:announced|disclosed)|not disclosed/i;
 
   // 0. CSE Branch Eligibility Guard
@@ -1196,6 +1207,7 @@ export function extractJobDetails(text: string): ExtractedJobDetails {
       ctc: null,
       stipend: null,
       location: null,
+      workMode: null,
       eligibility: null,
       branches: null,
       cgpaRequirement: null,
@@ -1291,6 +1303,17 @@ export function extractJobDetails(text: string): ExtractedJobDetails {
       }
     }
 
+    if (nums.length === 0) {
+      // OJ Commerce: "Selected candidates will receive: ₹7.5 LPA for Software Engineering".
+      const offered = textForBhopal.match(/\bselected\s+candidates\s+will\s+receive\s*:\s*(?:[•*\-]\s*)?(?:INR|₹|Rs\.?)?\s*(\d+(?:\.\d+)?)\s*LPA\b/i);
+      if (offered) nums.push(Number(offered[1]));
+    }
+    if (nums.length === 0) {
+      // KPMG: "Day 1 (Process): 6 LPA Fixed", "Day 2 (Process): 5 LPA Fixed".
+      const fixedDayRates = [...textForBhopal.matchAll(/\bDay\s+[12]\s*\(Process\)\s*:\s*(\d+(?:\.\d+)?)\s*LPA\s*Fixed\b/gi)];
+      for (const rate of fixedDayRates) nums.push(Number(rate[1]));
+    }
+
     // 2. Check for addition formulas: e.g. "14+1 LPA", "9LPA+1.2 Lakh JB", "9 LPA+1.2 JB"
     if (nums.length === 0) {
       const addMatches = [...cleanCtc.matchAll(/(\d+(?:\.\d+)?)(?:\s*(?:LPA|L\s*PA|Lakhs?|Lacs?|Lac|\bL\b))?\s*\+\s*(\d+(?:\.\d+)?)(?:\s*(?:LPA|L\s*PA|Lakhs?|Lacs?|Lac|\bL\b|JB|Joining\s+Bonus))?/gi)];
@@ -1367,7 +1390,19 @@ export function extractJobDetails(text: string): ExtractedJobDetails {
 
   // 2. Stipend Extraction — handles single amounts, ranges (e.g. "₹75,000 - ₹1,00,000/month"), and multi-role tiers
   const stipendBlockMatch = cleanText.match(/\b(?:Stipend|Stipened|Internship\s+Stipend)\b\s*[:\-–—\t]?\s*([\s\S]{1,400}?)(?:\b(?:CTC|Last date|Website|Location|Eligible|Eligibility|Selection|Process|Registration)\b|$)/i);
-  if (stipendBlockMatch && unannouncedPattern.test(stipendBlockMatch[1])) {
+  const directStipendMatch = cleanText.match(
+    /\b(?:Stipend|Stipened|Internship\s+Stipend)\b\s*[:\-–—\t]?\s*(?:INR|₹|Rs\.?)?\s*([\d,]+(?:\.\d+)?)\s*(?:k|thousand|lacs?|lakhs?)?\s*(?:\/\s*month|\/\s*mo|pm|p\.?m\.?|per\s+month)\b/i
+  );
+  if (directStipendMatch) {
+    const rawNum = directStipendMatch[1].replace(/,/g, '');
+    let value = parseFloat(rawNum);
+    if (/k\b/i.test(directStipendMatch[0]) && value < 500) value *= 1000;
+    else if (/(?:lacs?|lakhs?)\b/i.test(directStipendMatch[0]) && value < 50) value *= 100000;
+    if (value >= 5000 && value < 500000) stipend = `₹${value.toLocaleString('en-IN')}/month`;
+  }
+  if (stipend) {
+    // A direct labelled amount is more reliable than scanning the rest of the email.
+  } else if (stipendBlockMatch && unannouncedPattern.test(stipendBlockMatch[1])) {
     stipend = null;
   } else if (stipendBlockMatch) {
     const stipendText = stipendBlockMatch[1];
@@ -1477,7 +1512,7 @@ export function extractJobDetails(text: string): ExtractedJobDetails {
   // "Starting designation are as Discipline Engineer (...), Data Analyst, Sales Account Manager, Market developer, etc."
   if (!role) {
     const listIntroMatch = cleanText.match(/\b(?:starting\s+)?designations?\s+(?:are\s+as|is\s+as|are|is|include)\s*[:\-–—\t]?\s*([^.]+)/i);
-    if (listIntroMatch) {
+    if (listIntroMatch && !/₹|\b(?:lakh|loyalty|bonus)\b/i.test(listIntroMatch[1])) {
       const withoutParens = listIntroMatch[1].replace(/\s*\([^)]*\)/g, ' ').replace(/\betc\.?\b/gi, '').trim();
       const rawRoles = withoutParens
         .split(/[,;\/]+/)
@@ -1493,6 +1528,22 @@ export function extractJobDetails(text: string): ExtractedJobDetails {
       if (validRoles.length > 0) {
         role = validRoles.join(' / ');
       }
+    }
+  }
+
+  if (!role) {
+    // Infosys: "join our organization as a *Systems Engineer (Trainee)*".
+    const joinedAs = cleanText.match(/\bjoin\s+our\s+organization\s+as\s+a\s+\*?([A-Za-z][A-Za-z\s/&-]{2,70}(?:\s*\([^)]{1,30}\))?)\*?(?=\s*,|\s*\.)/i);
+    if (joinedAs) role = cleanRoleTitle(joinedAs[1]);
+  }
+  if (!role) {
+    // OJ Commerce: "hiring for the following positions:" followed by bullet roles.
+    const positions = cleanWithLines.match(/\bcurrently\s+hiring\s+for\s+the\s+following\s+positions\s*:\s*([\s\S]{1,500}?)(?=\bSelected\s+candidates\s+will\s+receive\b|$)/i)?.[1];
+    if (positions) {
+      const titles = positions.split(/\r?\n/)
+        .map((line) => line.replace(/^\s*[•*\-]+\s*/, '').replace(/\s*\([^)]*\)/g, '').trim())
+        .filter((title) => /^(?:Software Engineering|Analytics|Business Process|Program Management Office)$/i.test(title));
+      if (titles.length > 0 && titles.length <= 5) role = titles.join(' / ');
     }
   }
 
@@ -1589,6 +1640,13 @@ export function extractJobDetails(text: string): ExtractedJobDetails {
       .trim()
       .slice(0, 60);
 
+    // A JD pointer is not a city. EA's "EA Hyderabad office in person(No remote)"
+    // describes the Hyderabad office; "in person" is not part of the location.
+    if (/^(?:refer|see|check)\b/i.test(locMatch[1]) ||
+        /^(?:refer|see|check)\s+(?:the\s+)?(?:attached\s+)?(?:jd(?:['’]s)?|attachment)/i.test(rawLoc)) rawLoc = '';
+    const namedOffice = rawLoc.match(/\b(Bangalore|Bengaluru|Hyderabad|Pune|Mumbai|Chennai|Gurgaon|Gurugram|Noida|Delhi|Kolkata|Ahmedabad)\s+office\b/i);
+    if (namedOffice && /\bin\s+person\b/i.test(locMatch[1])) rawLoc = namedOffice[1];
+
     // Fix unclosed parenthesis (e.g. "Hybrid (Gurgaon/Bangalore/Chennai" -> "Hybrid (Gurgaon/Bangalore/Chennai)")
     if (rawLoc.includes('(') && !rawLoc.includes(')')) {
       rawLoc = rawLoc + ')';
@@ -1641,6 +1699,7 @@ export function extractJobDetails(text: string): ExtractedJobDetails {
     ctc,
     stipend,
     location,
+    workMode,
     eligibility: eligDetails.summary,
     branches: eligDetails.branches,
     cgpaRequirement: eligDetails.cgpa,

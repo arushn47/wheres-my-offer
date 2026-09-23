@@ -30,7 +30,18 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { getCurrentMessageText } from '@/lib/sync/body';
 import { resolvePlacementDrive } from '@/lib/sync/drive-resolution';
 import { getLiveApplicationScope } from '@/lib/sync/application-scope';
-import { randomUUID, createHash } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
+import {
+  APPROVED_COLLEGE_SENDER,
+  CANONICAL_IDENTITY_VERSION,
+  canonicalBodyFromEmail,
+  canReuseCanonicalBody,
+  computeCanonicalContentKey,
+  computeCanonicalMetadataKey,
+  isApprovedCanonicalSender,
+  normalizeRfcMessageId,
+  type CanonicalEmailCacheRow,
+} from '@/lib/sync/canonical-email';
 
 // ============================================
 // Canonical Email Deduplication (Phase 2C — Shadow Mode)
@@ -46,12 +57,7 @@ import { randomUUID, createHash } from 'node:crypto';
  * Personal NeoPAT emails (noreply.cdcinfo) are never canonicalized.
  */
 export function computeContentKey(senderEmail: string, subject: string, bodySnippet: string): string {
-  const normalizedSender = (senderEmail || '').toLowerCase().trim();
-  const normalizedSubject = (subject || '').trim();
-  const bodyPrefix = (bodySnippet || '').slice(0, 500);
-  return createHash('sha256')
-    .update(`${normalizedSender}||${normalizedSubject}||${bodyPrefix}`)
-    .digest('hex');
+  return computeCanonicalContentKey(senderEmail, subject, bodySnippet);
 }
 
 /**
@@ -70,21 +76,34 @@ async function shadowWriteCanonical(
   account: GmailAccount
 ): Promise<void> {
   try {
-    const bodyText = parsedEmail.bodyPlain || parsedEmail.bodySnippet || '';
+    if (!isApprovedCanonicalSender(parsedEmail.senderEmail)) return;
+    const bodyText = canonicalBodyFromEmail(parsedEmail.bodyPlain, parsedEmail.bodyHtml, parsedEmail.bodySnippet);
     const contentKey = computeContentKey(
       parsedEmail.senderEmail || parsedEmail.sender,
       parsedEmail.subject,
       bodyText
     );
 
+    const canonicalEvents = extractEvents(parsedEmail).map((event) => ({
+      ...event,
+      startTime: event.startTime?.toISOString() || null,
+      endTime: event.endTime?.toISOString() || null,
+    }));
     const canonicalPayload = {
       content_key: contentKey,
       sender_email: (parsedEmail.senderEmail || parsedEmail.sender || '').toLowerCase().trim(),
       subject: parsedEmail.subject,
       body_snippet: bodyText.slice(0, 50000),
+      body_text: bodyText,
+      message_id: normalizeRfcMessageId(parsedEmail.messageId),
+      identity_version: CANONICAL_IDENTITY_VERSION,
+      has_attachments: parsedEmail.hasAttachments,
+      metadata_key: computeCanonicalMetadataKey(parsedEmail.senderEmail, parsedEmail.subject, parsedEmail.bodySnippet),
       classification: classification.classification,
       classification_confidence: classification.confidence ?? null,
       parsed_company_name: companyName || null,
+      parsed_job_details: extractJobDetails(bodyText),
+      parsed_events: canonicalEvents,
       processing_status: 'complete' as const,
       updated_at: new Date().toISOString(),
     };
@@ -103,14 +122,75 @@ async function shadowWriteCanonical(
     if (canonical?.id) {
       // Link the per-user emails row to the canonical row
       await supabase
-        .from('emails')
-        .update({ canonical_email_id: canonical.id })
+      .from('emails')
+        .update({ canonical_email_id: canonical.id, rfc_message_id: normalizeRfcMessageId(parsedEmail.messageId) })
         .eq('id', emailId);
+
+      for (const attachment of parsedEmail.attachments) {
+        await supabase.from('canonical_attachments').upsert({
+          canonical_email_id: canonical.id,
+          gmail_message_id: parsedEmail.gmailMessageId,
+          gmail_account_id: account.id,
+          attachment_id: attachment.attachmentId,
+          filename: attachment.filename,
+          size_bytes: attachment.size,
+          parse_status: 'pending',
+          updated_at: new Date().toISOString(),
+        }, { onConflict: 'canonical_email_id,attachment_id', ignoreDuplicates: true });
+      }
     }
   } catch (err) {
     // Shadow writes must never crash the main pipeline
     console.warn('[canonical] Shadow write error (non-fatal):', err instanceof Error ? err.message : String(err));
   }
+}
+
+async function findReusableCanonicalEmail(
+  supabase: ReturnType<typeof createAdminClient>,
+  senderEmail: string,
+  messageId: string | null | undefined,
+  subject: string,
+  snippet: string
+): Promise<CanonicalEmailCacheRow | null> {
+  const normalizedMessageId = normalizeRfcMessageId(messageId);
+  if (!isApprovedCanonicalSender(senderEmail) || !normalizedMessageId) return null;
+
+  const { data, error } = await supabase
+    .from('canonical_emails')
+    .select('id, content_key, message_id, sender_email, subject, body_text, body_snippet, classification, classification_confidence, parsed_company_name, parsed_drive_numbers, parsed_job_details, parsed_events, processing_status, identity_version, has_attachments, metadata_key')
+    .eq('message_id', normalizedMessageId)
+    .eq('identity_version', CANONICAL_IDENTITY_VERSION)
+    .maybeSingle();
+
+  if (error) {
+    console.warn('[canonical] Lookup failed; falling back to full Gmail processing:', error.message);
+    return null;
+  }
+  if (!canReuseCanonicalBody(data as CanonicalEmailCacheRow | null)) return null;
+  return data && data.metadata_key === computeCanonicalMetadataKey(senderEmail, subject, snippet)
+    ? data as CanonicalEmailCacheRow
+    : null;
+}
+
+function parsedEmailFromCanonical(
+  canonical: CanonicalEmailCacheRow,
+  metadata: Awaited<ReturnType<typeof fetchMessageMetadata>>
+): ParsedEmail {
+  return {
+    gmailMessageId: metadata.id,
+    threadId: metadata.threadId,
+    sender: metadata.sender,
+    senderEmail: metadata.senderEmail,
+    messageId: metadata.messageId,
+    subject: metadata.subject || canonical.subject,
+    receivedAt: metadata.receivedAt,
+    bodySnippet: canonical.body_snippet || canonical.body_text || '',
+    bodyPlain: canonical.body_text || canonical.body_snippet || '',
+    bodyHtml: '',
+    hasAttachments: false,
+    attachments: [],
+    labels: [],
+  };
 }
 
 // ============================================
@@ -638,6 +718,7 @@ async function processSingleMessage(
         gmail_account_id: account.id,
 
         gmail_message_id: parsedEmail.gmailMessageId,
+        rfc_message_id: normalizeRfcMessageId(parsedEmail.messageId),
         thread_id: parsedEmail.threadId,
         subject: parsedEmail.subject,
         sender: parsedEmail.sender,
@@ -977,6 +1058,21 @@ export async function processPage(
 
         if (!shouldFetchFull) {
           return { msgId, isSkippedDup: false, parsedEmail: null };
+        }
+
+        const canonical = await findReusableCanonicalEmail(
+          supabase,
+          metadata.senderEmail,
+          metadata.messageId,
+          metadata.subject,
+          metadata.snippet
+        );
+        if (canonical) {
+          return {
+            msgId,
+            isSkippedDup: false,
+            parsedEmail: parsedEmailFromCanonical(canonical, metadata),
+          };
         }
 
         const parsedEmail = await withQuotaBackoff(() => fetchMessageDetail(gmail, msgId));

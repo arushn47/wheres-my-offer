@@ -24,6 +24,7 @@ export interface ParsedEmail {
   threadId: string | null;
   sender: string;
   senderEmail: string;
+  messageId?: string | null;
   subject: string;
   receivedAt: Date;
   bodySnippet: string;
@@ -221,6 +222,7 @@ export interface MessageMetadata {
   threadId: string | null;
   sender: string;
   senderEmail: string;
+  messageId: string | null;
   subject: string;
   receivedAt: Date;
   snippet: string;
@@ -238,7 +240,7 @@ export async function fetchMessageMetadata(
     userId: 'me',
     id: messageId,
     format: 'metadata',
-    metadataHeaders: ['From', 'Subject', 'Date'],
+    metadataHeaders: ['From', 'Subject', 'Date', 'Message-ID'],
   });
 
   const message = response.data;
@@ -253,15 +255,17 @@ export async function fetchMessageMetadata(
 
   const sender = getHeader('From');
   const senderEmail = extractEmailAddress(sender);
+  const headerMessageId = getHeader('Message-ID') || getHeader('Message-Id') || null;
   const subject = getHeader('Subject');
   const dateStr = getHeader('Date');
   const receivedAt = dateStr ? new Date(dateStr) : new Date();
 
   return {
-    id: message.id || messageId,
+    id: message.id || headerMessageId || '',
     threadId: message.threadId || null,
     sender,
     senderEmail,
+    messageId: headerMessageId,
     subject,
     receivedAt,
     snippet: message.snippet || '',
@@ -293,6 +297,7 @@ export async function fetchMessageDetail(
 
   const sender = getHeader('From');
   const senderEmail = extractEmailAddress(sender);
+  const headerMessageId = getHeader('Message-ID') || getHeader('Message-Id') || null;
   const subject = getHeader('Subject');
   const dateStr = getHeader('Date');
   const receivedAt = dateStr ? new Date(dateStr) : new Date();
@@ -308,6 +313,7 @@ export async function fetchMessageDetail(
     threadId: message.threadId || null,
     sender,
     senderEmail,
+    messageId: headerMessageId,
     subject,
     receivedAt,
     bodySnippet: message.snippet || '',

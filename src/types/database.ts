@@ -107,6 +107,8 @@ export interface DbEmail {
   assignment_state: 'assigned' | 'ambiguous' | 'unassigned' | 'legacy' | 'conflict' | null;
   assignment_confidence: 'high' | 'medium' | 'low' | null;
   assignment_source: string | null;
+  rfc_message_id?: string | null;
+  canonical_email_id?: string | null;
   is_processed: boolean;
   is_relevant: boolean;
   processed_at: string | null;

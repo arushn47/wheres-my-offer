@@ -31,6 +31,21 @@ function htmlToPlainText(html: string | undefined | null): string {
     .trim();
 }
 
+type ShortlistRound = 'test' | 'interview' | 'selected';
+
+function announcedShortlistRound(subject: string, body: string): ShortlistRound | null {
+  // Round order: ppt (open attendance; no shortlist) → test → interview → selected.
+  // A missing test shortlist is NOT an elimination; interview requires a test match,
+  // and final selection requires an interview match. An ambiguous "next round"/"result"
+  // has no provable predecessor and must not cause rejection.
+  if (/interview|selection\s+process/i.test(subject) ||
+      (/next\s+round/i.test(subject) && /interview|in[\s-]*person|f2f/i.test(body))) return 'interview';
+  if (/final\s*selection|offer\s*(?:letter|release)|selection\s*list/i.test(subject) &&
+      !/interview|test/i.test(subject)) return 'selected';
+  if (/online\s+test|coding\s+test|assessment|test\s+(?:shortlist|link|invitation|schedule)/i.test(subject)) return 'test';
+  return null;
+}
+
 /**
  * Checks if the user's Neo ID or identity is mentioned in an email (subject, plain body, or HTML table).
  */
@@ -132,7 +147,7 @@ export async function processEmailForEventsAndStatus(
   // 0. Early check of existing application status from DB
   const { data: existingApp } = await supabase
     .from('applications')
-    .select('status, manual_override, applied_at, location, ctc, role, stipend, notes, status_source_email_at, last_updated, eligibility, branches, cgpa_requirement, backlog_requirement')
+    .select('status, manual_override, applied_at, location, work_mode, ctc, role, stipend, notes, status_source_email_at, last_updated, eligibility, branches, cgpa_requirement, backlog_requirement')
     .eq('user_id', userId)
     .eq('placement_drive_id', targetDriveId)
     .maybeSingle();
@@ -192,6 +207,10 @@ export async function processEmailForEventsAndStatus(
     /(?:shortlisted|selected)\s+(?:students?|candidates?)(?:\s+list)?/i.test(fullText);
 
   const isShortlistEmail = (hasShortlistAttachment || isExplicitShortlistNotice) && !isAppliedOrOptInRoster;
+  const announcedRound = announcedShortlistRound(email.subject, fullText);
+  const previousRound: ShortlistRound | null =
+    announcedRound === 'interview' ? 'test' :
+    announcedRound === 'selected' ? 'interview' : null;
 
   // Body-level ID matches in application/registration rosters are not
   // candidate participation evidence. This must run before status promotion.
@@ -296,7 +315,7 @@ export async function processEmailForEventsAndStatus(
     emailClass === 'result' &&
     /not\s+selected|regret\s+to\s+inform|unfortunately|could\s+not\s+be\s+selected|not\s+shortlisted/i.test(fullText);
 
-  if (isEliminationEmail && matchType === 'email_body') {
+  if (isEliminationEmail) {
     isNeoMatched = false;
   }
 
@@ -311,6 +330,7 @@ export async function processEmailForEventsAndStatus(
     matchType = 'email_body';
     matchDetail = 'Direct personal test invitation received from NeoPAT';
   }
+  if (isEliminationEmail) isNeoMatched = false;
 
   if (isNeoMatched) {
     // Only record genuine shortlist matches (never applied/opt-in rosters)
@@ -320,10 +340,18 @@ export async function processEmailForEventsAndStatus(
       placement_drive_id: targetDriveId,
       neo_id: userNeoId || userEmail,
       match_type: matchType,
+      matched_round_type: (isShortlistEmail || hasPersonalTestCredentials) ? announcedRound : null,
       matched_value: matchDetail || email.subject.slice(0, 100),
       confidence: 'high',
     });
-    if (candidateMatchError && candidateMatchError.code !== '23505') {
+    if (candidateMatchError?.code === '23505' && announcedRound &&
+        (isShortlistEmail || hasPersonalTestCredentials)) {
+      const { error: tagError } = await supabase.from('candidate_matches')
+        .update({ matched_round_type: announcedRound })
+        .eq('user_id', userId).eq('email_id', emailDbId)
+        .eq('placement_drive_id', targetDriveId).eq('match_type', matchType);
+      if (tagError) throw tagError;
+    } else if (candidateMatchError) {
       throw candidateMatchError;
     }
   }
@@ -586,6 +614,25 @@ export async function processEmailForEventsAndStatus(
     }
   }
 
+  // Read only a positive match for the immediately preceding round of this drive.
+  // Legacy/ambiguous NULL round tags do not prove elimination.
+  let hasPreviousRoundMatch = false;
+  if (previousRound) {
+    const { data: previousMatches, error: previousMatchError } = await supabase
+      .from('candidate_matches')
+      .select('id, emails!inner(received_at)')
+      .eq('user_id', userId)
+      .eq('placement_drive_id', targetDriveId)
+      .eq('matched_round_type', previousRound)
+      .neq('match_type', 'xlsx_applied_list');
+    if (previousMatchError) throw previousMatchError;
+    hasPreviousRoundMatch = (previousMatches || []).some((match) => {
+      const source = match.emails as unknown as { received_at: string | null };
+      return Boolean(source?.received_at &&
+        new Date(source.received_at).getTime() < new Date(email.receivedAt).getTime());
+    });
+  }
+
   // 5. Compute updated application status
   const emailReceivedTime = email.receivedAt ? new Date(email.receivedAt).getTime() : Date.now();
   const appliedTime = existingApp?.applied_at ? new Date(existingApp.applied_at).getTime() : null;
@@ -617,7 +664,7 @@ export async function processEmailForEventsAndStatus(
       /test\s+shortlisted|shortlisted\s+based\s+on\s+(?:the\s+)?test|assessment\s+shortlisted|already\s+completed\s+(?:the\s+)?(?:assessment|test)|location\s+preference/i.test(subjLower + ' ' + fullText);
 
     if (isRejectionLanguage) {
-      newStatus = 'rejected';
+      newStatus = hasPreviousRoundMatch ? 'rejected' : 'not_shortlisted';
     } else if (/final\s*selection|offer\s*(?:letter|release)|congratulations.*(?:final|offer)/i.test(subjLower) || (/selection\s*list/i.test(subjLower) && !/interview|ppt|test/i.test(subjLower))) {
       newStatus = 'selected';
     } else if (
@@ -687,15 +734,7 @@ export async function processEmailForEventsAndStatus(
         /interview\s+shortlist|shortlist\s+for\s+interview|next\s+round\s+shortlist|shortlisted\s+for\s+next\s+round/i.test(fullText);
 
       if (isPostTestRound) {
-        // Check if user had an actual confirmed shortlist match in the database
-        const { data: compMatches } = await supabase
-          .from('candidate_matches')
-          .select('id, email_id, emails!inner(received_at, placement_drive_id)')
-          .eq('user_id', userId)
-          .eq('placement_drive_id', targetDriveId);
-
-        hasConfirmedShortlistMatch = Boolean(compMatches && compMatches.length > 0);
-        const hasConfirmedMatch = hasConfirmedShortlistMatch;
+        hasConfirmedShortlistMatch = hasPreviousRoundMatch;
 
         // Check if there is an upcoming test event for this company that hasn't happened yet
         const { data: upcomingEvents } = await supabase
@@ -710,21 +749,9 @@ export async function processEmailForEventsAndStatus(
           return new Date(ev.start_time).getTime() > Date.now();
         });
 
-        // A candidate can ONLY be rejected if:
-        // 1. They were in a previous stage (test_scheduled / interview_scheduled)
-        // 2. They don't have a test scheduled in the future!
-        // 3. The current email was received AFTER their test shortlist match email
-        const latestMatchTime = compMatches?.reduce((max, m: any) => {
-          const t = m.emails?.received_at ? new Date(m.emails.received_at).getTime() : 0;
-          return Math.max(max, t);
-        }, 0) || 0;
-
-        const isEmailAfterTestMatch = !latestMatchTime || emailReceivedTime >= (latestMatchTime - 5 * 60 * 1000);
-
-        if (hasConfirmedMatch && ['test_scheduled', 'interview_scheduled', 'test_completed'].includes(currentStatus) && !hasFutureTestEvent && isEmailAfterTestMatch) {
-          // User was in the test/interview and was eliminated in a subsequent round
+        if (hasPreviousRoundMatch && !hasFutureTestEvent) {
           newStatus = 'rejected';
-        } else if (hasConfirmedMatch && hasFutureTestEvent) {
+        } else if (hasPreviousRoundMatch && hasFutureTestEvent) {
           // Candidate still has an upcoming test scheduled!
           newStatus = 'test_scheduled';
         } else {
@@ -867,6 +894,7 @@ export async function processEmailForEventsAndStatus(
   if (jobDetails.ctc && (!existingApp?.ctc || !isOlderThanCurrentStatus)) appUpdate.ctc = jobDetails.ctc;
   if (jobDetails.stipend && (!existingApp?.stipend || !isOlderThanCurrentStatus)) appUpdate.stipend = jobDetails.stipend;
   if (resolvedLocation && (!existingApp?.location || !isOlderThanCurrentStatus)) appUpdate.location = resolvedLocation;
+  if (jobDetails.workMode && (!existingApp?.work_mode || !isOlderThanCurrentStatus)) appUpdate.work_mode = jobDetails.workMode;
   if (jobDetails.eligibility && (!existingApp?.eligibility || !isOlderThanCurrentStatus)) appUpdate.eligibility = jobDetails.eligibility;
   if (jobDetails.branches && jobDetails.branches.length > 0 && (!existingApp?.branches || !isOlderThanCurrentStatus)) appUpdate.branches = jobDetails.branches;
   if (jobDetails.cgpaRequirement && (!existingApp?.cgpa_requirement || !isOlderThanCurrentStatus)) appUpdate.cgpa_requirement = jobDetails.cgpaRequirement;

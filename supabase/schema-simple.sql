@@ -26,6 +26,7 @@ CREATE TABLE public.gmail_accounts (
   is_connected boolean DEFAULT true,
   created_at timestamp with time zone DEFAULT now(),
   updated_at timestamp with time zone DEFAULT now(),
+  watch_expires_at timestamp with time zone,
   CONSTRAINT gmail_accounts_pkey PRIMARY KEY (id),
   CONSTRAINT gmail_accounts_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id)
 );
@@ -36,6 +37,7 @@ CREATE TABLE public.companies (
   aliases ARRAY DEFAULT '{}'::text[],
   created_at timestamp with time zone DEFAULT now(),
   updated_at timestamp with time zone DEFAULT now(),
+  legal_name text,
   CONSTRAINT companies_pkey PRIMARY KEY (id),
   CONSTRAINT companies_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id)
 );
@@ -49,6 +51,7 @@ CREATE TABLE public.applications (
   ctc text,
   stipend text,
   location text,
+  work_mode text CHECK (work_mode IS NULL OR work_mode IN ('remote', 'office', 'hybrid')),
   eligibility text,
   branches ARRAY,
   cgpa_requirement text,
@@ -86,10 +89,13 @@ CREATE TABLE public.emails (
   assignment_state text DEFAULT 'unassigned'::text,
   assignment_confidence text DEFAULT 'low'::text,
   assignment_source text,
+  rfc_message_id text,
+  canonical_email_id uuid,
   CONSTRAINT emails_pkey PRIMARY KEY (id),
   CONSTRAINT emails_gmail_account_id_fkey FOREIGN KEY (gmail_account_id) REFERENCES public.gmail_accounts(id),
   CONSTRAINT emails_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id),
-  CONSTRAINT emails_placement_drive_id_fkey FOREIGN KEY (placement_drive_id) REFERENCES public.placement_drives(id)
+  CONSTRAINT emails_placement_drive_id_fkey FOREIGN KEY (placement_drive_id) REFERENCES public.placement_drives(id),
+  CONSTRAINT emails_canonical_email_id_fkey FOREIGN KEY (canonical_email_id) REFERENCES public.canonical_emails(id)
 );
 CREATE TABLE public.candidate_matches (
   id uuid NOT NULL DEFAULT uuid_generate_v4(),
@@ -97,15 +103,18 @@ CREATE TABLE public.candidate_matches (
   email_id uuid,
   neo_id text NOT NULL,
   match_type text NOT NULL CHECK (match_type = ANY (ARRAY['xlsx_cell'::text, 'xlsx_applied_list'::text, 'pdf_text'::text, 'docx_text'::text, 'email_body'::text, 'email_subject'::text])),
+  matched_round_type text CHECK (matched_round_type IS NULL OR matched_round_type IN ('test', 'interview', 'selected')),
   matched_value text,
   match_location text,
   confidence text DEFAULT 'high'::text CHECK (confidence = ANY (ARRAY['high'::text, 'medium'::text, 'low'::text])),
   created_at timestamp with time zone DEFAULT now(),
   placement_drive_id uuid NOT NULL,
+  attachment_id uuid,
   CONSTRAINT candidate_matches_pkey PRIMARY KEY (id),
   CONSTRAINT candidate_matches_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id),
   CONSTRAINT candidate_matches_email_id_fkey FOREIGN KEY (email_id) REFERENCES public.emails(id),
-  CONSTRAINT candidate_matches_placement_drive_id_fkey FOREIGN KEY (placement_drive_id) REFERENCES public.placement_drives(id)
+  CONSTRAINT candidate_matches_placement_drive_id_fkey FOREIGN KEY (placement_drive_id) REFERENCES public.placement_drives(id),
+  CONSTRAINT candidate_matches_attachment_id_fkey FOREIGN KEY (attachment_id) REFERENCES public.attachments(id)
 );
 CREATE TABLE public.events (
   id uuid NOT NULL DEFAULT uuid_generate_v4(),
@@ -211,6 +220,8 @@ CREATE TABLE public.sync_state (
   updated_at timestamp with time zone DEFAULT now(),
   completed_at timestamp with time zone,
   last_error text,
+  run_id uuid,
+  lease_expires_at timestamp with time zone,
   CONSTRAINT sync_state_pkey PRIMARY KEY (user_id),
   CONSTRAINT sync_state_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id)
 );
@@ -286,4 +297,103 @@ CREATE TABLE public.email_drive_links (
   CONSTRAINT email_drive_links_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id),
   CONSTRAINT email_drive_links_email_id_fkey FOREIGN KEY (email_id) REFERENCES public.emails(id),
   CONSTRAINT email_drive_links_drive_id_fkey FOREIGN KEY (placement_drive_id) REFERENCES public.placement_drives(id)
+);
+CREATE TABLE public.attachments (
+  id uuid NOT NULL DEFAULT uuid_generate_v4(),
+  email_id uuid NOT NULL,
+  user_id uuid NOT NULL,
+  filename text NOT NULL,
+  mime_type text,
+  storage_path text,
+  file_hash text,
+  file_size_bytes integer,
+  is_processed boolean DEFAULT false,
+  created_at timestamp with time zone DEFAULT now(),
+  CONSTRAINT attachments_pkey PRIMARY KEY (id),
+  CONSTRAINT attachments_email_id_fkey FOREIGN KEY (email_id) REFERENCES public.emails(id),
+  CONSTRAINT attachments_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id)
+);
+CREATE TABLE public.status_history (
+  id uuid NOT NULL DEFAULT uuid_generate_v4(),
+  application_id uuid NOT NULL,
+  old_status text,
+  new_status text NOT NULL,
+  source text,
+  source_email_id uuid,
+  changed_at timestamp with time zone DEFAULT now(),
+  CONSTRAINT status_history_pkey PRIMARY KEY (id),
+  CONSTRAINT status_history_application_id_fkey FOREIGN KEY (application_id) REFERENCES public.applications(id),
+  CONSTRAINT status_history_source_email_id_fkey FOREIGN KEY (source_email_id) REFERENCES public.emails(id)
+);
+CREATE TABLE public.documents (
+  id uuid NOT NULL DEFAULT uuid_generate_v4(),
+  user_id uuid NOT NULL,
+  company_id uuid,
+  application_id uuid,
+  document_type text NOT NULL CHECK (document_type = ANY (ARRAY['jd'::text, 'shortlist'::text, 'company_info'::text, 'offer_letter'::text, 'other'::text])),
+  filename text NOT NULL,
+  storage_path text NOT NULL,
+  source_email_id uuid,
+  created_at timestamp with time zone DEFAULT now(),
+  CONSTRAINT documents_pkey PRIMARY KEY (id),
+  CONSTRAINT documents_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id),
+  CONSTRAINT documents_company_id_fkey FOREIGN KEY (company_id) REFERENCES public.companies(id),
+  CONSTRAINT documents_application_id_fkey FOREIGN KEY (application_id) REFERENCES public.applications(id),
+  CONSTRAINT documents_source_email_id_fkey FOREIGN KEY (source_email_id) REFERENCES public.emails(id)
+);
+CREATE TABLE public.gmail_pubsub_inbox (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  subscription text NOT NULL,
+  message_id text NOT NULL,
+  email_address text NOT NULL,
+  history_id text,
+  publish_time timestamp with time zone,
+  status text NOT NULL DEFAULT 'processing'::text CHECK (status = ANY (ARRAY['processing'::text, 'completed'::text, 'failed'::text])),
+  run_id uuid,
+  attempts integer NOT NULL DEFAULT 1,
+  locked_until timestamp with time zone NOT NULL DEFAULT (now() + '00:02:00'::interval),
+  last_error text,
+  created_at timestamp with time zone NOT NULL DEFAULT now(),
+  updated_at timestamp with time zone NOT NULL DEFAULT now(),
+  CONSTRAINT gmail_pubsub_inbox_pkey PRIMARY KEY (id)
+);
+CREATE TABLE public.canonical_emails (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  content_key text NOT NULL UNIQUE,
+  sender_email text NOT NULL,
+  subject text NOT NULL,
+  body_snippet text,
+  body_text text,
+  classification text,
+  classification_confidence real,
+  parsed_company_name text,
+  parsed_drive_numbers jsonb,
+  parsed_job_details jsonb,
+  parsed_events jsonb,
+  message_id text,
+  identity_version integer NOT NULL DEFAULT 2,
+  has_attachments boolean,
+  metadata_key text,
+  parser_version integer NOT NULL DEFAULT 1,
+  processing_status text NOT NULL DEFAULT 'pending'::text CHECK (processing_status = ANY (ARRAY['pending'::text, 'processing'::text, 'complete'::text, 'error'::text])),
+  created_at timestamp with time zone NOT NULL DEFAULT now(),
+  updated_at timestamp with time zone NOT NULL DEFAULT now(),
+  CONSTRAINT canonical_emails_pkey PRIMARY KEY (id)
+);
+CREATE TABLE public.canonical_attachments (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  canonical_email_id uuid NOT NULL,
+  gmail_message_id text NOT NULL,
+  gmail_account_id uuid NOT NULL,
+  attachment_id text NOT NULL,
+  filename text,
+  size_bytes bigint,
+  content_hash text UNIQUE,
+  extracted_rows jsonb,
+  parse_status text NOT NULL DEFAULT 'pending'::text CHECK (parse_status = ANY (ARRAY['pending'::text, 'processing'::text, 'complete'::text, 'error'::text])),
+  created_at timestamp with time zone NOT NULL DEFAULT now(),
+  updated_at timestamp with time zone NOT NULL DEFAULT now(),
+  CONSTRAINT canonical_attachments_pkey PRIMARY KEY (id),
+  CONSTRAINT canonical_attachments_email_attachment_unique UNIQUE (canonical_email_id, attachment_id),
+  CONSTRAINT canonical_attachments_canonical_email_id_fkey FOREIGN KEY (canonical_email_id) REFERENCES public.canonical_emails(id)
 );
