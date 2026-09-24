@@ -39,7 +39,7 @@ export const maxDuration = 300; // 300s — maximum allowed on Vercel Fluid Comp
 export async function recalculateApplicationStatuses(
   userId: string,
   onProgress?: (p: { step: number; totalSteps: number; message: string }) => void,
-  options?: { deepGSheetScan?: boolean }
+  options?: { deepGSheetScan?: boolean; targetPlacementDriveIds?: string[] }
 ): Promise<{ updatedCount: number; results: Array<{ company: string; status: string; role?: string | null; ctc?: string | null }> }> {
   const supabase = createAdminClient();
 
@@ -71,6 +71,7 @@ export async function recalculateApplicationStatuses(
     classification: string | null;
     placement_drive_id: string | null;
     received_at: string | null;
+    assignment_state?: string | null;
   }> = [];
 
   const pageSize = 1000;
@@ -78,7 +79,7 @@ export async function recalculateApplicationStatuses(
   while (true) {
     const { data: chunk, error: chunkErr } = await supabase
       .from('emails')
-      .select('id, subject, sender, body_snippet, canonical_email_id, canonical_emails(body_text, body_snippet), classification, placement_drive_id, received_at')
+      .select('id, subject, sender, body_snippet, canonical_email_id, canonical_emails(body_text, body_snippet), classification, placement_drive_id, received_at, assignment_state')
       .eq('user_id', userId)
       .order('received_at', { ascending: true })
       .range(page * pageSize, (page + 1) * pageSize - 1);
@@ -247,13 +248,20 @@ export async function recalculateApplicationStatuses(
     );
   };
 
+  const targetDriveSet = options?.targetPlacementDriveIds && options.targetPlacementDriveIds.length > 0
+    ? new Set(options.targetPlacementDriveIds)
+    : null;
+  const drivesToProcess = targetDriveSet
+    ? allDrives.filter((d) => targetDriveSet.has(d.id))
+    : allDrives;
+
   const DRIVE_BATCH_SIZE = 8;
-  for (let bIdx = 0; bIdx < allDrives.length; bIdx += DRIVE_BATCH_SIZE) {
-    const driveBatch = allDrives.slice(bIdx, bIdx + DRIVE_BATCH_SIZE);
+  for (let bIdx = 0; bIdx < drivesToProcess.length; bIdx += DRIVE_BATCH_SIZE) {
+    const driveBatch = drivesToProcess.slice(bIdx, bIdx + DRIVE_BATCH_SIZE);
     onProgress?.({
       step: 5,
       totalSteps: 5,
-      message: `Recalculating application stages, CTCs & calendar events (${Math.min(bIdx + DRIVE_BATCH_SIZE, allDrives.length)} / ${allDrives.length})…`,
+      message: `Recalculating application stages, CTCs & calendar events (${Math.min(bIdx + DRIVE_BATCH_SIZE, drivesToProcess.length)} / ${drivesToProcess.length})…`,
     });
 
     await Promise.all(
@@ -304,7 +312,7 @@ export async function recalculateApplicationStatuses(
     };
 
     for (const e of allEmails) {
-      if (!e.placement_drive_id && e.subject && e.received_at) {
+      if (!e.placement_drive_id && e.assignment_state !== 'unassigned' && e.subject && e.received_at) {
         const eTime = new Date(e.received_at).getTime();
         // RULE: Never check or include emails that arrived before this drive came!
         if (driveMinAllowedTime > 0 && eTime < driveMinAllowedTime) {
@@ -1453,7 +1461,7 @@ export async function performReprocess(
     const emailDate = email.received_at ? new Date(email.received_at) : new Date();
     const fullEmailText = `${subject}\n${bodySnippet}`;
     const driveNumber = extractDriveNumber(fullEmailText);
-    const driveNameMatch = fullEmailText.match(/Drive Name:\s*([^.\n\r]+)/i);
+    const driveNameMatch = fullEmailText.match(/(?:drive\s+name|name\s+of\s+the\s+drive)\s*[:\-*]*\s*([A-Za-z0-9&\s\-\.()]+?)(?:\s+(?:drive\s+number|new\s+drive\s+date|category|date\s+of\s+visit|eligibility|eligible|ctc|role|stipend|company|date|please|if\b|\n|\r|\*|$))/i);
     const driveName = driveNameMatch ? driveNameMatch[1].trim() : null;
 
     const classification = classifyEmail({
@@ -1516,7 +1524,7 @@ export async function performReprocess(
       }
       if (!comp) {
         // Create company
-        const generatedAliases = extractCompanyAliases(companyName, normalized);
+        const generatedAliases = extractCompanyAliases(companyName, normalized, driveName);
         if (driveNumber && !generatedAliases.includes(driveNumber.toLowerCase())) {
           generatedAliases.push(driveNumber.toLowerCase());
         }
@@ -1840,6 +1848,11 @@ export async function performReprocess(
               !/super\s*dream/i.test(d.category || d.drive_name || '')
             );
             if (dreamMatches.length > 0) candidateDrives = dreamMatches;
+          } else if (/\bregular\b/i.test(textLower)) {
+            const regularMatches = compDrives.filter((d: any) =>
+              /regular/i.test(d.category || d.drive_name || '')
+            );
+            if (regularMatches.length > 0) candidateDrives = regularMatches;
           }
 
           // Date-scoped circular linking: filter to drives whose startDate <= emailDate (+ graceMs only for registration)

@@ -3,6 +3,7 @@ import { extractEvents, extractJobDetails, type ExtractedEvent } from '@/lib/syn
 import { createAdminClient } from '@/lib/supabase/admin';
 import { isInactiveStatus } from '@/lib/stages';
 import { deriveEventEndTime } from '@/lib/event-duration';
+import { isApprovedCanonicalSender } from '@/lib/sync/canonical-email';
 
 /**
  * Converts HTML email content to clean plain text so table cells, divs, and paragraphs
@@ -131,6 +132,7 @@ export async function processEmailForEventsAndStatus(
     targetDriveId = drive?.id || null;
   }
   if (!targetDriveId) return;
+  let hasNotifiedEvent = false;
 
   const subjLower = email.subject.toLowerCase();
   const htmlText = htmlToPlainText(email.bodyHtml);
@@ -517,6 +519,7 @@ export async function processEmailForEventsAndStatus(
             eventId: insertedEvt.id,
             candidateConfirmed: isNeoMatched,
           });
+          hasNotifiedEvent = true;
         }
       }
     }
@@ -1021,16 +1024,18 @@ export async function processEmailForEventsAndStatus(
           emailSubject: email.subject,
           sourceEmailId: emailDbId,
         });
+      } else if (hasNotifiedEvent && ['test_scheduled', 'interview_scheduled', 'ppt_scheduled'].includes(newStatus)) {
+        // Event was already notified with exact schedule & venue; avoid duplicate status ping
+      } else {
+        await notifyStatusChange({
+          userId,
+          placementDriveId: targetDriveId,
+          companyName,
+          oldStatus: existingApp?.status || null,
+          newStatus,
+          sourceEmailId: emailDbId,
+        });
       }
-
-      await notifyStatusChange({
-        userId,
-        placementDriveId: targetDriveId,
-        companyName,
-        oldStatus: existingApp?.status || null,
-        newStatus,
-        sourceEmailId: emailDbId,
-      });
     }
   }
 
@@ -1069,7 +1074,9 @@ export async function processEmailForEventsAndStatus(
     }
   }
 
-  if (isRecentEmail && isDriveDiscoveryEmail && isInitialApplication) {
+  const isCollegeBroadcast = isApprovedCanonicalSender(email.senderEmail || email.sender);
+
+  if (isRecentEmail && isDriveDiscoveryEmail && isInitialApplication && isCollegeBroadcast) {
     const { notifyNewDrive } = await import('@/lib/notifications/service');
     const { getDriveMode } = await import('@/lib/utils');
     const driveMode = getDriveMode(appUpdate.notes as string);

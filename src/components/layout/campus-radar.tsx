@@ -154,7 +154,7 @@ export default function CampusRadar({ className, compact = false }: CampusRadarP
         <div className="mt-2.5 space-y-1.5">
           <div className="flex items-center justify-between text-[10px] font-mono text-zinc-400">
             <span>{lastSyncAt ? `Synced ${timeAgo(lastSyncAt)}` : 'Live radar active'}</span>
-            <span className="text-emerald-400/80 font-medium">15m cron</span>
+            <span className="text-emerald-400/80 font-medium">Real-time Pub/Sub</span>
           </div>
           <p className="text-[10px] text-zinc-500 leading-tight">
             Continuous radar indexing official CDC announcements and test circulars.

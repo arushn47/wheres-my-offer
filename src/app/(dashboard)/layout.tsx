@@ -13,17 +13,26 @@ export default async function DashboardLayout({
 }) {
   const session = await requireSession();
 
-  // Fetch last sync time
+  // Fetch last sync time & admin status
   const supabase = createAdminClient();
-  const { data: accounts } = await supabase
-    .from('gmail_accounts')
-    .select('last_sync_at')
-    .eq('user_id', session.userId)
-    .eq('is_connected', true)
-    .order('last_sync_at', { ascending: false })
-    .limit(1);
+  const [{ data: accounts }, { data: userRecord }] = await Promise.all([
+    supabase
+      .from('gmail_accounts')
+      .select('last_sync_at')
+      .eq('user_id', session.userId)
+      .eq('is_connected', true)
+      .order('last_sync_at', { ascending: false })
+      .limit(1),
+    supabase
+      .from('users')
+      .select('role')
+      .eq('id', session.userId)
+      .maybeSingle(),
+  ]);
 
   const lastSyncAt = accounts?.[0]?.last_sync_at || null;
+  const adminEmails = (process.env.ADMIN_EMAILS || '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean);
+  const isAdmin = Boolean(userRecord?.role === 'admin' || (session.email && adminEmails.includes(session.email.toLowerCase())));
 
   return (
     <SyncProvider initialLastSyncAt={lastSyncAt}>
@@ -32,19 +41,21 @@ export default async function DashboardLayout({
           userName={session.name}
           userAvatar={session.avatar}
           lastSyncAt={lastSyncAt}
+          isAdmin={isAdmin}
         />
         <div className="flex-1 flex flex-col min-w-0 lg:pl-72 w-full max-w-full">
           <MobileHeader
             userName={session.name}
             userAvatar={session.avatar}
             lastSyncAt={lastSyncAt}
+            isAdmin={isAdmin}
           />
           <main className="flex-1 px-4 sm:px-6 md:px-8 lg:px-10 xl:px-12 py-3 sm:py-3.5 lg:py-4 pb-28 lg:pb-4 min-w-0 w-full">
             {children}
           </main>
         </div>
-        <MobileNav />
-        <ChatAssistant />
+        <MobileNav isAdmin={isAdmin} />
+        {!isAdmin && <ChatAssistant />}
       </div>
     </SyncProvider>
   );

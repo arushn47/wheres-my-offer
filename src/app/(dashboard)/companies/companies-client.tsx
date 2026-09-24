@@ -87,13 +87,104 @@ interface CompaniesClientProps {
 
 const FILTERS = [
   { id: 'active', label: 'Active' },
-  { id: 'test_shortlisted', label: 'Test' },
-  { id: 'interview_shortlisted', label: 'Interview' },
   { id: 'not_shortlisted', label: 'Not Shortlisted' },
   { id: 'withdrawn', label: 'Withdrawn' },
   { id: 'not_applied', label: 'Not Applied' },
   { id: 'all', label: 'All' },
 ];
+
+/**
+ * Detects if a placement drive represents an eliminated / rejected application
+ * at any stage (interview, test, post-PPT, or screening).
+ */
+export const isCompanyEliminated = (comp: CompanyWithDetails): boolean => {
+  const rawStatus = (comp.application?.status || '').toLowerCase().trim();
+  const notes = (comp.application?.notes || '').toLowerCase();
+
+  if (isEliminatedStatus(rawStatus)) return true;
+  if (/eliminated|rejected|not\s*shortlisted|screened\s*out/i.test(notes)) return true;
+
+  const eff = getEffectiveStage(
+    comp.application?.status || 'applied',
+    comp.latestEvent,
+    comp.events,
+    comp.application?.notes,
+    comp.application?.manual_override
+  );
+  if (eff.eliminatedStage !== -1) return true;
+  if (isEliminatedStatus(eff.effectiveStatus)) return true;
+
+  return false;
+};
+
+/**
+ * Priority scoring for eliminated drives in "Not Shortlisted":
+ * Priority: Eliminated in Interview (4) -> In Test (3) -> Not Shortlisted for Test after PPT (2) -> Screening only / for PPT (1)
+ */
+export const getEliminationPriority = (comp: CompanyWithDetails): number => {
+  const rawStatus = (comp.application?.status || '').toLowerCase().trim();
+  const notes = (comp.application?.notes || '').toLowerCase();
+  const eff = getEffectiveStage(
+    comp.application?.status || 'applied',
+    comp.latestEvent,
+    comp.events,
+    comp.application?.notes,
+    comp.application?.manual_override
+  );
+  const s = eff.effectiveStatus.toLowerCase();
+  const subtitle = (eff.statusSubtitle || '').toLowerCase();
+
+  // Tier 4: Eliminated in Interview Round
+  if (
+    eff.eliminatedStage === 4 ||
+    s === 'rejected_interview' ||
+    s === 'interview_eliminated' ||
+    rawStatus === 'rejected_interview' ||
+    rawStatus === 'interview_eliminated' ||
+    subtitle.includes('interviewed') ||
+    /eliminated.*interview|interview.*eliminated|interviewed.*not\s*selected|rejected.*interview|interview.*rejected/i.test(notes) ||
+    (eff.hasInterview && eff.isInterviewCompleted && (isEliminatedStatus(s) || isEliminatedStatus(rawStatus)))
+  ) {
+    return 4;
+  }
+
+  // Tier 3: Eliminated in Test Round
+  if (
+    eff.eliminatedStage === 3 ||
+    s === 'rejected_test' ||
+    s === 'test_eliminated' ||
+    rawStatus === 'rejected_test' ||
+    rawStatus === 'test_eliminated' ||
+    subtitle.includes('test round') ||
+    /eliminated.*test|test.*eliminated|rejected.*test|test.*rejected/i.test(notes) ||
+    (eff.hasTest && eff.isTestCompleted && (isEliminatedStatus(s) || isEliminatedStatus(rawStatus)))
+  ) {
+    return 3;
+  }
+
+  // Tier 2: Not Shortlisted for Test after PPT
+  if (
+    subtitle.includes('post-ppt') ||
+    /after\s*ppt|post[- ]ppt|ppt.*not\s*shortlisted|not\s*shortlisted.*after\s*ppt/i.test(notes) ||
+    (eff.hasPpt && (eff.eliminatedStage === 2 || eff.furthestPassedStage >= 1 || isEliminatedStatus(s) || isEliminatedStatus(rawStatus)))
+  ) {
+    return 2;
+  }
+
+  // Tier 1: Not Shortlisted at screening only / for PPT
+  if (
+    isCompanyEliminated(comp) ||
+    isEliminatedStatus(s) ||
+    isEliminatedStatus(rawStatus) ||
+    subtitle.includes('eligibility') ||
+    subtitle.includes('screened out') ||
+    /not\s*shortlisted|screened\s*out|rejected/i.test(notes)
+  ) {
+    return 1;
+  }
+
+  return 0;
+};
 
 const getFutureRegistrationDeadline = (company: CompanyWithDetails): Date | null => {
   const now = Date.now();
@@ -129,79 +220,49 @@ const formatDeadlineCountdown = (d: Date): string => {
 
 const matchFilter = (status: string, filter: string, company?: CompanyWithDetails) => {
   const s = status.toLowerCase();
+  const isElim = company ? isCompanyEliminated(company) : isEliminatedStatus(s);
+
   if (filter === 'all') return true;
+
   if (filter === 'active') {
-    // Active = everything currently in progress (applied, PPT, test, interview, offer, open registration deadlines)
-    // Terminal rejections, non-registrations, and withdrawals are excluded
+    // 1. Eliminated drives must NEVER be in Active
+    if (isElim) return false;
+    // 2. Withdrawn / declined are excluded from Active
+    if (s === 'withdrawn' || s === 'declined') return false;
+    // 3. Open registration with future deadline is Active
     if (s === 'registration_open') return true;
-    return !isInactiveStatus(s) || (s === 'not_applied' && Boolean(company && hasFutureRegistrationDeadline(company)));
+    if (s === 'not_applied') {
+      return Boolean(company && hasFutureRegistrationDeadline(company));
+    }
+    // 4. All active in-progress rounds: applied, PPT, test, interview, offer
+    return !isInactiveStatus(s);
   }
+
   if (filter === 'not_shortlisted') {
-    // Pre-test screening eliminations only (screened out before tests, did not make initial shortlist)
-    const notes = company?.application?.notes || '';
-    const isPostShortlistElimination =
-      ['rejected', 'rejected_test', 'rejected_interview', 'test_eliminated', 'interview_eliminated'].includes(s) ||
-      /eliminated in (test|interview|assessment)/i.test(notes);
-    if (isPostShortlistElimination) return false;
-    return isEliminatedStatus(s);
+    // All eliminated drives go into "Not Shortlisted"
+    return isElim;
   }
-  if (filter === 'test_shortlisted') {
-    return [
-      'shortlisted',
-      'test',
-      'test_scheduled',
-      'test_ongoing',
-      'test_completed',
-      'rejected_test',
-      'test_eliminated',
-      'interview',
-      'interview_scheduled',
-      'interview_ongoing',
-      'interview_completed',
-      'rejected_interview',
-      'interview_eliminated',
-      'selected',
-      'offer',
-      'offer_received',
-    ].includes(s) || /eliminated in (test|assessment)/i.test(company?.application?.notes || '');
-  }
-  if (filter === 'interview_shortlisted') {
-    return [
-      'interview',
-      'interview_scheduled',
-      'interview_ongoing',
-      'interview_completed',
-      'selected',
-      'offer',
-      'offer_received',
-      'rejected_interview',
-      'interview_eliminated',
-    ].includes(s);
-  }
-  if (filter === 'eliminated') {
-    // Post-shortlist eliminations: candidate cracked shortlist / took test or interview, but eliminated in test or interview round
-    const notes = company?.application?.notes || '';
-    const isPostShortlistElimination =
-      ['rejected', 'rejected_test', 'rejected_interview', 'test_eliminated', 'interview_eliminated'].includes(s) ||
-      /eliminated in (test|interview|assessment)/i.test(notes);
-    return isPostShortlistElimination;
-  }
+
   if (filter === 'withdrawn') return ['withdrawn', 'declined'].includes(s);
   if (filter === 'not_applied') return s === 'not_applied' || s === 'registration_open';
 
-  // Legacy compatibility aliases kept for URL bookmarks
+  // Legacy compatibility aliases for bookmarks / links
+  if (filter === 'test_shortlisted' || filter === 'interview_shortlisted') {
+    return !isElim && !isInactiveStatus(s);
+  }
+  if (filter === 'eliminated') return isElim;
+
   if (filter === 'shortlisted') {
     return (
       [
         'shortlisted', 'test_scheduled', 'test_ongoing', 'test_completed',
         'interview_scheduled', 'interview_ongoing', 'interview_completed',
         'interview', 'test', 'selected', 'offer', 'offer_received',
-        'rejected_test', 'rejected_interview', 'test_eliminated', 'interview_eliminated',
-      ].includes(s) || /eliminated in (test|interview|assessment)/i.test(company?.application?.notes || '')
+      ].includes(s) && !isElim
     );
   }
   if (filter === 'scheduled') {
-    if (s.includes('completed') || isEliminatedStatus(s)) return false;
+    if (s.includes('completed') || isElim) return false;
     return [
       'test_scheduled', 'test_ongoing', 'interview_scheduled', 'interview_ongoing',
       'ppt_scheduled', 'ppt_ongoing', 'test', 'ppt', 'interview'
@@ -289,7 +350,13 @@ export default function CompaniesClient({
   const searchParams = useSearchParams();
   const [q, setQ] = useState(searchParams.get('q') || searchParams.get('search') || '');
   const urlFilter = searchParams.get('filter');
-  const [filter, setFilter] = useState(urlFilter || 'active');
+  const normalizedFilter = useMemo(() => {
+    if (!urlFilter) return 'active';
+    if (urlFilter === 'test_shortlisted' || urlFilter === 'interview_shortlisted') return 'active';
+    if (urlFilter === 'eliminated') return 'not_shortlisted';
+    return urlFilter;
+  }, [urlFilter]);
+  const [filter, setFilter] = useState(normalizedFilter);
 
   const updateUrl = (newFilter: string, newQ?: string) => {
     const params = new URLSearchParams();
@@ -320,7 +387,12 @@ export default function CompaniesClient({
   };
 
   useEffect(() => {
-    const currentParam = searchParams.get('filter') || 'active';
+    let currentParam = searchParams.get('filter') || 'active';
+    if (currentParam === 'test_shortlisted' || currentParam === 'interview_shortlisted') {
+      currentParam = 'active';
+    } else if (currentParam === 'eliminated') {
+      currentParam = 'not_shortlisted';
+    }
     if (currentParam !== filter) {
       setFilter(currentParam);
     }
@@ -328,7 +400,7 @@ export default function CompaniesClient({
     if (currentQ !== q) {
       setQ(currentQ);
     }
-  }, [searchParams]);
+  }, [searchParams, filter, q]);
 
   const filteredCompanies = useMemo(() => {
     const list = companies
@@ -418,20 +490,13 @@ export default function CompaniesClient({
       });
     }
 
-    if (filter === 'eliminated') {
-      // Sort by furthest progression first (interview round eliminated > test round eliminated)
+    if (filter === 'not_shortlisted' || filter === 'eliminated') {
+      // Sort by elimination priority:
+      // Priority: Eliminated in Interview (4) -> In Test (3) -> Not Shortlisted for Test after PPT (2) -> Screening only / for PPT (1)
       return [...list].sort((a, b) => {
-        const getRank = (comp: CompanyWithDetails) => {
-          const rawStatus = comp.application?.status || 'applied';
-          const eff = getEffectiveStage(rawStatus, comp.latestEvent, comp.events, comp.application?.notes, comp.application?.manual_override);
-          if (eff.eliminatedStage === 4) return 5; // interview round eliminated
-          if (eff.eliminatedStage === 3) return 4; // interview shortlist eliminated
-          if (eff.eliminatedStage === 2 && ['rejected_test', 'test_eliminated'].includes(eff.effectiveStatus)) return 3;
-          return 2;
-        };
-        const rankA = getRank(a);
-        const rankB = getRank(b);
-        if (rankB !== rankA) return rankB - rankA;
+        const pA = getEliminationPriority(a);
+        const pB = getEliminationPriority(b);
+        if (pB !== pA) return pB - pA;
 
         const numDiff = getDriveNum(b) - getDriveNum(a);
         if (numDiff !== 0) return numDiff;
@@ -442,7 +507,7 @@ export default function CompaniesClient({
       });
     }
 
-    // Default for 'all', 'not_shortlisted', 'withdrawn', 'not_applied':
+    // Default for 'all', 'withdrawn', 'not_applied':
     // Sort according to descending order of drive numbers (highest drive number first, e.g. 1324 > 1320...)
     return [...list].sort((a, b) => {
       const numDiff = getDriveNum(b) - getDriveNum(a);
@@ -458,8 +523,6 @@ export default function CompaniesClient({
       all: companies.length,
       active: 0,
       not_shortlisted: 0,
-      test_shortlisted: 0,
-      interview_shortlisted: 0,
       withdrawn: 0,
       not_applied: 0,
     };
@@ -469,8 +532,6 @@ export default function CompaniesClient({
       const st = eff.effectiveStatus;
       if (matchFilter(st, 'active', c)) counts.active++;
       if (matchFilter(st, 'not_shortlisted', c)) counts.not_shortlisted++;
-      if (matchFilter(st, 'test_shortlisted', c)) counts.test_shortlisted++;
-      if (matchFilter(st, 'interview_shortlisted', c)) counts.interview_shortlisted++;
       if (matchFilter(st, 'withdrawn', c)) counts.withdrawn++;
       if (matchFilter(st, 'not_applied', c)) counts.not_applied++;
     }

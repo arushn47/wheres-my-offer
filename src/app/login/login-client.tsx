@@ -52,6 +52,8 @@ const ERROR_MESSAGES: Record<string, string> = {
   no_email: 'Could not retrieve your email address from Google.',
   db_error: 'Unable to initialize user session in database. Please retry.',
   auth_failed: 'Authentication failed. Please verify your Google account.',
+  college_as_primary:
+    'Please sign in with your Personal Gmail address (where NeoPAT registration emails arrive). You will connect your VIT College email in the next step.',
 };
 
 const Reveal = ({ children, delay = 0, className = '' }: { children: React.ReactNode; delay?: number; className?: string }) => (
@@ -370,7 +372,7 @@ export default function LoginClient() {
         <div className="fixed top-16 sm:top-20 left-1/2 -translate-x-1/2 z-50 w-full max-w-md px-4">
           <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 backdrop-blur-md p-3.5 sm:p-4 text-xs text-rose-300 flex items-center gap-3 shadow-2xl">
             <AlertCircle className="w-5 h-5 text-rose-400 shrink-0" />
-            <span>{ERROR_MESSAGES[error] || 'Authentication error. Please try again.'}</span>
+            <span>{ERROR_MESSAGES[error] || decodeURIComponent(error)}</span>
           </div>
         </div>
       )}
@@ -423,6 +425,10 @@ export default function LoginClient() {
               >
                 Read the manifesto ↓
               </a>
+            </div>
+            <div className="mt-3 inline-flex items-center gap-2 rounded-xl border border-emerald-500/25 bg-emerald-500/10 px-3.5 py-1.5 text-xs text-emerald-300">
+              <span className="font-bold text-white text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-emerald-500/20">Step 1</span>
+              <span>Sign in with your <strong>Personal Gmail</strong> (where NeoPAT registration emails arrive). Link VIT email later.</span>
             </div>
             <p className="mt-2.5 text-[10px] sm:text-[11px] text-zinc-500 font-mono">
               By connecting, you agree to our{' '}
@@ -530,6 +536,10 @@ export default function LoginClient() {
               <span>Get started with Google</span>
               <ArrowRight className="h-4 w-4 transition-transform duration-200 group-hover:translate-x-1" />
             </a>
+            <div className="mx-auto mt-4 inline-flex items-center gap-2 rounded-xl border border-emerald-500/25 bg-emerald-500/10 px-3.5 py-1.5 text-xs text-emerald-300">
+              <span className="font-bold text-white text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-emerald-500/20">Step 1</span>
+              <span>Use your <strong>Personal Gmail</strong> to sign in · VIT College email connects later in Settings</span>
+            </div>
             <p className="mt-5 font-mono text-[10px] uppercase tracking-widest text-zinc-600">
               read-only · revocable anytime · built by students, for students
             </p>

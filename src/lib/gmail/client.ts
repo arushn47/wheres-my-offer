@@ -33,6 +33,12 @@ export interface ParsedEmail {
   hasAttachments: boolean;
   attachments: ParsedAttachment[];
   labels: string[];
+  canonicalEmailId?: string;
+  fromCanonical?: boolean;
+  cachedClassification?: any;
+  cachedCompanyName?: string | null;
+  cachedJobDetails?: any;
+  cachedEvents?: any[];
 }
 
 export interface ParsedAttachment {

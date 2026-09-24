@@ -64,7 +64,7 @@ const CLASSIFICATION_RULES: ClassificationRule[] = [
     reason: 'Hackathon or competition announcement, not a placement drive',
   },
   {
-    classification: 'general',
+    classification: 'irrelevant',
     confidence: 'high',
     match: (s) => /new learning contents?|practice.*tests?\s+added/i.test(s),
     reason: 'Generic LMS / NeoPAT practice course update (non-placement drive)',
@@ -446,6 +446,9 @@ const SUBJECT_COMPANY_PATTERNS: RegExp[] = [
   /(?:confirmation:\s*)?((?:[A-Za-z0-9&\s\-\.]|\([^)]+\))+?)\s+drive\s+registration\s*(?:update|$)/i,
   // "Company Name - Drive Registration"
   /^((?:[A-Za-z0-9&\s\-\.]|\([^)]+\))+?)\s*[-–—]\s*drive\s+registration/i,
+  // "LTIMindtree Registration - Regular Offer - 2027 Batch"
+  // "Company Name Registration - 2027 Batch" / "Company Name - Registration"
+  /^((?:[A-Za-z0-9&\s\-\.]|\([^)]+\))+?)\s*[-–—]?\s*registration\b/i,
   // "Zluri Super Dream Internship Selection List..."
   /^((?:[A-Za-z0-9&\s\-\.]|\([^)]+\))+?)\s*(?:\([^)]+\))?\s+(?:super\s+dream|dream|regular)?\s*[-–—]?\s*(?:internship|placement|ppo|offer)?\s*(?:selection\s+list|shortlist)/i,
   // "M/s.Value Labs Placement Drive"
@@ -462,7 +465,7 @@ const SUBJECT_COMPANY_PATTERNS: RegExp[] = [
   // "Thanks for taking the Assessment Goldman Sachs UG Summer Internship 2027 - Pooled STEM"
   /(?:thanks\s+for\s+taking\s+(?:the\s+)?assessment|assessment\s+completed)\s+((?:[A-Za-z0-9&\s\-\.]|\([^)]+\))+?)\s+(?:ug|summer|internship|placement|drive|pooled)/i,
   // "Company Name Super Dream Internship..." / "WTW Dream Offer..." / "RFPIO India Pvt Ltd (DBA Responsive)..."
-  /^((?:[A-Za-z0-9&\s\-\.]|\([^)]+\))+?)\s+(?:super\s+dream|dream|regular)\s*[-–—]?\s*(?:internship|placement|offer|drive|hiring)/i,
+  /^((?:[A-Za-z0-9&\s\-\.]|\([^)]+\))+?)\s*[-–—]?\s*(?:super\s+dream|dream|regular)\s*[-–—]?\s*(?:internship|placement|offer|drive|hiring)/i,
   // "Report Immediately : MUFG PPT"
   /report\s+immediately\s*:\s*([A-Za-z0-9&\s\-\.]+?)\s+(?:ppt|test|drive)/i,
   // "Reminder : ProcDNA Analytics Pvt. Ltd's Next round..."
@@ -487,6 +490,7 @@ const SUBJECT_COMPANY_PATTERNS: RegExp[] = [
  * Common prefixes in email subjects that obscure company names.
  */
 const SUBJECT_PREFIXES = [
+  /^\[(?:NeoPAT\s*Notification|Important|Urgent|Reminder)\]\s*/i,
   /^(?:fwd|re|fw)\s*:\s*/i,
   /^(?:extended\s+deadline|extension\s+of\s+deadline|deadline\s+extended)\s*(?:[-:]\s*)?/i,
   /^(?:updated|update|revised|revision)\s*(?:regarding|on|for)?\s*(?:[-:]\s*)?/i,
@@ -513,8 +517,9 @@ const SUBJECT_PREFIXES = [
  * Common suffixes to strip from company names.
  */
 const SUBJECT_SUFFIXES = [
-  /\s+(?:super\s+dream|dream|regular)\s+(?:internship|placement|drive|offer).*$/i,
-  /\s+(?:super\s+dream|dream|regular)$/i,
+  /\s*[-–—]?\s*(?:super\s+dream|dream|regular)\s+(?:internship|placement|drive|offer).*$/i,
+  /\s*[-–—]?\s*(?:super\s+dream|dream|regular)$/i,
+  /\s*[-–—]?\s*registration\b.*$/i,
   /\s+(?:placement\s+drive|campus\s+drive|internship\s+drive|drive).*$/i,
   /\s+\d+\s*[-]?\s*months?\b.*$/i,      // "6 months", "6-month"
   /\s+\d+\s*moths?\b.*$/i,              // "6moths"
@@ -625,7 +630,8 @@ export const KNOWN_ACRONYMS: Record<string, string[]> = {
   baml: ['bank of america merrill lynch', 'bank of america'],
   mufg: ['mitsubishi ufj financial group', 'mitsubishi ufj'],
   bny: ['bny mellon', 'bank of new york mellon'],
-  lti: ['larsen & toubro infotech', 'l&t infotech'],
+  lti: ['larsen & toubro infotech', 'l&t infotech', 'ltimindtree', 'lti mindtree'],
+  lmt: ['ltimindtree', 'lti mindtree', 'lti mind tree', 'larsen & toubro infotech mindtree', 'l&t infotech mindtree', 'mindtree'],
   cts: ['cognizant technology solutions', 'cognizant'],
 };
 
@@ -728,6 +734,16 @@ export function extractCompanyAliases(rawName: string, canonicalName: string, dr
   if (/^deloitte(?:\s+.*)?$/i.test(canonicalName.trim())) {
     add('deliotte');
     add('deloitte india');
+  }
+
+  if (/^(?:lmt|ltimindtree|lti\s+mindtree|lti\s+mind\s+tree)$/i.test(canonicalName.trim())) {
+    add('lmt');
+    add('ltimindtree');
+    add('lti mindtree');
+    add('lti mind tree');
+    add('mindtree');
+    add('larsen & toubro infotech');
+    add('l&t infotech');
   }
 
   // Add collapsed alphanumeric form (e.g. "Value Labs" -> "valuelabs", "Squad Stack" -> "squadstack")
@@ -1208,16 +1224,37 @@ export function normalizeCompanyName(name: string): string {
 
   const corrected = name.replace(/\bunthikable\b/gi, 'Unthinkable');
 
-  const UPPERCASE_TRACKS = new Set(['SDET', 'SRE', 'SAP', 'GDS', 'TCS', 'IBM', 'UBS', 'EY', 'CDC', 'JPMC', 'PWC', 'BAML', 'MUFG', 'LTI', 'CTS', 'HP', 'GS', 'MS']);
+  const UPPERCASE_TRACKS = new Set(['SDET', 'SRE', 'SAP', 'GDS', 'TCS', 'IBM', 'UBS', 'EY', 'CDC', 'JPMC', 'PWC', 'BAML', 'MUFG', 'LTI', 'LMT', 'CTS', 'HP', 'GS', 'MS']);
+
+  const SPECIAL_BRAND_CASINGS: Record<string, string> = {
+    ltimindtree: 'LTIMindtree',
+    pharmaace: 'PharmaAce',
+    mygate: 'MyGate',
+    makemytrip: 'MakeMyTrip',
+    healthifyme: 'HealthifyMe',
+    quickheal: 'QuickHeal',
+    oneplus: 'OnePlus',
+    mckinsey: 'McKinsey',
+    mediatek: 'MediaTek',
+    qualcomm: 'Qualcomm',
+  };
 
   // Title-case: keep all-caps short tokens (abbreviations) and known track acronyms as-is
   return corrected
     .trim()
     .split(/\s+/)
     .map((word) => {
+      const lower = word.toLowerCase();
+      if (SPECIAL_BRAND_CASINGS[lower]) return SPECIAL_BRAND_CASINGS[lower];
       const upper = word.toUpperCase();
       if (UPPERCASE_TRACKS.has(upper)) return upper;
       if (word.length <= 3 && word === word.toUpperCase()) return word; // Keep TCS, IBM, UBS, etc.
+      
+      // Preserve intentional camelCase / PascalCase brand names (e.g. PharmaAce, MyGate, McKinsey)
+      if (/[a-z]/.test(word) && /[A-Z]/.test(word.slice(1))) {
+        return word.charAt(0).toUpperCase() + word.slice(1);
+      }
+
       return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
     })
     .join(' ');

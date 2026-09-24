@@ -171,9 +171,10 @@ export default async function CompanyDetailPage(props: {
     substantiveAliases.length > 0
       ? supabase
           .from('emails')
-          .select('id, subject, sender, received_at, body_snippet, canonical_emails(body_text, body_snippet), classification, thread_id, gmail_message_id, gmail_account_id, placement_drive_id')
+          .select('id, subject, sender, received_at, body_snippet, canonical_emails(body_text, body_snippet), classification, thread_id, gmail_message_id, gmail_account_id, placement_drive_id, assignment_state')
           .eq('user_id', session.userId)
           .is('placement_drive_id', null)
+          .neq('assignment_state', 'unassigned')
           .or(substantiveAliases.map((a) => `subject.ilike.%${a.replace(/,/g, '')}%`).join(','))
           .order('received_at', { ascending: false })
           .limit(50)
@@ -248,6 +249,7 @@ export default async function CompanyDetailPage(props: {
   // Add unassigned fallback emails ONLY if they arrived within this drive's active timeframe
   // AND match the company name with strict word boundaries
   for (const em of (unassignedEmailsResult?.data || [])) {
+    if ((em as any).assignment_state === 'unassigned') continue;
     const emTime = em.received_at ? new Date(em.received_at).getTime() : 0;
     // RULE: Never check or include unassigned emails that arrived before this drive came!
     if (driveMinAllowedTime > 0 && emTime < driveMinAllowedTime) {

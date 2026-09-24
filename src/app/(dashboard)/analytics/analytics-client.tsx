@@ -600,7 +600,7 @@ export default function AnalyticsClient({
                   <span className="text-xs text-zinc-300 font-medium truncate">Sync Frequency</span>
                 </div>
                 <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-0.5 font-mono text-[11px] font-bold text-emerald-300 shrink-0 whitespace-nowrap">
-                  Every 15 mins
+                  Instant Pub/Sub + Daily
                 </span>
               </div>
             </div>

@@ -21,6 +21,18 @@ async function executeBackgroundSync(userIds: string[]) {
     console.error('[Cron Sync] Watch renewal error (non-fatal):', err);
   }
 
+  // Clean up completed sync pages older than 1 hour (E6.3)
+  try {
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    await supabase
+      .from('sync_pages')
+      .delete()
+      .eq('status', 'complete')
+      .lt('updated_at', oneHourAgo);
+  } catch (cleanErr) {
+    console.warn('[Cron Sync] Stale sync_pages cleanup non-fatal error:', cleanErr);
+  }
+
   // Shared wall-clock deadline for this entire cron invocation.
   // All runSync calls share this deadline so serial per-user work
   // can't stack and exceed maxDuration when there are multiple users.

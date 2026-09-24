@@ -27,7 +27,7 @@ describe('Phase D canonical email identity', () => {
     expect(isApprovedCanonicalSender('noreply.cdcinfo@vitstudent.ac.in')).toBe(false);
   });
 
-  it('requires complete body-only canonical content before cache reuse', () => {
+  it('requires complete body canonical content before cache reuse regardless of attachments', () => {
     expect(canReuseCanonicalBody({
       id: '1', content_key: 'k', message_id: null, sender_email: 'vitlions2027@vitbhopal.ac.in',
       subject: 'Subject', body_text: 'body', body_snippet: 'body', classification: null,
@@ -41,7 +41,7 @@ describe('Phase D canonical email identity', () => {
       classification_confidence: null, parsed_company_name: null, parsed_drive_numbers: null,
       parsed_job_details: null, parsed_events: null, processing_status: 'complete',
       identity_version: CANONICAL_IDENTITY_VERSION, has_attachments: true,
-    })).toBe(false);
+    })).toBe(true);
   });
 
   it('keeps body normalization deterministic without storing user-specific data', () => {
@@ -77,7 +77,7 @@ describe('Phase D canonical email identity', () => {
     expect(canReuseCanonicalBody({ ...base, processing_status: 'complete', body_text: null })).toBe(false);
   });
 
-  it('keeps attachment-bearing messages on the full processing path', () => {
+  it('allows attachment-bearing messages to reuse canonical body', () => {
     const base = {
       id: '1', content_key: 'k', message_id: 'm', sender_email: 'vitlions2027@vitbhopal.ac.in',
       subject: 'Shortlist', body_text: 'body', body_snippet: 'body', classification: 'shortlist',
@@ -85,6 +85,6 @@ describe('Phase D canonical email identity', () => {
       parsed_job_details: null, parsed_events: null, processing_status: 'complete',
       identity_version: CANONICAL_IDENTITY_VERSION,
     };
-    expect(canReuseCanonicalBody({ ...base, has_attachments: true })).toBe(false);
+    expect(canReuseCanonicalBody({ ...base, has_attachments: true })).toBe(true);
   });
 });

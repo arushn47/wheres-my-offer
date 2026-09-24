@@ -88,6 +88,53 @@ export async function GET(request: Request) {
       }
     }
 
+    // Enforce email domain validation
+    const isVitCollegeEmail = /@(vitbhopal\.ac\.in|vitstudent\.ac\.in|[a-z0-9.-]+\.vit\.ac\.in|vit\.ac\.in)$/i.test(
+      userInfo.email.trim()
+    );
+
+    // 1. College account MUST be an official VIT email
+    if (accountType === 'college' && !isVitCollegeEmail) {
+      const returnTo = existingUserId ? `${appUrl}/settings` : `${appUrl}/login`;
+      return NextResponse.redirect(
+        `${returnTo}?error=${encodeURIComponent(
+          'College email must be your official VIT address (@vitbhopal.ac.in or @vitstudent.ac.in). Personal Gmail cannot be used as college email.'
+        )}`
+      );
+    }
+
+    // 2. Personal account linking while already logged in must NOT be a VIT college email
+    if (existingUserId && accountType === 'personal' && isVitCollegeEmail) {
+      return NextResponse.redirect(
+        `${appUrl}/settings?error=${encodeURIComponent(
+          'Please select your Personal Gmail address (where NeoPAT registration emails arrive), not your VIT college email.'
+        )}`
+      );
+    }
+
+    // 3. New user signup on login page must use Personal Gmail first
+    if (!existingUserId && accountType === 'personal' && isVitCollegeEmail) {
+      const { data: existingUser } = await supabase
+        .from('users')
+        .select('id')
+        .or(`google_id.eq.${userInfo.id},email.eq.${userInfo.email}`)
+        .maybeSingle();
+
+      const { data: existingSecondary } = await supabase
+        .from('gmail_accounts')
+        .select('user_id')
+        .eq('google_account_id', userInfo.id)
+        .maybeSingle();
+
+      if (!existingUser && !existingSecondary) {
+        return NextResponse.redirect(
+          `${appUrl}/login?error=${encodeURIComponent(
+            'Please sign in with your Personal Gmail address (where NeoPAT registration emails arrive). You can connect your official VIT College email in the next step.'
+          )}`
+        );
+      }
+    }
+
     let userId: string;
 
     if (existingUserId) {
@@ -220,7 +267,13 @@ export async function GET(request: Request) {
       });
     }
 
-    // Redirect to dashboard
+    // Redirect: Admins go straight to /admin, students to /
+    const { checkIsAdmin } = await import('@/lib/auth/admin');
+    const isAdmin = await checkIsAdmin(userId, sessionEmail);
+    if (isAdmin) {
+      return NextResponse.redirect(`${appUrl}/admin`);
+    }
+
     return NextResponse.redirect(`${appUrl}/`);
 
   } catch (err) {

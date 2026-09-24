@@ -67,76 +67,158 @@ export function computeContentKey(senderEmail: string, subject: string, bodySnip
  * Phase 2D will flip this to a cache-read: if a canonical row already exists for a
  * given content_key, we skip fetchMessageDetail() entirely (zero Gmail API egress).
  */
+async function getCanonicalAttachments(
+  supabase: ReturnType<typeof createAdminClient>,
+  canonicalId: string
+): Promise<import('@/lib/gmail/client').ParsedAttachment[]> {
+  try {
+    const { data } = await supabase
+      .from('canonical_attachments')
+      .select('attachment_id, filename, size_bytes')
+      .eq('canonical_email_id', canonicalId);
+
+    return (data || []).map((att) => ({
+      attachmentId: att.attachment_id,
+      filename: att.filename || 'attachment.xlsx',
+      mimeType: att.filename?.endsWith('.csv') ? 'text/csv' : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      size: att.size_bytes || 0,
+    }));
+  } catch {
+    return [];
+  }
+}
+
 async function shadowWriteCanonical(
   supabase: ReturnType<typeof createAdminClient>,
   parsedEmail: ParsedEmail,
   emailId: string,
   classification: import('@/lib/sync/classifier').ClassificationResult,
   companyName: string | null,
-  account: GmailAccount
+  account: GmailAccount,
+  preExtractedEvents?: import('@/lib/sync/events').ExtractedEvent[]
 ): Promise<void> {
   try {
-    if (!isApprovedCanonicalSender(parsedEmail.senderEmail)) return;
+    if (!isApprovedCanonicalSender(parsedEmail.senderEmail || parsedEmail.sender)) return;
     const bodyText = canonicalBodyFromEmail(parsedEmail.bodyPlain, parsedEmail.bodyHtml, parsedEmail.bodySnippet);
+    const senderEmail = (parsedEmail.senderEmail || parsedEmail.sender || '').toLowerCase().trim();
     const contentKey = computeContentKey(
-      parsedEmail.senderEmail || parsedEmail.sender,
+      senderEmail,
       parsedEmail.subject,
       bodyText
     );
+    const normalizedMessageId = normalizeRfcMessageId(parsedEmail.messageId);
 
-    const canonicalEvents = extractEvents(parsedEmail).map((event) => ({
-      ...event,
-      startTime: event.startTime?.toISOString() || null,
-      endTime: event.endTime?.toISOString() || null,
-    }));
-    const canonicalPayload = {
-      content_key: contentKey,
-      sender_email: (parsedEmail.senderEmail || parsedEmail.sender || '').toLowerCase().trim(),
-      subject: parsedEmail.subject,
-      body_snippet: bodyText.slice(0, 50000),
-      body_text: bodyText,
-      message_id: normalizeRfcMessageId(parsedEmail.messageId),
-      identity_version: CANONICAL_IDENTITY_VERSION,
-      has_attachments: parsedEmail.hasAttachments,
-      metadata_key: computeCanonicalMetadataKey(parsedEmail.senderEmail, parsedEmail.subject, parsedEmail.bodySnippet),
-      classification: classification.classification,
-      classification_confidence: classification.confidence ?? null,
-      parsed_company_name: companyName || null,
-      parsed_job_details: extractJobDetails(bodyText),
-      parsed_events: canonicalEvents,
-      processing_status: 'complete' as const,
-      updated_at: new Date().toISOString(),
-    };
+    const canonicalEvents = (preExtractedEvents || extractEvents(parsedEmail)).map((event) => {
+      let startTime: string | null = null;
+      let endTime: string | null = null;
+      try {
+        if (event.startTime instanceof Date && !isNaN(event.startTime.getTime())) {
+          startTime = event.startTime.toISOString();
+        } else if (typeof event.startTime === 'string') {
+          startTime = event.startTime;
+        }
+      } catch {}
+      try {
+        if (event.endTime instanceof Date && !isNaN(event.endTime.getTime())) {
+          endTime = event.endTime.toISOString();
+        } else if (typeof event.endTime === 'string') {
+          endTime = event.endTime;
+        }
+      } catch {}
+      return {
+        ...event,
+        startTime,
+        endTime,
+      };
+    });
 
-    const { data: canonical, error: upsertError } = await supabase
-      .from('canonical_emails')
-      .upsert(canonicalPayload, { onConflict: 'content_key', ignoreDuplicates: false })
-      .select('id')
-      .single();
+    let canonicalId: string | null = null;
 
-    if (upsertError) {
-      console.warn('[canonical] Shadow upsert failed:', upsertError.message);
-      return;
+    // 1. Check if canonical row already exists by message_id or content_key
+    if (normalizedMessageId) {
+      const { data: byMsg } = await supabase
+        .from('canonical_emails')
+        .select('id')
+        .eq('message_id', normalizedMessageId)
+        .maybeSingle();
+      if (byMsg?.id) canonicalId = byMsg.id;
     }
 
-    if (canonical?.id) {
-      // Link the per-user emails row to the canonical row
+    if (!canonicalId) {
+      const { data: byKey } = await supabase
+        .from('canonical_emails')
+        .select('id')
+        .eq('content_key', contentKey)
+        .maybeSingle();
+      if (byKey?.id) canonicalId = byKey.id;
+    }
+
+    // 2. If not found, insert new canonical row
+    if (!canonicalId) {
+      const canonicalPayload = {
+        content_key: contentKey,
+        sender_email: senderEmail,
+        subject: parsedEmail.subject,
+        body_snippet: bodyText.slice(0, 50000),
+        body_text: bodyText,
+        message_id: normalizedMessageId,
+        identity_version: CANONICAL_IDENTITY_VERSION,
+        has_attachments: Boolean(parsedEmail.hasAttachments || parsedEmail.attachments?.length > 0),
+        metadata_key: computeCanonicalMetadataKey(parsedEmail.senderEmail || parsedEmail.sender, parsedEmail.subject, parsedEmail.bodySnippet),
+        classification: classification.classification,
+        classification_confidence: classification.confidence ?? null,
+        parsed_company_name: companyName || null,
+        parsed_job_details: extractJobDetails(bodyText),
+        parsed_events: canonicalEvents,
+        processing_status: 'complete' as const,
+        updated_at: new Date().toISOString(),
+      };
+
+      const { data: canonical, error: upsertError } = await supabase
+        .from('canonical_emails')
+        .upsert(canonicalPayload, { onConflict: 'content_key', ignoreDuplicates: false })
+        .select('id')
+        .single();
+
+      if (upsertError) {
+        console.warn('[canonical] Shadow upsert failed, checking fallback:', upsertError.message);
+        if (normalizedMessageId) {
+          const { data: fallback } = await supabase
+            .from('canonical_emails')
+            .select('id')
+            .eq('message_id', normalizedMessageId)
+            .maybeSingle();
+          if (fallback?.id) canonicalId = fallback.id;
+        }
+      } else if (canonical?.id) {
+        canonicalId = canonical.id;
+      }
+    }
+
+    if (canonicalId) {
+      // Link the per-user emails row to the canonical row and truncate body_snippet to 500 chars (E1.3)
       await supabase
-      .from('emails')
-        .update({ canonical_email_id: canonical.id, rfc_message_id: normalizeRfcMessageId(parsedEmail.messageId) })
+        .from('emails')
+        .update({
+          canonical_email_id: canonicalId,
+          rfc_message_id: normalizedMessageId,
+          body_snippet: (parsedEmail.bodyPlain || parsedEmail.bodySnippet || '').slice(0, 500),
+        })
         .eq('id', emailId);
 
-      for (const attachment of parsedEmail.attachments) {
-        await supabase.from('canonical_attachments').upsert({
-          canonical_email_id: canonical.id,
-          gmail_message_id: parsedEmail.gmailMessageId,
-          gmail_account_id: account.id,
-          attachment_id: attachment.attachmentId,
-          filename: attachment.filename,
-          size_bytes: attachment.size,
-          parse_status: 'pending',
-          updated_at: new Date().toISOString(),
-        }, { onConflict: 'canonical_email_id,attachment_id', ignoreDuplicates: true });
+      if (parsedEmail.attachments && parsedEmail.attachments.length > 0) {
+        for (const attachment of parsedEmail.attachments) {
+          await supabase.from('canonical_attachments').upsert({
+            canonical_email_id: canonicalId,
+            gmail_message_id: parsedEmail.gmailMessageId,
+            gmail_account_id: account.id,
+            attachment_id: attachment.attachmentId,
+            filename: attachment.filename,
+            size_bytes: attachment.size,
+            parse_status: 'pending',
+            updated_at: new Date().toISOString(),
+          }, { onConflict: 'canonical_email_id,attachment_id', ignoreDuplicates: true });
+        }
       }
     }
   } catch (err) {
@@ -174,7 +256,8 @@ async function findReusableCanonicalEmail(
 
 function parsedEmailFromCanonical(
   canonical: CanonicalEmailCacheRow,
-  metadata: Awaited<ReturnType<typeof fetchMessageMetadata>>
+  metadata: Awaited<ReturnType<typeof fetchMessageMetadata>>,
+  attachments: import('@/lib/gmail/client').ParsedAttachment[] = []
 ): ParsedEmail {
   return {
     gmailMessageId: metadata.id,
@@ -187,9 +270,20 @@ function parsedEmailFromCanonical(
     bodySnippet: canonical.body_snippet || canonical.body_text || '',
     bodyPlain: canonical.body_text || canonical.body_snippet || '',
     bodyHtml: '',
-    hasAttachments: false,
-    attachments: [],
+    hasAttachments: Boolean(canonical.has_attachments || attachments.length > 0),
+    attachments: attachments,
     labels: [],
+    canonicalEmailId: canonical.id,
+    fromCanonical: true,
+    cachedClassification: canonical.classification ? {
+      classification: canonical.classification as any,
+      confidence: canonical.classification_confidence ?? 1.0,
+      companyName: canonical.parsed_company_name,
+      reason: 'Reused from canonical cache',
+    } : undefined,
+    cachedCompanyName: canonical.parsed_company_name,
+    cachedJobDetails: canonical.parsed_job_details,
+    cachedEvents: canonical.parsed_events ?? undefined,
   };
 }
 
@@ -517,13 +611,15 @@ async function processSingleMessage(
 
     const fullEmailText = `${parsedEmail.subject}\n${parsedEmail.bodyPlain || parsedEmail.bodySnippet || ''}`;
     const currentEmailText = `${parsedEmail.subject}\n${getCurrentMessageText(parsedEmail)}`;
-    const driveNumber = extractDriveNumber(currentEmailText);
-    const driveNameMatch = currentEmailText.match(/Drive Name:\s*([^.\n\r]+)/i);
+    const driveNumber = extractDriveNumber(currentEmailText) || extractDriveNumber(fullEmailText);
+    const driveNameMatch = currentEmailText.match(
+      /(?:drive\s+name|name\s+of\s+the\s+drive)\s*[:\-*]*\s*([A-Za-z0-9&\s\-\.()]+?)(?:\s+(?:drive\s+number|new\s+drive\s+date|category|date\s+of\s+visit|eligibility|eligible|ctc|role|stipend|company|date|please|if\b|\n|\r|\*|$))/i
+    );
     const driveName = driveNameMatch ? driveNameMatch[1].trim() : null;
 
     // Stage 3: Classify
-    const classification = classifyEmail(parsedEmail, deps.driveResolutionsMap);
-    let companyName = classification.companyName;
+    const classification = parsedEmail.cachedClassification || classifyEmail(parsedEmail, deps.driveResolutionsMap);
+    let companyName = parsedEmail.cachedCompanyName || classification.companyName;
     const t3 = Date.now();
 
     // Timing correlation
@@ -569,6 +665,12 @@ async function processSingleMessage(
       }
     }
 
+    // E2.1: Discard irrelevant personal LMS/marketing emails immediately without inserting into DB
+    if (isPersonal && classification.classification === 'irrelevant') {
+      ctx.liveTracker.processedMessages++;
+      return result;
+    }
+
     let companyId: string | null = null;
     let placementDriveId: string | null = null;
     let driveAssignmentState: string = 'unassigned';
@@ -583,6 +685,8 @@ async function processSingleMessage(
       classification.classification
     );
 
+    let extractedEventsList: import('@/lib/sync/events').ExtractedEvent[] = [];
+
     // Stage 4: Upsert company
     if (companyName && isPlacementClassification) {
       const isNeoPatEmail =
@@ -593,12 +697,16 @@ async function processSingleMessage(
 
       // Resolve organization identity without writing legacy company drive
       // metadata. placement_drives is the canonical opportunity identity.
-      companyId = await upsertCompany(supabase, userId, companyName, isNeoPatEmail);
+      companyId = await upsertCompany(supabase, userId, companyName, isNeoPatEmail, driveName);
 
-      const driveMetadata = extractJobDetails(currentEmailText);
-      const driveDeadline = extractEvents(parsedEmail).find(
+      const driveMetadata = parsedEmail.cachedJobDetails || extractJobDetails(currentEmailText);
+      extractedEventsList = parsedEmail.cachedEvents || extractEvents(parsedEmail);
+      const driveDeadlineEvent = extractedEventsList.find(
         (event) => event.eventType === 'registration_deadline' && event.startTime
-      )?.startTime?.toISOString() || null;
+      );
+      const driveDeadline = driveDeadlineEvent?.startTime
+        ? (driveDeadlineEvent.startTime instanceof Date ? driveDeadlineEvent.startTime.toISOString() : String(driveDeadlineEvent.startTime))
+        : null;
       const driveResolution = await resolvePlacementDrive({
         supabase,
         userId,
@@ -714,28 +822,31 @@ async function processSingleMessage(
 
     // Insert email into DB
     const emailPayload = {
-        user_id: userId,
-        gmail_account_id: account.id,
+      user_id: userId,
+      gmail_account_id: account.id,
 
-        gmail_message_id: parsedEmail.gmailMessageId,
-        rfc_message_id: normalizeRfcMessageId(parsedEmail.messageId),
-        thread_id: parsedEmail.threadId,
-        subject: parsedEmail.subject,
-        sender: parsedEmail.sender,
-        received_at: parsedEmail.receivedAt.toISOString(),
-        body_snippet: (parsedEmail.bodyPlain || parsedEmail.bodySnippet || '').slice(
-          0,
-          !isPersonal && isTrustedSender(parsedEmail.senderEmail || parsedEmail.sender, isPersonal) ? 50000 : 10000
-        ),
-        classification: classification.classification,
-        is_processed: false,
-        is_relevant: classification.classification !== 'irrelevant',
-        processed_at: null,
-        placement_drive_id: placementDriveId,
-        assignment_state: driveAssignmentState,
-        assignment_confidence: driveAssignmentConfidence,
-        assignment_source: driveAssignmentSource,
-      };
+      gmail_message_id: parsedEmail.gmailMessageId,
+      rfc_message_id: normalizeRfcMessageId(parsedEmail.messageId),
+      canonical_email_id: parsedEmail.canonicalEmailId || null,
+      thread_id: parsedEmail.threadId,
+      subject: parsedEmail.subject,
+      sender: parsedEmail.sender,
+      received_at: parsedEmail.receivedAt.toISOString(),
+      body_snippet: (parsedEmail.bodyPlain || parsedEmail.bodySnippet || '').slice(
+        0,
+        parsedEmail.canonicalEmailId
+          ? 500
+          : (!isPersonal && isTrustedSender(parsedEmail.senderEmail || parsedEmail.sender, isPersonal) ? 50000 : 10000)
+      ),
+      classification: classification.classification,
+      is_processed: false,
+      is_relevant: classification.classification !== 'irrelevant',
+      processed_at: null,
+      placement_drive_id: placementDriveId,
+      assignment_state: driveAssignmentState,
+      assignment_confidence: driveAssignmentConfidence,
+      assignment_source: driveAssignmentSource,
+    };
     const emailWrite = ctx.existingEmailId
       ? await supabase.from('emails').update(emailPayload).eq('id', ctx.existingEmailId).select('id').single()
       : await supabase.from('emails').insert(emailPayload).select('id').single();
@@ -820,8 +931,8 @@ async function processSingleMessage(
           // Phase 2C — Shadow write to canonical_emails for college broadcast emails.
           // Personal NeoPAT emails (isPersonal) are never canonicalized — they contain
           // user-specific registration data. Only identical CDC circulars sent to all
-          // students qualify.
-          if (!isPersonal) {
+          // students qualify. If already resolved from canonical cache, skip shadow write.
+          if (!isPersonal && !parsedEmail.fromCanonical) {
             // Awaited: shadowWriteCanonical has an internal try/catch and never throws.
             // Must be awaited — Vercel freezes the container the moment runSync() returns,
             // so a fire-and-forget upsert would be killed in-flight on every invocation.
@@ -831,7 +942,8 @@ async function processSingleMessage(
               insertedEmail.id,
               classification,
               companyName || null,
-              account
+              account,
+              extractedEventsList
             );
           }
         }
@@ -979,7 +1091,7 @@ export async function processPage(
 
   const isPersonal = account.account_type === 'personal';
   const isAccountInitialSync = !account.last_history_id;
-  const BATCH_SIZE = 8;
+  let batchSize = isAccountInitialSync && chronoSortedMsgIds.length > 200 ? 4 : 8;
   const INTER_BATCH_DELAY_MS = 0;
 
   const { gmail } = await createGmailClient(account);
@@ -1017,7 +1129,7 @@ export async function processPage(
     skippedDuplicates: initialCounts?.skippedDuplicates ?? 0,
   };
 
-  for (let i = startIndex; i < chronoSortedMsgIds.length; i += BATCH_SIZE) {
+  for (let i = startIndex; i < chronoSortedMsgIds.length; i += batchSize) {
     const elapsed = Date.now() - startTime;
     const isDeadlineReached = globalDeadline ? Date.now() >= globalDeadline - 3500 : false;
 
@@ -1036,13 +1148,24 @@ export async function processPage(
       };
     }
 
-    const batch = chronoSortedMsgIds.slice(i, i + BATCH_SIZE);
+    const batch = chronoSortedMsgIds.slice(i, i + batchSize);
 
     // Concurrently prefetch metadata and (if placement-relevant) full detail for the entire batch
     const prefetchResults = await Promise.allSettled(
       batch.map(async (msgId) => {
         if (existingInDb.has(msgId) && !existingEmailIds.get(msgId)) {
           return { msgId, isSkippedDup: true, parsedEmail: null };
+        }
+
+        if (isPersonal) {
+          // Personal accounts are strictly filtered by Gmail query to noreply.cdcinfo@vitstudent.ac.in
+          // and are NEVER canonicalized. Fetch full message directly, skipping redundant metadata roundtrip.
+          const parsedEmail = await withQuotaBackoff(() => fetchMessageDetail(gmail, msgId));
+          const senderLower = (parsedEmail.senderEmail || parsedEmail.sender || '').toLowerCase();
+          if (!isTrustedPlacementSender(senderLower, true) || BLOCKED_SENDERS.test(senderLower)) {
+            return { msgId, isSkippedDup: false, parsedEmail: null };
+          }
+          return { msgId, isSkippedDup: false, parsedEmail };
         }
 
         const metadata = await withQuotaBackoff(() => fetchMessageMetadata(gmail, msgId));
@@ -1068,10 +1191,14 @@ export async function processPage(
           metadata.snippet
         );
         if (canonical) {
+          let attachments: import('@/lib/gmail/client').ParsedAttachment[] = [];
+          if (canonical.has_attachments) {
+            attachments = await getCanonicalAttachments(supabase, canonical.id);
+          }
           return {
             msgId,
             isSkippedDup: false,
-            parsedEmail: parsedEmailFromCanonical(canonical, metadata),
+            parsedEmail: parsedEmailFromCanonical(canonical, metadata, attachments),
           };
         }
 
@@ -1088,7 +1215,9 @@ export async function processPage(
       if (settled.status === 'rejected') {
         const errMsg = settled.reason instanceof Error ? settled.reason.message : String(settled.reason);
         const isQuota = /quota exceeded|rate.?limit|units.?per.?minute/i.test(errMsg);
-        if (!isQuota) {
+        if (isQuota) {
+          batchSize = Math.max(2, Math.floor(batchSize / 2));
+        } else {
           errorsList.push(errMsg);
         }
         break;
@@ -1166,7 +1295,7 @@ export async function processPage(
     // Persist checkpoint after each batch to survive sudden shutdowns
     await updateCheckpoint(currentIndex);
 
-    if (INTER_BATCH_DELAY_MS > 0 && i + BATCH_SIZE < chronoSortedMsgIds.length) {
+    if (INTER_BATCH_DELAY_MS > 0 && i + batchSize < chronoSortedMsgIds.length) {
       await new Promise((r) => setTimeout(r, INTER_BATCH_DELAY_MS));
     }
   }
@@ -1196,6 +1325,11 @@ export function isUserSyncActive(userId: string): boolean {
   return activeSyncLocks.has(userId);
 }
 
+export function resetActiveSyncLock(userId: string): void {
+  activeSyncLocks.delete(userId);
+  activeSyncMap.delete(userId);
+}
+
 // ============================================
 // Sync Engine
 // ============================================
@@ -1216,9 +1350,25 @@ export async function runSync(
     timeBudgetMs?: number;
     /** Shared wall-clock deadline (epoch ms) for the entire cron invocation. Stops dispatching new pages once reached. */
     globalDeadline?: number;
+    /** If true, unstick any previous stale lock before starting */
+    force?: boolean;
   }
 ): Promise<SyncResult> {
   const supabase = createAdminClient();
+
+  if (options?.force) {
+    resetActiveSyncLock(userId);
+    try {
+      await supabase
+        .from('sync_state')
+        .update({
+          is_syncing: false,
+          lease_expires_at: null,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('user_id', userId);
+    } catch {}
+  }
 
   // 1. Get all connected Gmail accounts for this user
   const { data: accounts, error: accountsError } = await supabase
@@ -1479,24 +1629,14 @@ export async function runSync(
           };
 
           if (account.account_type === 'personal') {
-            // Personal account: master records for NeoPAT companies and registrations.
-            // Use history API if available to achieve zero-egress idle syncs (<200ms).
-            if (account.last_history_id) {
-              const historyResult = await fetchHistoryChanges(gmail, account.last_history_id);
-              if (!historyResult.historyExpired) {
-                const deletedIds = new Set(historyResult.deletedMessageIds);
-                messageIds = historyResult.messageIds.filter((id) => !deletedIds.has(id));
-                nextHistoryId = historyResult.latestHistoryId;
-              } else {
-                const query = getPlacementSearchQuery('personal');
-                messageIds = await fetchMessageIds(gmail, query, 2500, onFetchBatch);
-                nextHistoryId = historyResult.latestHistoryId || (await getProfileHistoryId(gmail));
-              }
-            } else {
-              const query = getPlacementSearchQuery('personal');
-              messageIds = await fetchMessageIds(gmail, query, 2500, onFetchBatch);
-              nextHistoryId = await getProfileHistoryId(gmail);
-            }
+            // Personal accounts: master records for NeoPAT companies and registrations.
+            // Volume is small (~250-450 emails total across placement season).
+            // Always query from:noreply.cdcinfo@vitstudent.ac.in after:2026/07/01 directly
+            // rather than trusting ephemeral history IDs. This guarantees zero missed drives
+            // or registration confirmations while still completing in <200ms via DB existingSet check.
+            const query = getPlacementSearchQuery('personal');
+            messageIds = await fetchMessageIds(gmail, query, 2500, onFetchBatch);
+            nextHistoryId = await getProfileHistoryId(gmail);
           } else if (account.last_history_id) {
             const historyResult = await fetchHistoryChanges(gmail, account.last_history_id);
             if (!historyResult.historyExpired) {
@@ -1504,7 +1644,19 @@ export async function runSync(
               messageIds = historyResult.messageIds.filter((id) => !deletedIds.has(id));
               nextHistoryId = historyResult.latestHistoryId;
             } else {
-              const afterDate = account.last_sync_at ? new Date(account.last_sync_at) : undefined;
+              let afterDate = account.last_sync_at ? new Date(account.last_sync_at) : undefined;
+              if (!afterDate) {
+                const { data: latestEmail } = await supabase
+                  .from('emails')
+                  .select('received_at')
+                  .eq('gmail_account_id', account.id)
+                  .order('received_at', { ascending: false })
+                  .limit(1)
+                  .maybeSingle();
+                if (latestEmail?.received_at) {
+                  afterDate = new Date(latestEmail.received_at);
+                }
+              }
               const query = getPlacementSearchQuery('college', afterDate);
               const maxLimit = 2500;
               messageIds = await fetchMessageIds(gmail, query, maxLimit, onFetchBatch);
@@ -1945,6 +2097,46 @@ export async function runSync(
               return false;
             };
 
+            // Pre-batch fetch established drive numbers and placement drives for user companies (eliminates N+1 queries in reconciliation)
+            const allUserCompIds = allUserComps.map((c) => c.id);
+            const companyEstablishedDrives = new Map<string, string[]>();
+            const companyDrivesMap = new Map<string, Array<{ id: string; company_id: string; source_email_id: string | null; created_at: string }>>();
+
+            if (allUserCompIds.length > 0) {
+              const [{ data: compEmails }, { data: userDrives }] = await Promise.all([
+                supabase
+                  .from('emails')
+                  .select('body_snippet, placement_drives!inner(company_id)')
+                  .in('placement_drives.company_id', allUserCompIds)
+                  .not('body_snippet', 'is', null)
+                  .ilike('body_snippet', '%pat-PL-%')
+                  .limit(200),
+                supabase
+                  .from('placement_drives')
+                  .select('id, company_id, source_email_id, created_at')
+                  .eq('user_id', userId)
+                  .in('company_id', allUserCompIds)
+                  .order('created_at', { ascending: false }),
+              ]);
+
+              for (const ce of (compEmails || []) as any[]) {
+                const cId = ce.placement_drives?.company_id;
+                if (!cId) continue;
+                const drives = extractAllDriveNumbers(ce.body_snippet || '');
+                if (drives.length > 0) {
+                  const list = companyEstablishedDrives.get(cId) || [];
+                  list.push(...drives);
+                  companyEstablishedDrives.set(cId, list);
+                }
+              }
+
+              for (const d of (userDrives || []) as any[]) {
+                const list = companyDrivesMap.get(d.company_id) || [];
+                list.push(d);
+                companyDrivesMap.set(d.company_id, list);
+              }
+            }
+
             for (const email of unlinkedEmails) {
               let matchedCompanyId: string | null = null;
 
@@ -1989,14 +2181,7 @@ export async function runSync(
                   // Ambiguous! Disambiguate using drive number if present
                   if (unlinkedDrive) {
                     for (const cand of matchedList) {
-                        const { data: candEmails } = await supabase
-                          .from('emails')
-                          .select('body_snippet, placement_drives!inner(company_id)')
-                          .eq('placement_drives.company_id', cand.id)
-                        .not('body_snippet', 'is', null)
-                        .ilike('body_snippet', '%pat-PL-%')
-                        .limit(5);
-                      const drives = (candEmails || []).flatMap((e: { body_snippet: string | null }) => extractAllDriveNumbers(e.body_snippet || ''));
+                      const drives = companyEstablishedDrives.get(cand.id) || [];
                       if (drives.includes(unlinkedDrive)) {
                         matched = cand;
                         break;
@@ -2009,19 +2194,7 @@ export async function runSync(
                   // If unlinked email carries a drive number, ensure candidate company is not bound to a different drive
                   let driveConflict = false;
                   if (unlinkedDrive) {
-                    // Check existing emails for candidate company
-                    const { data: cEmails } = await supabase
-                      .from('emails')
-                      .select('body_snippet, placement_drives!inner(company_id)')
-                      .eq('placement_drives.company_id', matched.id)
-                      .not('body_snippet', 'is', null)
-                      .ilike('body_snippet', '%pat-PL-%')
-                      .limit(5);
-
-                    const establishedDrives = (cEmails || []).flatMap((e: { body_snippet: string | null }) =>
-                      extractAllDriveNumbers(e.body_snippet || '')
-                    );
-
+                    const establishedDrives = companyEstablishedDrives.get(matched.id) || [];
                     if (establishedDrives.length > 0 && !establishedDrives.includes(unlinkedDrive)) {
                       driveConflict = true;
                     }
@@ -2067,15 +2240,7 @@ export async function runSync(
                   // require the unlinked email to share that drive number OR pass a strict
                   // normalized-key name match. Prevents stale timing-only re-associations
                   // after a company's identity is already well-anchored.
-                    const { data: existingCompEmails } = await supabase
-                      .from('emails')
-                      .select('body_snippet, placement_drives!inner(company_id)')
-                      .eq('placement_drives.company_id', candidateCompanyId)
-                    .not('body_snippet', 'is', null)
-                    .limit(5);
-
-                  const existingDriveNums = (existingCompEmails || [])
-                    .flatMap((e: { body_snippet: string | null }) => extractAllDriveNumbers(e.body_snippet || ''));
+                  const existingDriveNums = companyEstablishedDrives.get(candidateCompanyId) || [];
 
                   let timingMatchOk = true;
                   if (existingDriveNums.length > 0) {
@@ -2100,12 +2265,7 @@ export async function runSync(
               }
 
               if (matchedCompanyId) {
-                const { data: matchedDrive } = await supabase
-                  .from('placement_drives')
-                  .select('id, source_email_id, created_at')
-                  .eq('user_id', userId)
-                  .eq('company_id', matchedCompanyId)
-                  .order('created_at', { ascending: false });
+                const matchedDrive = companyDrivesMap.get(matchedCompanyId);
                 if (!matchedDrive || matchedDrive.length === 0) continue;
 
                 // Company-only college circulars do not carry a NeoPAT drive
@@ -2490,7 +2650,8 @@ async function upsertCompany(
   supabase: ReturnType<typeof createAdminClient>,
   userId: string,
   companyName: string,
-  allowCreate: boolean = true
+  allowCreate: boolean = true,
+  driveName?: string | null
 ): Promise<string | null> {
   const currentLock = userUpsertLocks.get(userId) || Promise.resolve();
   let release: () => void;
@@ -2501,7 +2662,7 @@ async function upsertCompany(
 
   await currentLock;
   try {
-    return await doUpsertCompany(supabase, userId, companyName, allowCreate);
+    return await doUpsertCompany(supabase, userId, companyName, allowCreate, driveName);
   } finally {
     release!();
   }
@@ -2515,7 +2676,8 @@ async function doUpsertCompany(
   supabase: ReturnType<typeof createAdminClient>,
   userId: string,
   companyName: string,
-  allowCreate: boolean = true
+  allowCreate: boolean = true,
+  driveName?: string | null
 ): Promise<string | null> {
   const normalized = normalizeCompanyName(companyName);
 
@@ -2526,7 +2688,7 @@ async function doUpsertCompany(
     id: string;
     aliases?: string[] | null;
   }) => {
-    const newAliases = extractCompanyAliases(companyName, normalized);
+    const newAliases = extractCompanyAliases(companyName, normalized, driveName);
     const currentAliases = (compRecord.aliases || []).map((a) => a.toLowerCase());
     const missing = newAliases.filter((a) => !currentAliases.includes(a.toLowerCase()));
     const updates: Record<string, any> = {};
@@ -2547,6 +2709,7 @@ async function doUpsertCompany(
     normalized,
     ...parenMatches,
     ...(outsideParen && outsideParen.length >= 2 ? [outsideParen] : []),
+    ...(driveName && normalizeCompanyName(driveName).length >= 2 ? [normalizeCompanyName(driveName)] : []),
   ]));
 
   // 1. Check exact name match for this user across candidate names
@@ -2602,7 +2765,7 @@ async function doUpsertCompany(
   }
 
   // 5. If no match found and allowCreate is true (Personal email), create new company
-  const generatedAliases = extractCompanyAliases(companyName, normalized);
+  const generatedAliases = extractCompanyAliases(companyName, normalized, driveName);
 
   const { data: newCompany, error } = await supabase
     .from('companies')

@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { motion, AnimatePresence } from 'framer-motion';
 import { appToast } from '@/lib/toast';
@@ -108,9 +108,18 @@ export default function SettingsClient({
   detectedRegNo,
 }: SettingsClientProps) {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [regId, setRegId] = useState(initialNeoId);
   const [isSavingId, setIsSavingId] = useState(false);
   const [disconnecting, setDisconnecting] = useState<string | null>(null);
+
+  useEffect(() => {
+    const errorParam = searchParams?.get('error');
+    if (errorParam) {
+      appToast.error(decodeURIComponent(errorParam));
+      router.replace('/settings');
+    }
+  }, [searchParams, router]);
 
   const [selectedCampus, setSelectedCampus] = useState<'VIT Bhopal' | 'VIT Vellore' | 'VIT Chennai' | 'VIT AP'>(() => {
     if (typeof window !== 'undefined') {
@@ -558,9 +567,12 @@ export default function SettingsClient({
                     <Mail className="h-4 w-4 text-emerald-400" />
                   </div>
                   <div className="min-w-0">
-                    <div className="flex items-center gap-1.5">
+                    <div className="flex items-center gap-1.5 flex-wrap">
                       <span className="text-xs sm:text-sm font-semibold text-zinc-100 truncate">
                         College Gmail
+                      </span>
+                      <span className="text-[10px] font-mono font-medium text-emerald-400 bg-emerald-500/10 px-1.5 py-0.5 rounded border border-emerald-500/20">
+                        @vitbhopal.ac.in / @vitstudent.ac.in
                       </span>
                       {collegeAccount ? (
                         <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 text-[9px] font-bold text-emerald-300">
@@ -596,7 +608,7 @@ export default function SettingsClient({
                 )}
               </div>
               <div className="pt-2 border-t border-white/[0.04] flex items-center justify-between text-[10px] text-zinc-500">
-                <span>CDC circulars & shortlist Excel attachments</span>
+                <span>Must be official VIT ID · CDC circulars & shortlists</span>
                 <span className="font-mono text-zinc-400">{selectedCampus}</span>
               </div>
             </div>

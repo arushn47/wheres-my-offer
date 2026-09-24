@@ -1,14 +1,16 @@
 # NeoTrack Agent Context & Core Architecture Rules
 
-## ⚠️ CRITICAL KNOWLEDGE: External Background Cron Job
+## ⚠️ CRITICAL KNOWLEDGE: External Background Cron Job & Google Pub/Sub
 - **Provider**: [cron-job.org](https://console.cron-job.org/jobs/8265126)
-- **Job Title**: `NeoTrack 15-Min Email Sync`
-- **Target URL**: `https://neopat-tracker.vercel.app/api/cron/sync`
-- **Execution Schedule**: **Every 15 minutes** (`*/15 * * * *`)
-- **Status**: **ALWAYS ACTIVE IN THE BACKGROUND** (running 24/7 independently of local dev, Vercel cron, or browser sessions).
+- **Job Title**: `Where's My Offer Email Sync`
+- **Target URL**: `https://www.wheresmyoffer.in/api/cron/sync`
+- **Execution Schedule**: **Daily at 00:00** (`0 0 * * *` Asia/Kolkata)
+- **Role**: Daily safety net, time-based event deadline notifications, stale page cleanup, and **crucial Gmail Pub/Sub watch renewal** (`renewExpiringWatches`).
+- **Primary Delivery**: Google Cloud Pub/Sub push webhooks handle real-time incoming emails.
+- **Status**: **ACTIVE IN THE BACKGROUND** (running independently of local dev or browser sessions).
 
 ### Architectural Implications (DO NOT VIOLATE):
-1. **Never Run Unlocked Syncs**: Because cron-job.org triggers `/api/cron/sync` every 15 minutes, long-running syncs (especially initial scans of 2,000+ emails) WILL overlap with the cron if concurrency locks are not enforced.
+1. **Never Run Unlocked Syncs**: Concurrency locks must always be enforced so cron and manual/pubsub syncs never collide.
 2. **Per-User Concurrency Locking**:
    - `runSync(userId)` MUST check if a sync is already active for that user before doing any work.
    - If `is_syncing === true` and the lock has not expired/gone stale, subsequent cron or manual requests MUST cleanly skip without crashing, interrupting, or corrupting state.

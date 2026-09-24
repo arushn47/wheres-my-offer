@@ -1,5 +1,6 @@
 import { createAdminClient } from '@/lib/supabase/admin';
 import { normalizeDriveNumber } from '@/lib/drive-number';
+import { checkAcronymMatch } from '@/lib/sync/classifier';
 
 export { normalizeDriveNumber };
 
@@ -179,11 +180,16 @@ export async function resolvePlacementDrive(params: {
   // 2. If multiple drives exist, attempt matching by driveName
   if (companyDrives && companyDrives.length > 1 && params.driveName) {
     const cleanParamName = params.driveName.toLowerCase().replace(/[^a-z0-9]/g, '');
-    if (cleanParamName.length >= 3) {
+    if (cleanParamName.length >= 2) {
       const matched = companyDrives.find((d) => {
         if (!d.drive_name) return false;
         const cleanDbName = d.drive_name.toLowerCase().replace(/[^a-z0-9]/g, '');
-        return cleanDbName.includes(cleanParamName) || cleanParamName.includes(cleanDbName);
+        return (
+          cleanDbName.includes(cleanParamName) ||
+          cleanParamName.includes(cleanDbName) ||
+          checkAcronymMatch(cleanParamName, cleanDbName) ||
+          checkAcronymMatch(cleanDbName, cleanParamName)
+        );
       });
       if (matched) {
         return {

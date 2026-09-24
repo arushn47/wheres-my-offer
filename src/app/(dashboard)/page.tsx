@@ -1,5 +1,7 @@
 import type { Metadata } from 'next';
+import { redirect } from 'next/navigation';
 import { requireSession } from '@/lib/auth';
+import { checkIsAdmin } from '@/lib/auth/admin';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { detectCampus, detectBranch, getDriveMode } from '@/lib/utils';
 import { getEffectiveStage, isInactiveStatus, isEliminatedStatus } from '@/lib/stages';
@@ -15,6 +17,12 @@ export const metadata: Metadata = {
 
 export default async function DashboardPage() {
   const session = await requireSession();
+
+  // Dedicated Admin Experience: Admins belong in the Admin Control Center
+  if (await checkIsAdmin(session.userId, session.email)) {
+    redirect('/admin');
+  }
+
   const supabase = createAdminClient();
 
   // Fetch stats, drives, applications, events, and user context

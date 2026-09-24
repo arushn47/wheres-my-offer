@@ -1,5 +1,7 @@
 import type { Metadata } from 'next';
+import { redirect } from 'next/navigation';
 import { requireSession } from '@/lib/auth';
+import { checkIsAdmin } from '@/lib/auth/admin';
 import { createAdminClient } from '@/lib/supabase/admin';
 import SettingsClient from './settings-client';
 import { detectCampus, detectBranch, detectRegNo } from '@/lib/utils';
@@ -11,6 +13,11 @@ export const metadata: Metadata = {
 
 export default async function SettingsPage() {
   const session = await requireSession();
+
+  if (await checkIsAdmin(session.userId, session.email)) {
+    redirect('/admin');
+  }
+
   const supabase = createAdminClient();
 
   const [{ data: accounts }, { data: user }] = await Promise.all([

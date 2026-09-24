@@ -191,23 +191,38 @@ export async function notifyStatusChange(params: {
   if (oldStatus === newStatus) return; // Do not notify if status did not change
 
   const identity = placementDriveId;
-  const dedupeKey = `status:${userId}:${identity}:${newStatus}:${sourceEmailId || 'sync'}`;
+  const dedupeKey = `status:${userId}:${identity}:${newStatus}`;
 
-  let title = `${companyName} — Status Update`;
-  let body = `Your application status for ${companyName} has changed to ${newStatus.toUpperCase().replace(/_/g, ' ')}.`;
+  let title = `${companyName} Update`;
+  let body = `Status: ${newStatus.replace(/_/g, ' ')}`;
 
   if (newStatus === 'shortlisted') {
-    title = `🎉 ${companyName} — Shortlisted!`;
-    body = `You have been shortlisted for ${companyName}. Check your schedule for upcoming test rounds.`;
-  } else if (newStatus === 'selected') {
-    title = `🏆 ${companyName} — Offer / Selected!`;
-    body = `Congratulations! You have received a selection/offer update for ${companyName}!`;
+    title = `🎉 Shortlisted: ${companyName}`;
+    body = `You're on the shortlist for the next round!`;
+  } else if (newStatus === 'selected' || newStatus === 'offer_received') {
+    title = `🏆 Offer: ${companyName}!`;
+    body = `Congratulations! You got selected.`;
+  } else if (newStatus === 'test_scheduled') {
+    title = `📝 ${companyName} Test`;
+    body = `Online test scheduled. Check calendar for timings.`;
+  } else if (newStatus === 'interview_scheduled') {
+    title = `💼 ${companyName} Interview`;
+    body = `Interview scheduled. Check calendar for details.`;
+  } else if (newStatus === 'ppt_scheduled') {
+    title = `📢 ${companyName} PPT`;
+    body = `Pre-placement talk scheduled.`;
   } else if (newStatus === 'withdrawn') {
-    title = `${companyName} — Application Withdrawn`;
-    body = `Your ${companyName} application has been marked as withdrawn/opted-out.`;
+    title = `${companyName}`;
+    body = `Registration withdrawn.`;
   } else if (newStatus === 'not_shortlisted') {
-    title = `${companyName} — Selection List Released`;
-    body = `Selection list released for ${companyName}. Status marked as Not Shortlisted.`;
+    title = `${companyName}`;
+    body = `Not shortlisted for the next round.`;
+  } else if (newStatus === 'applied') {
+    title = `${companyName}`;
+    body = `Application confirmed.`;
+  } else if (newStatus === 'rejected' || newStatus === 'rejected_test' || newStatus === 'rejected_interview') {
+    title = `${companyName}`;
+    body = `Not selected in this round.`;
   }
 
   return sendNotification({
@@ -239,8 +254,8 @@ export async function notifyShortlistMatch(params: {
   return sendNotification({
     userId,
     type: 'shortlist_match',
-    title: `🎉 ${companyName} Shortlist Match!`,
-    body: `Your Neo ID (${neoId}) was found in the official ${companyName} shortlist!`,
+    title: `🎉 Shortlisted: ${companyName}!`,
+    body: `Found your ID on the shortlist. Check next round details.`,
     placementDriveId,
     link: `/companies/${placementDriveId}`,
     dedupeKey,
@@ -267,8 +282,6 @@ export async function notifyNewDrive(params: {
     placementDriveId,
     companyName,
     role,
-    ctc,
-    stipend,
     location,
     driveMode,
     category,
@@ -278,14 +291,22 @@ export async function notifyNewDrive(params: {
   const identity = placementDriveId;
   const dedupeKey = `new_drive:${userId}:${identity}`;
 
-  const compCompensation = ctc || stipend || 'Compensation TBA';
-  const roleDisplay = role ? `${role} · ` : '';
-  const categoryTag = category ? `[${category}] ` : '';
-  const modeDisplay = driveMode && driveMode !== 'unknown' ? ` · Mode: ${driveMode}` : '';
-  const locationDisplay = location && location !== 'Not Specified' ? ` · Location: ${location}` : '';
+  // Human, concise summary: Role • Mode • Location. No CTC, no robotic walls
+  const cleanRole = role && !/^(?:tbd|na|n\/a|not\s+specified)$/i.test(role.trim()) ? role.trim() : null;
+  const cleanMode = driveMode && !/^(?:unknown|tbd|na)$/i.test(driveMode.trim())
+    ? driveMode.charAt(0).toUpperCase() + driveMode.slice(1).toLowerCase()
+    : null;
+  const cleanLocation = location && !/^(?:not\s+specified|tbd|na|n\/a)$/i.test(location.trim())
+    ? location.trim()
+    : null;
 
-  const title = `🚀 ${categoryTag}New Drive: ${companyName}`;
-  const body = `${roleDisplay}${compCompensation}${modeDisplay}${locationDisplay}`;
+  const details = [cleanRole, cleanMode, cleanLocation].filter(Boolean);
+  const body = details.length > 0
+    ? details.join(' • ')
+    : 'New placement circular posted. Tap to view details.';
+
+  const categoryTag = category === 'Super Dream' ? '⚡ ' : category === 'Dream' ? '⭐ ' : '';
+  const title = `${categoryTag}New Drive: ${companyName}`;
 
   return sendNotification({
     userId,
@@ -346,8 +367,6 @@ export async function notifyEventScheduled(params: {
     ? ['applied', 'ppt_scheduled', 'shortlisted', 'test_scheduled', 'interview_scheduled'].includes(appStatus)
     : ['shortlisted', 'test_scheduled', 'test_ongoing', 'test_completed', 'interview_scheduled', 'interview_completed', 'selected', 'offer_received'].includes(appStatus);
 
-  // A test/interview announcement is not proof that this candidate qualified.
-  // Require either a confirmed shortlist match or an already advanced status.
   if (isEliminated || (isTestOrInterview && !candidateConfirmed && !hasEligibleStage)) {
     return;
   }
@@ -356,35 +375,38 @@ export async function notifyEventScheduled(params: {
     ? startTime.toLocaleString('en-IN', {
         month: 'short',
         day: 'numeric',
-        hour: '2-digit',
+        hour: 'numeric',
         minute: '2-digit',
         hour12: true,
       })
-    : 'Date TBD';
+    : '';
 
   const dateKey = startTime ? startTime.toISOString().slice(0, 10) : 'unknown';
   const identity = placementDriveId || `legacy-company:unscoped`;
   const dedupeKey = `event:${userId}:${identity}:${eventType}:${dateKey}`;
 
-  let title = `📅 ${companyName} — Event Scheduled`;
-  let body = `${eventType.replace(/_/g, ' ').toUpperCase()} on ${dateStr}${venue ? ` at ${venue}` : ''}.`;
+  const cleanVenue = venue && !/^(?:unknown|not\s+specified|tbd|na|n\/a)$/i.test(venue.trim()) ? venue.trim() : null;
+  const details = [dateStr, cleanVenue].filter(Boolean).join(' • ');
+
+  let title = `📅 ${companyName} Event`;
+  let body = details || 'Check calendar for schedule.';
   let notifType: NotificationType = 'test_scheduled';
 
   if (['online_test', 'coding_test'].includes(eventType)) {
-    title = `📝 ${companyName} — Online Test Scheduled`;
-    body = `Online assessment scheduled for ${dateStr}${venue ? ` at ${venue}` : ''}.`;
+    title = `📝 ${companyName} Test`;
+    body = details || 'Online test scheduled.';
     notifType = 'test_scheduled';
   } else if (['technical_interview', 'hr_interview', 'final_interview'].includes(eventType)) {
-    title = `💼 ${companyName} — Interview Scheduled`;
-    body = `Interview round scheduled for ${dateStr}${venue ? ` at ${venue}` : ''}.`;
+    title = `💼 ${companyName} Interview`;
+    body = details || 'Interview round scheduled.';
     notifType = 'interview_scheduled';
   } else if (eventType === 'ppt') {
-    title = `📢 ${companyName} — PPT Scheduled`;
-    body = `Pre-Placement Talk scheduled for ${dateStr}${venue ? ` at ${venue}` : ''}.`;
+    title = `📢 ${companyName} PPT`;
+    body = details || 'Pre-placement talk scheduled.';
     notifType = 'ppt_scheduled';
   } else if (eventType === 'registration_deadline') {
-    title = `⏰ ${companyName} — Registration Deadline`;
-    body = `Registration closes ${dateStr}. Apply on NeoPAT before the deadline.`;
+    title = `⏰ Deadline: ${companyName}`;
+    body = dateStr ? `Closes ${dateStr} on NeoPAT.` : 'Registration closing soon.';
     notifType = 'deadline_approaching';
   }
 
@@ -393,7 +415,6 @@ export async function notifyEventScheduled(params: {
     type: notifType,
     title,
     body,
-    
     placementDriveId,
     eventId,
     link: eventType === 'registration_deadline' ? `/companies/${placementDriveId}` : `/calendar`,
@@ -483,13 +504,11 @@ export async function checkAndNotifyRegistrationDeadlines(userId: string) {
           await sendNotification({
             userId,
             type: 'deadline_approaching',
-            title: `⏰ ${companyName} — Registration Deadline Approaching`,
-            body: `Registration closes ${dateStr} (in ${approxTimeStr}). Apply on NeoPAT before the deadline.`,
+            title: `⏰ Deadline: ${companyName}`,
+            body: `Closes in ${approxTimeStr} (${dateStr}) on NeoPAT.`,
             placementDriveId: event.placement_drive_id,
             eventId: event.id,
-            link: event.placement_drive_id
-              ? `/companies/${event.placement_drive_id}?driveId=${event.placement_drive_id}`
-              : `/companies/${event.placement_drive_id}`,
+            link: event.placement_drive_id ? `/companies/${event.placement_drive_id}` : '/',
             dedupeKey,
           });
 
@@ -512,19 +531,19 @@ export async function notifyAccountDisconnected(params: {
   accountType: 'personal' | 'college';
 }) {
   const { userId, email, accountType } = params;
-  const accountLabel = accountType === 'college' ? 'College (VIT)' : 'Personal';
+  const accountLabel = accountType === 'college' ? 'College' : 'Personal';
   const dedupeKey = `disconnect:${userId}:${email}`;
 
   return sendNotification({
     userId,
     type: 'general',
-    title: `⚠️ ${accountLabel} Gmail Disconnected`,
-    body: `Your ${accountLabel} Gmail (${email}) was disconnected or token expired. Reconnect in Settings to keep receiving placement updates!`,
+    title: `⚠️ Reconnect ${accountLabel} Gmail`,
+    body: `Access token expired for ${email}. Reconnect in Settings.`,
     link: '/settings',
     dedupeKey,
     pushPayload: {
-      title: `⚠️ ${accountLabel} Gmail Disconnected`,
-      body: `Your ${email} connection expired. Please reconnect in Settings to keep placement sync active.`,
+      title: `⚠️ Reconnect ${accountLabel} Gmail`,
+      body: `Access token expired for ${email}. Reconnect in Settings.`,
       data: {
         url: '/settings',
         type: 'general',
@@ -600,18 +619,18 @@ export async function checkAndNotifyLiveEvents(userId: string) {
       const targetIdentity = ev.placement_drive_id ? `drive:${ev.placement_drive_id}` : `event:${ev.id}`;
       const timeSlot = ev.start_time ? new Date(ev.start_time).toISOString().slice(0, 13) : 'now';
       const dedupeKey = `live_event:${userId}:${targetIdentity}:${evType}:${timeSlot}`;
-      let title = `🔴 ${compName} — Placement Round Starting Now`;
-      let body = `Your event for ${compName} has commenced. Best of luck!`;
+      let title = `🔴 Live: ${compName}`;
+      let body = `Event starting now.`;
 
       if (/test|coding|assessment|hackerearth|mettl|shl/i.test(evType)) {
-        title = `📝 ${compName} — Assessment Live Now`;
-        body = `Your online test for ${compName} is live. Check your test platform link and begin.`;
+        title = `🔴 Live: ${compName} Test`;
+        body = `Assessment is live now. Good luck!`;
       } else if (/interview/i.test(evType)) {
-        title = `💼 ${compName} — Interview Live Now`;
-        body = `Your interview round for ${compName} has started. Join your meeting room.`;
+        title = `🔴 Live: ${compName} Interview`;
+        body = `Interview starting now. Join your meeting.`;
       } else if (/ppt/i.test(evType)) {
-        title = `📢 ${compName} — Pre-Placement Talk Live Now`;
-        body = `The pre-placement talk for ${compName} is underway. Join the presentation session.`;
+        title = `🔴 Live: ${compName} PPT`;
+        body = `Pre-placement talk is starting now.`;
       }
 
       await sendNotification({
@@ -621,9 +640,7 @@ export async function checkAndNotifyLiveEvents(userId: string) {
         body,
         placementDriveId: ev.placement_drive_id,
         eventId: ev.id,
-        link: ev.placement_drive_id
-          ? `/companies/${ev.placement_drive_id}?driveId=${ev.placement_drive_id}`
-          : `/companies/${ev.placement_drive_id}`,
+        link: ev.placement_drive_id ? `/companies/${ev.placement_drive_id}` : '/',
         dedupeKey,
       });
     }

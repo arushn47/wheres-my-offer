@@ -263,7 +263,7 @@ export default function DashboardClient({
       sub: stats.test_shortlists > 0 ? 'reached a test shortlist' : 'waiting for shortlist results',
       title: `${stats.test_shortlists} placement drives where you reached a test or assessment shortlist, including completed or eliminated rounds`,
       accent: 'violet' as const,
-      href: '/companies?filter=test_shortlisted',
+      href: '/companies?filter=active',
     },
     {
       id: 'interview-shortlists',
@@ -272,7 +272,7 @@ export default function DashboardClient({
       sub: stats.interview_shortlists > 0 ? 'cleared for interviews' : 'no interview shortlist yet',
       title: `${stats.interview_shortlists} placement drives where you cleared an interview shortlist`,
       accent: 'emerald' as const,
-      href: '/companies?filter=interview_shortlisted',
+      href: '/companies?filter=active',
     },
   ];
 

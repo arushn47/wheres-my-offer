@@ -8,6 +8,7 @@ import {
   computeCanonicalContentKey,
   isApprovedCanonicalSender,
   normalizeRfcMessageId,
+  extractSenderAddress,
 } from '@/lib/sync/canonical-email';
 
 const BATCH_SIZE = 25;
@@ -40,7 +41,7 @@ export async function backfillCanonicalEmails(
 
   let query = client
     .from('emails')
-    .select('id, user_id, gmail_account_id, gmail_message_id, sender, rfc_message_id')
+    .select('id, user_id, gmail_account_id, gmail_message_id, sender, subject, body_snippet, rfc_message_id')
     .is('canonical_email_id', null)
     .ilike('sender', `%${APPROVED_COLLEGE_SENDER}%`)
     .order('id', { ascending: true })
@@ -74,14 +75,30 @@ export async function backfillCanonicalEmails(
       continue;
     }
     try {
-      let gmail = gmailMap.get(account.id);
-      if (!gmail) {
-        gmail = (await createGmailClient(account)).gmail;
-        gmailMap.set(account.id, gmail);
+      let parsedSubject = receipt.subject || '';
+      let parsedSenderEmail = extractSenderAddress(receipt.sender) || APPROVED_COLLEGE_SENDER;
+      let bodyText = receipt.body_snippet || '';
+      let rfcMessageId = receipt.rfc_message_id;
+      let hasAttachments = false;
+      let snippetForMetadata = bodyText;
+
+      // If stored body_snippet is sufficient (>= 200 chars), reuse it without hitting Gmail API
+      if (!bodyText || bodyText.length < 200) {
+        let gmail = gmailMap.get(account.id);
+        if (!gmail) {
+          gmail = (await createGmailClient(account)).gmail;
+          gmailMap.set(account.id, gmail);
+        }
+        const parsed = await fetchMessageDetail(gmail, receipt.gmail_message_id);
+        bodyText = canonicalBodyFromEmail(parsed.bodyPlain, parsed.bodyHtml, parsed.bodySnippet);
+        parsedSubject = parsed.subject;
+        parsedSenderEmail = parsed.senderEmail;
+        rfcMessageId = parsed.messageId;
+        hasAttachments = parsed.hasAttachments;
+        snippetForMetadata = parsed.bodySnippet;
       }
-      const parsed = await fetchMessageDetail(gmail, receipt.gmail_message_id);
-      const bodyText = canonicalBodyFromEmail(parsed.bodyPlain, parsed.bodyHtml, parsed.bodySnippet);
-      const contentKey = computeCanonicalContentKey(parsed.senderEmail, parsed.subject, bodyText);
+
+      const contentKey = computeCanonicalContentKey(parsedSenderEmail, parsedSubject, bodyText);
 
       if (options.dryRun) {
         result.linked++;
@@ -90,39 +107,97 @@ export async function backfillCanonicalEmails(
 
       const canonicalPayload = {
         content_key: contentKey,
-        sender_email: parsed.senderEmail.toLowerCase().trim(),
-        subject: parsed.subject,
+        sender_email: parsedSenderEmail.toLowerCase().trim(),
+        subject: parsedSubject,
         body_snippet: bodyText.slice(0, 50000),
         body_text: bodyText,
-        message_id: normalizeRfcMessageId(parsed.messageId),
+        message_id: normalizeRfcMessageId(rfcMessageId),
         classification: null,
         identity_version: CANONICAL_IDENTITY_VERSION,
-        has_attachments: parsed.hasAttachments,
-        metadata_key: computeCanonicalMetadataKey(parsed.senderEmail, parsed.subject, parsed.bodySnippet),
+        has_attachments: hasAttachments,
+        metadata_key: computeCanonicalMetadataKey(parsedSenderEmail, parsedSubject, snippetForMetadata),
         processing_status: 'complete',
         updated_at: new Date().toISOString(),
       };
-      const existing = await client
-        .from('canonical_emails')
-        .select('id')
-        .eq('content_key', contentKey)
-        .maybeSingle();
-      const { data: canonical, error: upsertError } = await client
-        .from('canonical_emails')
-        .upsert(canonicalPayload, { onConflict: 'content_key', ignoreDuplicates: false })
-        .select('id')
-        .single();
-      if (upsertError || !canonical) throw upsertError || new Error('Canonical row was not returned');
+      const normalizedMessageId = normalizeRfcMessageId(rfcMessageId);
+      let canonicalId: string | null = null;
+      let wasCreated = false;
+
+      // Check if canonical row already exists by message_id or content_key
+      if (normalizedMessageId) {
+        const { data: byMsg } = await client
+          .from('canonical_emails')
+          .select('id')
+          .eq('message_id', normalizedMessageId)
+          .maybeSingle();
+        if (byMsg?.id) canonicalId = byMsg.id;
+      }
+
+      if (!canonicalId) {
+        const { data: byKey } = await client
+          .from('canonical_emails')
+          .select('id')
+          .eq('content_key', contentKey)
+          .maybeSingle();
+        if (byKey?.id) canonicalId = byKey.id;
+      }
+
+      if (!canonicalId) {
+        const canonicalPayload = {
+          content_key: contentKey,
+          sender_email: parsedSenderEmail.toLowerCase().trim(),
+          subject: parsedSubject,
+          body_snippet: bodyText.slice(0, 50000),
+          body_text: bodyText,
+          message_id: normalizedMessageId,
+          classification: null,
+          identity_version: CANONICAL_IDENTITY_VERSION,
+          has_attachments: Boolean(hasAttachments),
+          metadata_key: computeCanonicalMetadataKey(parsedSenderEmail, parsedSubject, snippetForMetadata),
+          processing_status: 'complete',
+          updated_at: new Date().toISOString(),
+        };
+
+        const { data: canonical, error: upsertError } = await client
+          .from('canonical_emails')
+          .upsert(canonicalPayload, { onConflict: 'content_key', ignoreDuplicates: false })
+          .select('id')
+          .single();
+
+        if (upsertError) {
+          if (normalizedMessageId) {
+            const { data: fallback } = await client
+              .from('canonical_emails')
+              .select('id')
+              .eq('message_id', normalizedMessageId)
+              .maybeSingle();
+            if (fallback?.id) canonicalId = fallback.id;
+          }
+          if (!canonicalId) throw upsertError;
+        } else if (canonical?.id) {
+          canonicalId = canonical.id;
+          wasCreated = true;
+        }
+      }
+
+      if (!canonicalId) {
+        result.failed++;
+        continue;
+      }
 
       const { error: linkError } = await client
         .from('emails')
-        .update({ canonical_email_id: canonical.id, rfc_message_id: normalizeRfcMessageId(parsed.messageId) })
+        .update({
+          canonical_email_id: canonicalId,
+          rfc_message_id: normalizedMessageId,
+          body_snippet: bodyText.slice(0, 500),
+        })
         .eq('id', receipt.id)
         .is('canonical_email_id', null);
       if (linkError) throw linkError;
       result.linked++;
-      if (existing.data?.id) result.reused++;
-      else result.created++;
+      if (wasCreated) result.created++;
+      else result.reused++;
     } catch (backfillError) {
       result.failed++;
       console.warn(`[canonical-backfill] Receipt ${receipt.id} failed:`, backfillError);
