@@ -107,12 +107,16 @@ export async function recalculateApplicationStatuses(
   while (true) {
     const { data: chunk, error: chunkErr } = await supabase
       .from('personal_emails')
-      .select('id, subject, sender, body_snippet, gmail_account_id, gmail_message_id, canonical_email_id, college_email_id, college_emails(body_text, body_snippet), rfc_message_id, classification, placement_drive_id, received_at, assignment_state, assignment_source')
+      .select('id, subject, sender, body_snippet, gmail_account_id, gmail_message_id, canonical_email_id, college_email_id, college_emails!personal_emails_college_email_id_fkey(body_text, body_snippet), rfc_message_id, classification, placement_drive_id, received_at, assignment_state, assignment_source')
       .eq('user_id', userId)
       .order('received_at', { ascending: true })
       .range(page * pageSize, (page + 1) * pageSize - 1);
 
-    if (chunkErr || !chunk || chunk.length === 0) break;
+    if (chunkErr) {
+      console.error('[recalculateApplicationStatuses] Error loading personal_emails:', chunkErr);
+      break;
+    }
+    if (!chunk || chunk.length === 0) break;
     allEmails.push(...chunk.map((email: any) => {
       const canonical = Array.isArray(email.college_emails)
         ? email.college_emails[0]
@@ -141,7 +145,58 @@ export async function recalculateApplicationStatuses(
     if (recoveredBody) email.body_snippet = recoveredBody;
   }
 
-  if (allEmails.length === 0) return { updatedCount: 0, results: [] };
+  // Also fetch college broadcast circulars (shared college_emails table)
+  const allCollegeEmails: Array<{
+    id: string;
+    subject: string | null;
+    sender: string | null;
+    body_snippet: string | null;
+    received_at: string | null;
+    classification: string | null;
+    parsed_company_name?: string | null;
+    parsed_drive_numbers?: string[] | null;
+    placement_drive_id?: string | null;
+    college_email_id?: string | null;
+    canonical_email_id?: string | null;
+    assignment_source?: string | null;
+    has_canonical_body?: boolean;
+  }> = [];
+
+  let clgPage = 0;
+  while (true) {
+    const { data: cChunk, error: cErr } = await supabase
+      .from('college_emails')
+      .select('id, subject, sender_email, received_at, created_at, body_snippet, body_text, classification, parsed_company_name, parsed_drive_numbers')
+      .order('received_at', { ascending: true })
+      .range(clgPage * pageSize, (clgPage + 1) * pageSize - 1);
+
+    if (cErr) {
+      console.error('[recalculateApplicationStatuses] Error loading college_emails:', cErr);
+      break;
+    }
+    if (!cChunk || cChunk.length === 0) break;
+
+    allCollegeEmails.push(...cChunk.map((ce: any) => ({
+      id: ce.id,
+      subject: ce.subject,
+      sender: ce.sender_email,
+      received_at: ce.received_at || ce.created_at,
+      body_snippet: ce.body_text || ce.body_snippet || '',
+      classification: ce.classification,
+      parsed_company_name: ce.parsed_company_name,
+      parsed_drive_numbers: ce.parsed_drive_numbers || [],
+      placement_drive_id: null,
+      college_email_id: ce.id,
+      canonical_email_id: ce.id,
+      assignment_source: 'college_broadcast',
+      has_canonical_body: Boolean(ce.body_text && ce.body_text.length > 500),
+    })));
+
+    if (cChunk.length < pageSize) break;
+    clgPage++;
+  }
+
+  if (allEmails.length === 0 && allCollegeEmails.length === 0) return { updatedCount: 0, results: [] };
 
 
   const [
@@ -253,7 +308,7 @@ export async function recalculateApplicationStatuses(
 
   const { data: candidateMatches } = await supabase
     .from('candidate_matches')
-    .select('id, match_type, email_id, college_email_id, matched_value, matched_round_type')
+    .select('id, match_type, email_id, college_email_id, matched_value, matched_round_type, placement_drive_id')
     .eq('user_id', userId);
 
   const driveExclusionsMap = new Map<string, Set<string>>();
@@ -277,46 +332,28 @@ export async function recalculateApplicationStatuses(
   }
 
   const emailById = new Map(allEmails.map((e) => [e.id, e]));
-  
-  // Collect linked email IDs that aren't in personal_emails (college circulars)
-  const linkedCollegeEmailIds = new Set<string>();
-  for (const link of (driveLinks || [])) {
-    if (!emailById.has(link.email_id)) {
-      linkedCollegeEmailIds.add(link.email_id);
+
+  // Index college circulars for rapid lookup & drive mapping
+  const collegeEmailsByDriveNum = new Map<string, typeof allCollegeEmails>();
+  const collegeEmailById = new Map<string, (typeof allCollegeEmails)[0]>();
+  for (const ce of allCollegeEmails) {
+    collegeEmailById.set(ce.id, ce);
+    for (const dNum of (ce.parsed_drive_numbers || [])) {
+      const cleanNum = dNum.toLowerCase().replace(/[^a-z0-9]/g, '');
+      if (cleanNum) {
+        const list = collegeEmailsByDriveNum.get(cleanNum) || [];
+        list.push(ce);
+        collegeEmailsByDriveNum.set(cleanNum, list);
+      }
     }
   }
 
-  // Fetch missing college circulars
-  if (linkedCollegeEmailIds.size > 0) {
-    const { data: collegeEmails } = await supabase
-      .from('college_emails')
-      .select('id, subject, sender_email, received_at, created_at, body_snippet, body_text, classification')
-      .in('id', Array.from(linkedCollegeEmailIds));
-    
-    for (const ce of (collegeEmails || [])) {
-      const link = (driveLinks || []).find(l => l.email_id === ce.id);
-      if (!link) continue;
-      
-      const driveExcluded = driveExclusionsMap.get(link.placement_drive_id);
-      if (driveExcluded && (driveExcluded.has(ce.id) || driveExcluded.has(ce.id))) continue;
-      
-      const list = emailsByDriveId.get(link.placement_drive_id) || [];
-      if (!list.some(e => e.id === ce.id)) {
-        list.push({
-          id: ce.id,
-          subject: ce.subject,
-          sender: ce.sender_email,
-          received_at: ce.received_at || ce.created_at,
-          body_snippet: ce.body_text || ce.body_snippet || '',
-          classification: ce.classification,
-          placement_drive_id: link.placement_drive_id,
-          college_email_id: ce.id,
-          canonical_email_id: ce.id,
-          assignment_source: 'drive_link',
-          has_canonical_body: Boolean(ce.body_text && ce.body_text.length > 500),
-        });
-        emailsByDriveId.set(link.placement_drive_id, list);
-      }
+  const candidateMatchesByDriveId = new Map<string, any[]>();
+  for (const cm of (candidateMatches || [])) {
+    if (cm.placement_drive_id) {
+      const list = candidateMatchesByDriveId.get(cm.placement_drive_id) || [];
+      list.push(cm);
+      candidateMatchesByDriveId.set(cm.placement_drive_id, list);
     }
   }
 
@@ -324,7 +361,7 @@ export async function recalculateApplicationStatuses(
     const linkedEmail = emailById.get(link.email_id);
     if (linkedEmail && linkedEmail.assignment_source !== 'admin_unlinked' && linkedEmail.classification !== 'irrelevant') {
       const driveExcluded = driveExclusionsMap.get(link.placement_drive_id);
-      if (driveExcluded && (driveExcluded.has(linkedEmail.id) || (linkedEmail.canonical_email_id && driveExcluded.has(linkedEmail.canonical_email_id)))) {
+      if (driveExcluded && (driveExcluded.has(linkedEmail.id) || (linkedEmail.canonical_email_id && driveExcluded.has(linkedEmail.canonical_email_id)) || (linkedEmail.college_email_id && driveExcluded.has(linkedEmail.college_email_id)))) {
         continue;
       }
       const list = emailsByDriveId.get(link.placement_drive_id) || [];
@@ -364,7 +401,7 @@ export async function recalculateApplicationStatuses(
     onProgress?.({
       step: 5,
       totalSteps: 5,
-      message: `Recalculating application stages, CTCs & calendar events (${Math.min(bIdx + DRIVE_BATCH_SIZE, drivesToProcess.length)} / ${drivesToProcess.length})â€¦`,
+      message: `Recalculating application stages, CTCs & calendar events (${Math.min(bIdx + DRIVE_BATCH_SIZE, drivesToProcess.length)} / ${drivesToProcess.length})…`,
     });
 
     await Promise.all(
@@ -373,6 +410,43 @@ export async function recalculateApplicationStatuses(
         if (!comp) return;
 
     const driveEmails = [...(emailsByDriveId.get(drive.id) || [])];
+    const driveExcluded = driveExclusionsMap.get(drive.id);
+
+    // 1. Include college email set as source on drive
+    if ((drive as any).source_college_email_id) {
+      const ce = collegeEmailById.get((drive as any).source_college_email_id);
+      if (ce && (!driveExcluded || !driveExcluded.has(ce.id))) {
+        if (!driveEmails.some((existing) => existing.id === ce.id)) {
+          driveEmails.push(ce as any);
+        }
+      }
+    }
+
+    // 2. Include college emails matching drive number
+    const driveNum = drive.normalized_drive_number || drive.drive_number;
+    if (driveNum) {
+      const cleanNum = driveNum.toLowerCase().replace(/[^a-z0-9]/g, '');
+      const numMatches = collegeEmailsByDriveNum.get(cleanNum) || [];
+      for (const ce of numMatches) {
+        if (driveExcluded && driveExcluded.has(ce.id)) continue;
+        if (!driveEmails.some((existing) => existing.id === ce.id)) {
+          driveEmails.push(ce as any);
+        }
+      }
+    }
+
+    // 3. Include college emails linked to candidate matches for this drive
+    const driveMatches = candidateMatchesByDriveId.get(drive.id) || [];
+    for (const dm of driveMatches) {
+      const refId = dm.college_email_id || dm.email_id;
+      if (refId && collegeEmailById.has(refId)) {
+        const ce = collegeEmailById.get(refId)!;
+        if (driveExcluded && driveExcluded.has(ce.id)) continue;
+        if (!driveEmails.some((existing) => existing.id === ce.id)) {
+          driveEmails.push(ce as any);
+        }
+      }
+    }
 
     // Determine verified start date of this drive from its official assigned emails
     const verifiedTimes = driveEmails
@@ -381,12 +455,11 @@ export async function recalculateApplicationStatuses(
     const verifiedDriveStartTime = verifiedTimes.length > 0
       ? Math.min(...verifiedTimes)
       : null;
+    const fallbackDriveTime = drive.created_at ? new Date(drive.created_at).getTime() : 0;
     const driveMinAllowedTime = verifiedDriveStartTime
       ? verifiedDriveStartTime - 24 * 60 * 60 * 1000
-      : 0;
+      : (fallbackDriveTime ? fallbackDriveTime - 24 * 60 * 60 * 1000 : 0);
 
-    // Fallback: only pull unassigned college emails that match company name with strict word boundaries
-    // AND strictly arrived within this drive's active timeframe (never before the drive existed!)
     const aliases = (comp.aliases || []).map((a: string) => a.toLowerCase().trim());
     const compNameLower = comp.name.toLowerCase().trim();
 
@@ -414,10 +487,10 @@ export async function recalculateApplicationStatuses(
       return false;
     };
 
+    // 4. Fallback: unassigned personal emails matching company within active timeframe
     for (const e of allEmails) {
       if (!e.placement_drive_id && e.assignment_source !== 'admin_unlinked' && e.subject && e.received_at) {
         const eTime = new Date(e.received_at).getTime();
-        // RULE: Never check or include emails that arrived before this drive came!
         if (driveMinAllowedTime > 0 && eTime < driveMinAllowedTime) {
           continue;
         }
@@ -425,6 +498,19 @@ export async function recalculateApplicationStatuses(
           if (!driveEmails.some(existing => existing.id === e.id)) {
             driveEmails.push(e);
           }
+        }
+      }
+    }
+
+    // 5. Fallback: college broadcast circulars matching company within active timeframe
+    for (const ce of allCollegeEmails) {
+      if (ce.classification === 'irrelevant' || !ce.subject || !ce.received_at) continue;
+      if (driveExcluded && driveExcluded.has(ce.id)) continue;
+      const eTime = new Date(ce.received_at).getTime();
+      if (driveMinAllowedTime > 0 && eTime < driveMinAllowedTime) continue;
+      if (isCompanySubjectMatch(ce.subject) || (ce.parsed_company_name && isFuzzyCompanyMatch(comp.name, ce.parsed_company_name))) {
+        if (!driveEmails.some(existing => existing.id === ce.id)) {
+          driveEmails.push(ce as any);
         }
       }
     }
@@ -1504,12 +1590,16 @@ export async function performReprocess(
   while (true) {
     const { data: chunk, error: chunkErr } = await supabase
       .from('personal_emails')
-      .select('id, subject, sender, body_snippet, gmail_account_id, gmail_message_id, canonical_email_id, college_email_id, is_relevant, college_emails(body_text, body_snippet), rfc_message_id, classification, placement_drive_id, received_at, assignment_state, assignment_source')
+      .select('id, subject, sender, body_snippet, gmail_account_id, gmail_message_id, canonical_email_id, college_email_id, is_relevant, college_emails!personal_emails_college_email_id_fkey(body_text, body_snippet), rfc_message_id, classification, placement_drive_id, received_at, assignment_state, assignment_source')
       .eq('user_id', userId)
       .order('received_at', { ascending: true })
       .range(page * pageSize, (page + 1) * pageSize - 1);
 
-    if (chunkErr || !chunk || chunk.length === 0) break;
+    if (chunkErr) {
+      console.error('[performReprocess] Error loading personal_emails:', chunkErr);
+      break;
+    }
+    if (!chunk || chunk.length === 0) break;
     emails.push(...chunk.map((email: any) => {
       const canonical = Array.isArray(email.college_emails) ? email.college_emails[0] : email.college_emails;
       let fullBody = canonical?.body_text || canonical?.body_snippet ||
@@ -1530,18 +1620,65 @@ export async function performReprocess(
     if (recoveredBody) email.body_snippet = recoveredBody;
   }
 
-  if (emails.length === 0) {
+  // Also fetch college broadcast circulars from shared college_emails table
+  const collegeEmails: Array<{
+    id: string;
+    subject: string | null;
+    sender: string | null;
+    body_snippet: string | null;
+    classification: string | null;
+    received_at: string | null;
+    parsed_company_name?: string | null;
+    parsed_drive_numbers?: string[] | null;
+    has_canonical_body?: boolean;
+    assignment_source?: string | null;
+    canonical_email_id?: string | null;
+    college_email_id?: string | null;
+  }> = [];
+
+  let clgPage = 0;
+  while (true) {
+    const { data: cChunk, error: cErr } = await supabase
+      .from('college_emails')
+      .select('id, subject, sender_email, received_at, created_at, body_snippet, body_text, classification, parsed_company_name, parsed_drive_numbers')
+      .order('received_at', { ascending: true })
+      .range(clgPage * pageSize, (clgPage + 1) * pageSize - 1);
+
+    if (cErr) {
+      console.error('[performReprocess] Error loading college_emails:', cErr);
+      break;
+    }
+    if (!cChunk || cChunk.length === 0) break;
+
+    collegeEmails.push(...cChunk.map((ce: any) => ({
+      id: ce.id,
+      subject: ce.subject,
+      sender: ce.sender_email,
+      received_at: ce.received_at || ce.created_at,
+      body_snippet: ce.body_text || ce.body_snippet || '',
+      classification: ce.classification,
+      parsed_company_name: ce.parsed_company_name,
+      parsed_drive_numbers: ce.parsed_drive_numbers || [],
+      has_canonical_body: Boolean(ce.body_text && ce.body_text.length > 500),
+      canonical_email_id: ce.id,
+      college_email_id: ce.id,
+    })));
+
+    if (cChunk.length < pageSize) break;
+    clgPage++;
+  }
+
+  if (emails.length === 0 && collegeEmails.length === 0) {
     return { success: true, message: 'No emails found to reprocess', fixed: 0 };
   }
 
-  // Separate emails into NeoPAT emails (noreply.cdcinfo@vitstudent.ac.in) and College circulars
+  // Separate personal emails into NeoPAT emails (noreply.cdcinfo@vitstudent.ac.in)
   const isNeoPatSender = (sender: string) => /noreply\.cdcinfo@vitstudent\.ac\.in/i.test(sender);
 
   const processableEmails = emails.filter((email) => email.assignment_source !== 'admin_unlinked');
   const neoPatEmails = processableEmails.filter((e) => isNeoPatSender(e.sender || ''));
   // Process NeoPAT circulars chronologically so registration & eligibility emails establish drive identity
   neoPatEmails.sort((a, b) => new Date(a.received_at || 0).getTime() - new Date(b.received_at || 0).getTime());
-  const collegeEmails = processableEmails.filter((e) => !isNeoPatSender(e.sender || ''));
 
   // 2.5 Dynamic Timing Correlation Setup
   const circularCatalog = buildCircularCatalog(collegeEmails);
@@ -1880,9 +2017,14 @@ export async function performReprocess(
     .select('placement_drive_id')
     .eq('user_id', userId);
 
+  const validExistingDriveIds = new Set((initialDbDrives || []).map((d) => d.id));
+  for (const id of validDriveIdSet) {
+    validExistingDriveIds.add(id);
+  }
+
   const orphanDriveIds = (userApps || [])
     .map((a) => a.placement_drive_id)
-    .filter((id): id is string => Boolean(id) && !validDriveIdSet.has(id));
+    .filter((id): id is string => Boolean(id) && !validExistingDriveIds.has(id));
 
   if (orphanDriveIds.length > 0) {
     await supabase.from('events').delete().eq('user_id', userId).in('placement_drive_id', orphanDriveIds);
@@ -1896,15 +2038,28 @@ export async function performReprocess(
   onProgress?.({
     step: 4,
     totalSteps: 5,
-    message: `Matching ${collegeEmails.length} college circulars, test links & shortlistsâ€¦`,
+    message: `Matching ${collegeEmails.length} college circulars, test links & shortlists…`,
   });
 
   let collegeLinkedCount = 0;
   let collegeDiscardedCount = 0;
-  const collegeDriveLinks: Array<{ user_id: string; email_id: string; placement_drive_id: string; link_type: string; assignment_source: string; confidence: string }> = [];
+  const collegeEmailUpdates: Array<{
+    id: string;
+    parsed_drive_numbers: string[];
+    parsed_company_name: string | null;
+    classification: string;
+  }> = [];
+  const driveSourceUpdates: Array<{
+    driveId: string;
+    sourceCollegeEmailId: string;
+  }> = [];
+  const personalReceiptUpdates: Array<{
+    collegeEmailId: string;
+    placementDriveId: string;
+  }> = [];
 
   for (const email of collegeEmails) {
-    if (email.assignment_source === 'admin_unlinked' || email.classification === 'irrelevant' || email.is_relevant === false) {
+    if (email.assignment_source === 'admin_unlinked' || email.classification === 'irrelevant') {
       continue;
     }
     const subject = email.subject || '';
@@ -2035,41 +2190,55 @@ export async function performReprocess(
     }
 
     if (matchedDriveId) {
-      emailUpdates.push({
-        id: email.id,
-        placement_drive_id: matchedDriveId,
-        classification: classification.classification,
-        is_relevant: true,
-      });
-      collegeDriveLinks.push({
-        user_id: userId,
-        email_id: email.id,
-        placement_drive_id: matchedDriveId,
-        link_type: 'secondary',
-        assignment_source: 'reprocess_college_matcher',
-        confidence: 'medium',
-      });
       collegeLinkedCount++;
-    } else {
-      emailUpdates.push({
-        id: email.id,
-        placement_drive_id: null,
-        classification: classification.classification,
-        is_relevant: false,
+      const targetDriveObj = driveById.get(matchedDriveId);
+      const driveNum = targetDriveObj?.drive_number || targetDriveObj?.normalized_drive_number;
+      const currentNums: string[] = email.parsed_drive_numbers || [];
+      const updatedNums = driveNum && !currentNums.includes(driveNum)
+        ? [...currentNums, driveNum]
+        : currentNums;
+      const comp = targetDriveObj ? companiesById.get(targetDriveObj.company_id) : null;
+
+      const numsChanged = updatedNums.length !== currentNums.length || updatedNums.some((n, idx) => n !== currentNums[idx]);
+      const nameChanged = Boolean(comp?.name && comp.name !== email.parsed_company_name);
+      const classChanged = Boolean(classification.classification && classification.classification !== email.classification);
+
+      if (numsChanged || nameChanged || classChanged) {
+        collegeEmailUpdates.push({
+          id: email.id,
+          parsed_drive_numbers: updatedNums,
+          parsed_company_name: comp?.name || email.parsed_company_name || null,
+          classification: classification.classification,
+        });
+      }
+
+      if (targetDriveObj && !targetDriveObj.source_college_email_id && /registration/i.test(subject)) {
+        if (!driveSourceUpdates.some((d) => d.driveId === targetDriveObj.id)) {
+          driveSourceUpdates.push({
+            driveId: targetDriveObj.id,
+            sourceCollegeEmailId: email.id,
+          });
+        }
+      }
+
+      personalReceiptUpdates.push({
+        collegeEmailId: email.id,
+        placementDriveId: matchedDriveId,
       });
+    } else {
       collegeDiscardedCount++;
     }
   }
 
-  // Fast Batch Update emails in grouped chunks
-  const groupedUpdates = new Map<string, string[]>();
+  // 1. Update personal emails (from Phase 1 NeoPAT matching)
+  const groupedPersonalUpdates = new Map<string, string[]>();
   for (const u of emailUpdates) {
     const key = `${u.placement_drive_id || 'null'}|${u.classification}|${u.is_relevant}`;
-    if (!groupedUpdates.has(key)) groupedUpdates.set(key, []);
-    groupedUpdates.get(key)!.push(u.id);
+    if (!groupedPersonalUpdates.has(key)) groupedPersonalUpdates.set(key, []);
+    groupedPersonalUpdates.get(key)!.push(u.id);
   }
 
-  for (const [key, ids] of groupedUpdates.entries()) {
+  for (const [key, ids] of groupedPersonalUpdates.entries()) {
     const [compIdStr, cls, isRelStr] = key.split('|');
     const compId = compIdStr === 'null' ? null : compIdStr;
     const isRel = isRelStr === 'true';
@@ -2087,33 +2256,75 @@ export async function performReprocess(
     }
   }
 
-  // Purge stale secondary email_drive_links so re-assigned college circulars don't leave phantom duplicates
-  await supabase
-    .from('email_drive_links')
-    .delete()
-    .eq('user_id', userId)
-    .eq('link_type', 'secondary');
-
-  // Upsert email_drive_links for college emails
-  if (collegeDriveLinks.length > 0) {
-    for (let i = 0; i < collegeDriveLinks.length; i += 500) {
-      const chunk = collegeDriveLinks.slice(i, i + 500);
-      await supabase
-        .from('email_drive_links')
-        .upsert(chunk, { onConflict: 'email_id,placement_drive_id,link_type' });
+  // 2. Batch update college circulars with matched drive numbers & company names (only changed rows)
+  if (collegeEmailUpdates.length > 0) {
+    for (let i = 0; i < collegeEmailUpdates.length; i += 50) {
+      const chunk = collegeEmailUpdates.slice(i, i + 50);
+      await Promise.all(
+        chunk.map((u) =>
+          supabase
+            .from('college_emails')
+            .update({
+              parsed_drive_numbers: u.parsed_drive_numbers,
+              parsed_company_name: u.parsed_company_name,
+              classification: u.classification as any,
+            })
+            .eq('id', u.id)
+        )
+      );
     }
   }
 
-  // Scan Excel shortlist attachments for any missing candidate matches (if time permits under 3 min)
-  if (Date.now() - reprocessStartTime < 180_000) {
+  // 3. Update placement drives with primary registration circular
+  if (driveSourceUpdates.length > 0) {
+    for (const dsu of driveSourceUpdates) {
+      await supabase
+        .from('placement_drives')
+        .update({ source_college_email_id: dsu.sourceCollegeEmailId })
+        .eq('id', dsu.driveId)
+        .is('source_college_email_id', null);
+    }
+  }
+
+  // 4. Update personal email receipts that reference matched college circulars
+  if (personalReceiptUpdates.length > 0) {
+    const { data: userCollegeReceipts } = await supabase
+      .from('personal_emails')
+      .select('id, college_email_id')
+      .eq('user_id', userId)
+      .not('college_email_id', 'is', null)
+      .is('placement_drive_id', null);
+
+    if (userCollegeReceipts && userCollegeReceipts.length > 0) {
+      const driveByCollegeEmailId = new Map(
+        personalReceiptUpdates.map((pru) => [pru.collegeEmailId, pru.placementDriveId])
+      );
+      for (const receipt of userCollegeReceipts) {
+        if (!receipt.college_email_id) continue;
+        const targetDriveId = driveByCollegeEmailId.get(receipt.college_email_id);
+        if (targetDriveId) {
+          await supabase
+            .from('personal_emails')
+            .update({ placement_drive_id: targetDriveId })
+            .eq('id', receipt.id);
+        }
+      }
+    }
+  }
+
+  // Scan Excel shortlist attachments only if candidate matches haven't been resolved yet
+  const { count: existingCandidateMatchesCount } = await supabase
+    .from('candidate_matches')
+    .select('id', { count: 'exact', head: true })
+    .eq('user_id', userId);
+
+  if (!existingCandidateMatchesCount || existingCandidateMatchesCount === 0) {
     try {
       const { scanAndPersistCandidateMatches } = await import('@/lib/sync/attachment-scanner');
       await scanAndPersistCandidateMatches(supabase, userId);
     } catch (scanErr) {
       console.warn('[performReprocess] Attachment scan non-critical error:', scanErr);
     }
-  } else {
-    console.log('[performReprocess] Skipping attachment scan to preserve time budget for stage recalculation');
   }
 
   // 6. Phase 4: Recalculate Stage Progression & Events for Official NeoPAT Drives
