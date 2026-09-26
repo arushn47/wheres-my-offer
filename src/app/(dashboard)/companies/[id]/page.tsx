@@ -358,6 +358,23 @@ export default async function CompanyDetailPage(props: {
     }
   }
 
+  // Also resolve college circulars explicitly linked to this drive by drive number
+  const driveNumbers = Array.from(new Set(
+    (companyDrives || []).flatMap((d: any) => [d.drive_number, d.normalized_drive_number].filter(Boolean) as string[])
+  ));
+
+  for (const dNum of driveNumbers) {
+    const { data: cByNum } = await supabase
+      .from('college_emails')
+      .select('id')
+      .filter('parsed_drive_numbers', 'cs', JSON.stringify([dNum]));
+    for (const c of cByNum || []) {
+      if (!excludedEmailIds.has(c.id)) {
+        collegeEmailIds.add(c.id);
+      }
+    }
+  }
+
   const orConditions: string[] = [];
   if (collegeEmailIds.size > 0) {
     orConditions.push(`id.in.(${Array.from(collegeEmailIds).join(',')})`);
@@ -380,7 +397,7 @@ export default async function CompanyDetailPage(props: {
   if (orConditions.length > 0) {
     const { data: collegeEmailRows } = await supabase
       .from('college_emails')
-      .select('id, subject, sender_email, received_at, created_at, body_snippet, body_text, classification, parsed_company_name')
+      .select('id, subject, sender_email, received_at, created_at, body_snippet, body_text, classification, parsed_company_name, parsed_drive_numbers')
       .or(orConditions.join(','))
       .order('received_at', { ascending: false })
       .limit(50);
@@ -407,12 +424,19 @@ export default async function CompanyDetailPage(props: {
       }
 
       if (!allEmailsMap.has(ce.id)) {
-        const isExplicitId = collegeEmailIds.has(ce.id);
+        const isDriveNumberMatch = driveNumbers.some((dNum) => {
+          const dLower = dNum.toLowerCase();
+          const parsedNums = ((ce as any).parsed_drive_numbers || []).map((n: string) => n.toLowerCase());
+          return parsedNums.includes(dLower);
+        });
+        const isExplicitId = collegeEmailIds.has(ce.id) || isDriveNumberMatch;
         const sub = ce.subject || '';
         const parsedName = (ce as any).parsed_company_name || '';
         const matchesWordBoundary = substantiveAliases.some((alias) => {
           const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-          const regex = new RegExp(`\\b${escaped}\\b`, 'i');
+          const regex = alias.length <= 3
+            ? new RegExp(`\\b${escaped}\\b`, 'i')
+            : new RegExp(`\\b${escaped}`, 'i');
           return regex.test(sub) || regex.test(parsedName);
         });
 

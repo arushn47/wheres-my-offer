@@ -11,8 +11,13 @@ __pycache__/
 .env.production.local
 
 # local scripts & database runners
-scripts/
+scripts/*
+!scripts/backup-db.js
+!scripts/restore-db.js
 scratch/
+backups/
+*.sql
+*.sql.gz
 
 # next.js
 .next/

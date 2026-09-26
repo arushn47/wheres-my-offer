@@ -211,7 +211,7 @@ export async function recalculateApplicationStatuses(
       .select('id, name, aliases'),
     supabase
       .from('placement_drives')
-      .select('id, company_id, drive_number, normalized_drive_number, drive_name, role, category, ctc, stipend, location, excluded_email_ids, created_at'),
+      .select('id, company_id, drive_number, normalized_drive_number, drive_name, role, category, ctc, stipend, location, registration_deadline, eligibility, branches, cgpa_requirement, backlog_requirement, excluded_email_ids, created_at'),
     supabase
       .from('email_drive_links')
       .select('email_id, placement_drive_id'),
@@ -252,24 +252,7 @@ export async function recalculateApplicationStatuses(
     drivesByCompanyId.set(d.company_id, list);
   }
 
-  // Ensure every company has at least one placement drive
   const allDrives = [...(placementDrives || [])];
-  for (const c of remainingCompanies) {
-    if (!drivesByCompanyId.has(c.id) || drivesByCompanyId.get(c.id)!.length === 0) {
-      const { data: newDrive } = await supabase
-        .from('placement_drives')
-        .insert({
-          company_id: c.id,
-          drive_name: c.name,
-        })
-        .select('id, company_id, drive_number, normalized_drive_number, drive_name, role, category, ctc, stipend, location, excluded_email_ids, created_at')
-        .single();
-      if (newDrive) {
-        drivesByCompanyId.set(c.id, [newDrive]);
-        allDrives.push(newDrive);
-      }
-    }
-  }
 
   // Deduplicate rogue companies ending with UG/PG or duplicate names if base company exists
   for (const c of remainingCompanies) {
@@ -332,6 +315,7 @@ export async function recalculateApplicationStatuses(
   }
 
   const emailById = new Map(allEmails.map((e) => [e.id, e]));
+  const userPersonalEmailIdSet = new Set(allEmails.map((e) => e.id));
 
   // Index college circulars for rapid lookup & drive mapping
   const collegeEmailsByDriveNum = new Map<string, typeof allCollegeEmails>();
@@ -763,6 +747,7 @@ export async function recalculateApplicationStatuses(
     }
 
     const withdrawalEmails = activeDriveEmails.filter((e) => {
+      if (!userPersonalEmailIdSet.has(e.id)) return false;
       const full = `${e.subject || ''} ${e.body_snippet || ''}`.toLowerCase();
       if (
         /who\s+(?:wish|want)\s+to\s+opt|if\s+you\s+(?:wish|want)\s+to\s+opt|opt[\s-]*out\s+(?:form|link|google|portal)|voluntary\s+withdrawal\s+only|forms\.gle/i.test(
@@ -785,6 +770,9 @@ export async function recalculateApplicationStatuses(
     }, 0);
 
     const registrationEmails = activeDriveEmails.filter((e) => {
+      // Registration confirmations MUST be personal receipts sent to this user!
+      if (!userPersonalEmailIdSet.has(e.id)) return false;
+
       const subj = (e.subject || '').toLowerCase();
       const full = `${subj} ${e.body_snippet || ''}`.toLowerCase();
       const isPersonalNeoPat = /noreply\.cdcinfo@vitstudent\.ac\.in/i.test(e.sender || '');
@@ -1343,25 +1331,51 @@ export async function recalculateApplicationStatuses(
       last_updated: new Date().toISOString(),
     };
 
+    // Enrich placement_drives with the latest extracted job metadata from all linked circulars
+    // (regardless of whether this specific user applied to this drive or not)
+    await supabase.from('placement_drives').update({
+      role: finalRole || drive.role || null,
+      category: finalCategory || drive.category || null,
+      ctc: finalCtc || drive.ctc || null,
+      stipend: finalStipend || drive.stipend || null,
+      location: workLocation || drive.location || null,
+      registration_deadline: finalRegDeadline || drive.registration_deadline || null,
+      eligibility: extractedJob.eligibility || drive.eligibility || null,
+      branches: (extractedJob.branches && extractedJob.branches.length > 0) ? extractedJob.branches : (drive.branches || null),
+      cgpa_requirement: extractedJob.cgpaRequirement || drive.cgpa_requirement || null,
+      backlog_requirement: extractedJob.backlogRequirement || drive.backlog_requirement || null,
+      updated_at: new Date().toISOString(),
+    }).eq('id', drive.id);
+
+    const hasUserPersonalEmails = driveEmails.some((de) => userPersonalEmailIdSet.has(de.id));
+    const userCandidateMatches = candidateMatchesByDriveId.get(drive.id) || [];
+    const hasCandidateMatch = userCandidateMatches.length > 0;
+
+    // RULE: A user ONLY has an application for a placement drive if:
+    // 1. The user received personal NeoPAT emails for it (eligibility, registration, test link, etc.), OR
+    // 2. The user has confirmed registration / applied, OR
+    // 3. The user was matched in an official candidate shortlist, OR
+    // 4. The user manually added / overrode the application.
+    // If NONE of these apply, the drive was for other students/campuses/branches.
+    // NEVER create a phantom application for this user, and PURGE any existing unapplied record!
+    if (
+      !hasUserPersonalEmails &&
+      !hasConfirmedRegistration &&
+      !hasCandidateMatch &&
+      !existingApp?.manual_override
+    ) {
+      if (existingApp?.id) {
+        await supabase.from('applications').delete().eq('id', existingApp.id);
+        await supabase.from('events').delete().eq('user_id', userId).eq('placement_drive_id', drive.id);
+      }
+      return;
+    }
+
     if (existingApp?.id) {
       await supabase.from('applications').update(appPayload).eq('id', existingApp.id);
     } else {
       await supabase.from('applications').insert(appPayload);
     }
-
-    await supabase.from('placement_drives').update({
-      role: finalRole,
-      category: finalCategory,
-      ctc: finalCtc,
-      stipend: finalStipend,
-      location: workLocation || null,
-      registration_deadline: finalRegDeadline,
-      eligibility: extractedJob.eligibility || existingApp?.eligibility || null,
-      branches: (extractedJob.branches && extractedJob.branches.length > 0) ? extractedJob.branches : (existingApp?.branches || null),
-      cgpa_requirement: extractedJob.cgpaRequirement || existingApp?.cgpa_requirement || null,
-      backlog_requirement: extractedJob.backlogRequirement || existingApp?.backlog_requirement || null,
-      updated_at: new Date().toISOString(),
-    }).eq('id', drive.id);
 
     const manualEvents = manualEventsByDriveId.get(drive.id) || [];
 
@@ -2014,24 +2028,31 @@ export async function performReprocess(
 
   const { data: userApps } = await supabase
     .from('applications')
+    .select('id, placement_drive_id, manual_override')
+    .eq('user_id', userId);
+
+  // Drives that are legitimately tracked for THIS user:
+  // 1. From this user's personal NeoPAT emails (validDriveIdSet)
+  // 2. From candidate_matches for this user
+  const { data: userCandidateMatches } = await supabase
+    .from('candidate_matches')
     .select('placement_drive_id')
     .eq('user_id', userId);
 
-  const validExistingDriveIds = new Set((initialDbDrives || []).map((d) => d.id));
-  for (const id of validDriveIdSet) {
-    validExistingDriveIds.add(id);
+  const userAllowedDriveIds = new Set<string>(validDriveIdSet);
+  for (const cm of (userCandidateMatches || [])) {
+    if (cm.placement_drive_id) userAllowedDriveIds.add(cm.placement_drive_id);
   }
 
   const orphanDriveIds = (userApps || [])
-    .map((a) => a.placement_drive_id)
-    .filter((id): id is string => Boolean(id) && !validExistingDriveIds.has(id));
+    .filter((a: any) => !a.manual_override && a.placement_drive_id && !userAllowedDriveIds.has(a.placement_drive_id))
+    .map((a: any) => a.placement_drive_id);
 
   if (orphanDriveIds.length > 0) {
     await supabase.from('events').delete().eq('user_id', userId).in('placement_drive_id', orphanDriveIds);
     await supabase.from('applications').delete().eq('user_id', userId).in('placement_drive_id', orphanDriveIds);
     await supabase.from('notifications').delete().eq('user_id', userId).in('placement_drive_id', orphanDriveIds);
     await supabase.from('email_drive_links').delete().eq('user_id', userId).in('placement_drive_id', orphanDriveIds);
-    await supabase.from('personal_emails').update({ placement_drive_id: null }).eq('user_id', userId).in('placement_drive_id', orphanDriveIds);
   }
 
   // 5. Phase 3: Match College Emails against Official NeoPAT Placement Drives ONLY

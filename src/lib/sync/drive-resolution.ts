@@ -28,6 +28,52 @@ export interface DriveResolution {
   normalizedDriveNumber: string | null;
 }
 
+async function enrichExistingDriveIfSparse(
+  supabase: ReturnType<typeof createAdminClient>,
+  existingDrive: {
+    id: string;
+    role?: string | null;
+    category?: string | null;
+    ctc?: string | null;
+    stipend?: string | null;
+    location?: string | null;
+    eligibility?: string | null;
+    branches?: string[] | null;
+    cgpa_requirement?: string | null;
+    backlog_requirement?: string | null;
+    registration_deadline?: string | null;
+  },
+  params: {
+    role?: string | null;
+    category?: string | null;
+    ctc?: string | null;
+    stipend?: string | null;
+    location?: string | null;
+    eligibility?: string | null;
+    branches?: string[] | null;
+    cgpaRequirement?: string | null;
+    backlogRequirement?: string | null;
+    registrationDeadline?: string | null;
+  }
+) {
+  const updates: Record<string, any> = {};
+  if (!existingDrive.role && params.role?.trim()) updates.role = params.role.trim();
+  if (!existingDrive.category && params.category?.trim()) updates.category = params.category.trim();
+  if (!existingDrive.ctc && params.ctc?.trim()) updates.ctc = params.ctc.trim();
+  if (!existingDrive.stipend && params.stipend?.trim()) updates.stipend = params.stipend.trim();
+  if (!existingDrive.location && params.location?.trim()) updates.location = params.location.trim();
+  if (!existingDrive.eligibility && params.eligibility?.trim()) updates.eligibility = params.eligibility.trim();
+  if ((!existingDrive.branches || existingDrive.branches.length === 0) && params.branches && params.branches.length > 0) updates.branches = params.branches;
+  if (!existingDrive.cgpa_requirement && params.cgpaRequirement?.trim()) updates.cgpa_requirement = params.cgpaRequirement.trim();
+  if (!existingDrive.backlog_requirement && params.backlogRequirement?.trim()) updates.backlog_requirement = params.backlogRequirement.trim();
+  if (!existingDrive.registration_deadline && params.registrationDeadline) updates.registration_deadline = params.registrationDeadline;
+
+  if (Object.keys(updates).length > 0) {
+    updates.updated_at = new Date().toISOString();
+    await supabase.from('placement_drives').update(updates).eq('id', existingDrive.id);
+  }
+}
+
 /**
  * Resolves a drive for one organization without allowing company-name fallback
  * to replace an explicit drive number. Persistence is deliberately separate so
@@ -80,11 +126,14 @@ export async function resolvePlacementDrive(params: {
     // 1. Check if the drive already exists globally by normalized_drive_number
     const { data: existing } = await params.supabase
       .from('placement_drives')
-      .select('id, company_id')
+      .select('id, company_id, role, category, ctc, stipend, location, eligibility, branches, cgpa_requirement, backlog_requirement, registration_deadline')
       .eq('normalized_drive_number', normalizedDriveNumber)
       .maybeSingle();
 
     if (existing?.id) {
+      if (existing.company_id === params.companyId) {
+        await enrichExistingDriveIfSparse(params.supabase, existing, params);
+      }
       return {
         placementDriveId: existing.company_id === params.companyId ? existing.id : null,
         state: existing.company_id === params.companyId ? 'assigned' : 'conflict',
@@ -162,13 +211,14 @@ export async function resolvePlacementDrive(params: {
 
   const { data: companyDrives } = await params.supabase
     .from('placement_drives')
-    .select('id, company_id, drive_name, created_at')
+    .select('id, company_id, drive_name, role, category, ctc, stipend, location, eligibility, branches, cgpa_requirement, backlog_requirement, registration_deadline, created_at')
     .eq('company_id', params.companyId)
     .in('identity_state', ['assigned', 'manually_assigned'])
     .order('created_at', { ascending: false });
 
   // 1. If exactly one drive exists for this company, resolve directly to it
   if (companyDrives && companyDrives.length === 1) {
+    await enrichExistingDriveIfSparse(params.supabase, companyDrives[0], params);
     return {
       placementDriveId: companyDrives[0].id,
       state: 'assigned',
@@ -193,6 +243,7 @@ export async function resolvePlacementDrive(params: {
         );
       });
       if (matched) {
+        await enrichExistingDriveIfSparse(params.supabase, matched, params);
         return {
           placementDriveId: matched.id,
           state: 'assigned',

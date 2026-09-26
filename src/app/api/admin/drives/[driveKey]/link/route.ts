@@ -169,17 +169,46 @@ export async function POST(
         // Update college_emails.parsed_drive_numbers so subsequent searches
         // can detect this circular is already assigned
         for (const ce of collegeEmails) {
-          const existingDriveNums: string[] = ce.parsed_drive_numbers || [];
-          const driveNum = referenceDrive.drive_number || referenceDrive.normalized_drive_number;
-          if (driveNum && !existingDriveNums.includes(driveNum)) {
+          const existingDriveNums: string[] = Array.isArray(ce.parsed_drive_numbers) ? ce.parsed_drive_numbers : [];
+          const numsToAdd = Array.from(new Set(
+            matchedDrives.flatMap((d) => [d.drive_number, d.normalized_drive_number].filter(Boolean) as string[])
+          ));
+          const updatedNums = Array.from(new Set([...existingDriveNums, ...numsToAdd]));
+
+          if (updatedNums.length !== existingDriveNums.length || !ce.parsed_company_name) {
             await supabase
               .from('college_emails')
               .update({
-                parsed_drive_numbers: [...existingDriveNums, driveNum],
+                parsed_drive_numbers: updatedNums,
                 parsed_company_name: ce.parsed_company_name || referenceDrive.drive_name || null,
               })
               .eq('id', ce.id);
           }
+        }
+
+        // Also ensure linked college circulars are removed from excluded_email_ids
+        for (const d of matchedDrives) {
+          if (Array.isArray(d.excluded_email_ids) && d.excluded_email_ids.length > 0) {
+            const toRemove = new Set(collegeEmails.map((c) => c.id));
+            const updatedExcluded = d.excluded_email_ids.filter((id: string) => !toRemove.has(id));
+            if (updatedExcluded.length !== d.excluded_email_ids.length) {
+              await supabase
+                .from('placement_drives')
+                .update({ excluded_email_ids: updatedExcluded })
+                .eq('id', d.id);
+            }
+          }
+        }
+
+        // Collect all users who have an application for this drive so their statuses are recalculated
+        const matchedDriveIds = matchedDrives.map((d) => d.id);
+        const { data: driveApps } = await supabase
+          .from('applications')
+          .select('user_id')
+          .in('placement_drive_id', matchedDriveIds);
+
+        for (const app of driveApps || []) {
+          affectedUserIds.add(app.user_id);
         }
 
         // Also link all personal_email receipts for this college circular to the drive,

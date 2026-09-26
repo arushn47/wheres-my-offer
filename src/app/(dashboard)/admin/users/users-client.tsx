@@ -58,6 +58,9 @@ interface AdminUser {
   emailCount: number;
   totalExpected?: number;
   canonicalCount?: number;
+  shortlistCount?: number;
+  rawMatchCount?: number;
+  applicationCount?: number;
   totalCanonical?: number;
 }
 
@@ -611,23 +614,29 @@ export default function UsersClient() {
                         <div className="flex flex-col items-center whitespace-nowrap">
                           <div className="font-mono text-sm font-bold text-zinc-100 flex items-baseline justify-center gap-1.5 whitespace-nowrap">
                             <span>{user.emailCount.toLocaleString()}</span>
-                            <span className="text-zinc-500 font-normal text-xs whitespace-nowrap">
-                              / {user.totalExpected ? user.totalExpected.toLocaleString() : (user.emailCount > 0 ? user.emailCount.toLocaleString() : '0')}
-                            </span>
+                            {isSyncing && user.totalExpected && user.totalExpected > user.emailCount ? (
+                              <span className="text-zinc-500 font-normal text-xs whitespace-nowrap">
+                                / {user.totalExpected.toLocaleString()}
+                              </span>
+                            ) : null}
                           </div>
 
-                          {user.syncState?.total_pages && user.syncState.total_pages > 1 && user.syncState.is_initial_sync ? (
+                          {isSyncing && user.syncState?.total_pages && user.syncState.total_pages > 1 ? (
                             <span className="text-[10px] text-amber-400 font-mono mt-0.5 whitespace-nowrap">
                               Pg {user.syncState.current_page_index} of {user.syncState.total_pages} ({Math.min(100, Math.round((user.emailCount / (user.syncState.total_pages * 50)) * 100))}%)
                             </span>
-                          ) : user.canonicalCount !== undefined && user.totalCanonical ? (
-                            <span
-                              className="text-[10px] text-zinc-500 font-mono mt-0.5 whitespace-nowrap cursor-help"
-                              title={`${user.canonicalCount.toLocaleString()} broadcast circulars received out of ${user.totalCanonical.toLocaleString()} total circulars sent campus-wide (targeted by branch / degree program)`}
-                            >
-                              {user.canonicalCount.toLocaleString()} of {user.totalCanonical.toLocaleString()} campus pool
-                            </span>
-                          ) : null}
+                          ) : (
+                            <div className="flex items-center gap-1.5 mt-0.5 text-[10px] text-zinc-500 font-mono whitespace-nowrap">
+                              <span>{user.applicationCount ?? 0} drives</span>
+                              <span>•</span>
+                              <span
+                                className="cursor-help text-emerald-400/90 hover:text-emerald-300 transition-colors"
+                                title={`${user.shortlistCount ?? 0} unique shortlisted drives (${user.rawMatchCount ?? user.shortlistCount ?? 0} candidate roster matches found across ${(user.totalCanonical || 1866).toLocaleString()} campus circulars)`}
+                              >
+                                {user.shortlistCount ?? 0} shortlisted
+                              </span>
+                            </div>
+                          )}
                         </div>
                       </td>
 
@@ -835,22 +844,28 @@ export default function UsersClient() {
                       <span className="text-[10px] text-zinc-500 uppercase font-semibold tracking-wider">Synced Mails</span>
                       <div className="font-mono text-sm font-bold text-zinc-100 flex items-baseline gap-1 mt-0.5 whitespace-nowrap">
                         <span>{user.emailCount.toLocaleString()}</span>
-                        <span className="text-zinc-500 font-normal text-xs">
-                          / {user.totalExpected ? user.totalExpected.toLocaleString() : (user.emailCount > 0 ? user.emailCount.toLocaleString() : '0')}
-                        </span>
+                        {isSyncing && user.totalExpected && user.totalExpected > user.emailCount ? (
+                          <span className="text-zinc-500 font-normal text-xs">
+                            / {user.totalExpected.toLocaleString()}
+                          </span>
+                        ) : null}
                       </div>
-                      {user.syncState?.total_pages && user.syncState.total_pages > 1 && user.syncState.is_initial_sync ? (
+                      {isSyncing && user.syncState?.total_pages && user.syncState.total_pages > 1 ? (
                         <span className="text-[10px] text-amber-400 font-mono mt-0.5 truncate">
                           Pg {user.syncState.current_page_index}/{user.syncState.total_pages} ({Math.min(100, Math.round((user.emailCount / (user.syncState.total_pages * 50)) * 100))}%)
                         </span>
-                      ) : user.canonicalCount !== undefined && user.totalCanonical ? (
-                        <span
-                          className="text-[10px] text-zinc-500 font-mono mt-0.5 truncate cursor-help"
-                          title={`${user.canonicalCount.toLocaleString()} broadcast circulars received out of ${user.totalCanonical.toLocaleString()} total circulars sent campus-wide (targeted by branch / degree program)`}
-                        >
-                          {user.canonicalCount.toLocaleString()} of {user.totalCanonical.toLocaleString()} campus pool
-                        </span>
-                      ) : null}
+                      ) : (
+                        <div className="flex items-center gap-1.5 mt-0.5 text-[10px] text-zinc-500 font-mono truncate">
+                          <span>{user.applicationCount ?? 0} drives</span>
+                          <span>•</span>
+                          <span
+                            className="cursor-help text-emerald-400/90 hover:text-emerald-300 transition-colors"
+                            title={`${user.shortlistCount ?? 0} unique shortlisted drives (${user.rawMatchCount ?? user.shortlistCount ?? 0} candidate roster matches found across ${(user.totalCanonical || 1866).toLocaleString()} campus circulars)`}
+                          >
+                            {user.shortlistCount ?? 0} shortlisted
+                          </span>
+                        </div>
+                      )}
                     </div>
 
                     {/* Sync State */}

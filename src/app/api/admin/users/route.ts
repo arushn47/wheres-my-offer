@@ -52,24 +52,51 @@ export async function GET() {
     const syncStates = syncStatesRes.data || [];
     const totalCanonical = canonicalCountRes.count || 0;
 
-    // Parallel counts per user to bypass PostgREST 1000 row limit
+    const advancedStatuses = new Set([
+      'shortlisted', 'test', 'test_scheduled', 'test_ongoing', 'test_completed',
+      'interview', 'interview_scheduled', 'interview_ongoing', 'interview_completed',
+      'selected', 'offer', 'offer_received', 'rejected'
+    ]);
+
+    // Parallel metrics per user
     const userMetricsPromises = users.map(async (u) => {
-      const [emailsRes, canonicalRes] = await Promise.all([
+      const [emailsRes, matchesRes, appsRes] = await Promise.all([
         supabase
           .from('personal_emails')
           .select('*', { count: 'exact', head: true })
           .eq('user_id', u.id),
         supabase
           .from('candidate_matches')
-          .select('*', { count: 'exact', head: true })
-          .eq('user_id', u.id)
-          .not('college_email_id', 'is', null),
+          .select('placement_drive_id')
+          .eq('user_id', u.id),
+        supabase
+          .from('applications')
+          .select('placement_drive_id, status')
+          .eq('user_id', u.id),
       ]);
+
+      const userApps = appsRes.data || [];
+      const userMatches = matchesRes.data || [];
+
+      const shortlistedDriveIds = new Set<string>();
+      userApps.forEach((a) => {
+        if (a.placement_drive_id && advancedStatuses.has((a.status || '').toLowerCase())) {
+          shortlistedDriveIds.add(a.placement_drive_id);
+        }
+      });
+      userMatches.forEach((m) => {
+        if (m.placement_drive_id) {
+          shortlistedDriveIds.add(m.placement_drive_id);
+        }
+      });
 
       return {
         userId: u.id,
         emailCount: emailsRes.count || 0,
-        canonicalCount: canonicalRes.count || 0,
+        shortlistCount: shortlistedDriveIds.size,
+        rawMatchCount: userMatches.length,
+        canonicalCount: userMatches.length,
+        applicationCount: userApps.length,
       };
     });
 
@@ -84,6 +111,9 @@ export async function GET() {
 
       const emailCount = userMetric?.emailCount || 0;
       const canonicalCount = userMetric?.canonicalCount || 0;
+      const shortlistCount = userMetric?.shortlistCount || 0;
+      const rawMatchCount = userMetric?.rawMatchCount || 0;
+      const applicationCount = userMetric?.applicationCount || 0;
 
       // Estimate total expected messages
       let totalExpected = emailCount;
@@ -110,6 +140,9 @@ export async function GET() {
         emailCount,
         totalExpected,
         canonicalCount,
+        shortlistCount,
+        rawMatchCount,
+        applicationCount,
         totalCanonical,
         syncState: syncState
           ? {

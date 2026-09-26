@@ -228,12 +228,42 @@ export async function PATCH(
           }
         }
 
-        await supabase
-          .from('college_emails')
-          .update({
-            parsed_drive_numbers: [],
-          })
-          .eq('id', collegeRef);
+        if (targetDriveIds.size > 0) {
+          const { data: targetDriveRows } = await supabase
+            .from('placement_drives')
+            .select('drive_number, normalized_drive_number')
+            .in('id', Array.from(targetDriveIds));
+
+          const driveNumsToRemove = new Set(
+            (targetDriveRows || []).flatMap((d) => [
+              (d.drive_number || '').toLowerCase(),
+              (d.normalized_drive_number || '').toLowerCase(),
+            ]).filter(Boolean)
+          );
+
+          const { data: ceRow } = await supabase
+            .from('college_emails')
+            .select('parsed_drive_numbers')
+            .eq('id', collegeRef)
+            .maybeSingle();
+
+          if (ceRow && Array.isArray(ceRow.parsed_drive_numbers)) {
+            const remainingNums = ceRow.parsed_drive_numbers.filter(
+              (num: string) => !driveNumsToRemove.has(num.toLowerCase())
+            );
+            await supabase
+              .from('college_emails')
+              .update({ parsed_drive_numbers: remainingNums })
+              .eq('id', collegeRef);
+          }
+        } else {
+          await supabase
+            .from('college_emails')
+            .update({
+              parsed_drive_numbers: [],
+            })
+            .eq('id', collegeRef);
+        }
 
         // Delete candidate matches and events that referenced this college circular
         const matchDeleteQuery = supabase.from('candidate_matches').delete().eq('college_email_id', collegeRef);
@@ -313,7 +343,21 @@ export async function PATCH(
         }
       }
 
-      // 5. Recalculate each affected drive from the remaining linked evidence
+      // 5. Ensure all users who applied to or were registered for target drives are reprocessed
+      if (targetDriveIds.size > 0) {
+        const { data: driveApps } = await supabase
+          .from('applications')
+          .select('user_id, placement_drive_id')
+          .in('placement_drive_id', Array.from(targetDriveIds));
+
+        for (const app of driveApps || []) {
+          const driveIds = affectedDrivesByUser.get(app.user_id) || new Set<string>();
+          driveIds.add(app.placement_drive_id);
+          affectedDrivesByUser.set(app.user_id, driveIds);
+        }
+      }
+
+      // 6. Recalculate each affected drive from the remaining linked evidence
       const reprocessErrors: string[] = [];
       for (const [userId, driveIds] of affectedDrivesByUser) {
         for (const driveId of driveIds) {

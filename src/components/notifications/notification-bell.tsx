@@ -156,8 +156,12 @@ export default function NotificationBell({
     window.addEventListener('focus', handleFocus);
     document.addEventListener('visibilitychange', handleVisibility);
 
-    // Periodic fallback polling (every 60 seconds)
-    const interval = setInterval(() => fetchNotifications(false), 60000);
+    // Periodic fallback polling (every 3 minutes when tab is visible)
+    const interval = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        fetchNotifications(false);
+      }
+    }, 180000);
 
     return () => {
       clearInterval(interval);

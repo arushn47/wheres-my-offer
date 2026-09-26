@@ -29,8 +29,23 @@ async function executeBackgroundSync(userIds: string[]) {
       .delete()
       .eq('status', 'complete')
       .lt('updated_at', oneHourAgo);
+
+    // Prune completed pubsub webhook logs older than 48 hours to prevent database bloat
+    const twoDaysAgo = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
+    await supabase
+      .from('gmail_pubsub_inbox')
+      .delete()
+      .eq('status', 'completed')
+      .lt('created_at', twoDaysAgo);
+
+    // Prune in-app notifications older than 7 days
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    await supabase
+      .from('notifications')
+      .delete()
+      .lt('created_at', sevenDaysAgo);
   } catch (cleanErr) {
-    console.warn('[Cron Sync] Stale sync_pages cleanup non-fatal error:', cleanErr);
+    console.warn('[Cron Sync] Stale data cleanup non-fatal error:', cleanErr);
   }
 
   // Shared wall-clock deadline for this entire cron invocation.

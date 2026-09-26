@@ -936,12 +936,18 @@ export default function CompanyDetailClient({
                 /(?:shortlist|candidates\s+shortlisted|shortlisted\s+candidates|selection\s+list|selected\s+candidates)/i.test(email.snippet) ||
                 Boolean(email.attachmentName && /shortlist|selection|roster|eligible/i.test(email.attachmentName));
 
-              // "Not Shortlisted" should ONLY appear when there's an actual shortlist/roster that was checked
-              // Require either: explicit shortlist/selected classification, OR a roster-like attachment name
-              // Do NOT show for generic registration/JD emails even if drive is eliminated
+              // "Not Shortlisted" should ONLY appear when:
+              // 1. The student actually applied / registered for this drive (NOT unregistered/not_applied/unknown)
+              // 2. There's an actual shortlist/roster that was checked (explicit shortlist classification or roster attachment)
+              // 3. The candidate was NOT matched in that shortlist
+              const isUserAppliedOrRegistered = Boolean(
+                company.application &&
+                company.application.status !== 'not_applied' &&
+                company.application.status !== 'unknown'
+              );
               const hasRosterAttachment = Boolean(email.attachmentName && /shortlist|selection|roster|eligible|shortlisted/i.test(email.attachmentName));
               const isExplicitShortlistEmail = email.classification === 'shortlist' || email.classification === 'selected';
-              const isNotShortlisted = !matchedCandidate && (isExplicitShortlistEmail || hasRosterAttachment);
+              const isNotShortlisted = isUserAppliedOrRegistered && !matchedCandidate && (isExplicitShortlistEmail || hasRosterAttachment);
 
               const Icon = matchedCandidate
                 ? FileSpreadsheet

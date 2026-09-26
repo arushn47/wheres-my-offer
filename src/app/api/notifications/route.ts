@@ -16,18 +16,7 @@ export async function GET() {
   const supabase = createAdminClient();
   const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
 
-  // 1. Auto-prune notifications older than 7 days in background
-  try {
-    await supabase
-      .from('notifications')
-      .delete()
-      .eq('user_id', session.userId)
-      .lt('created_at', sevenDaysAgo);
-  } catch (pruneErr) {
-    console.error('[API Notifications] Auto-prune error:', pruneErr);
-  }
-
-  // 2. Fetch latest active notifications (last 7 days, max 30)
+  // 1. Fetch latest active notifications (last 7 days, max 30)
   const { data: notifications, error } = await supabase
     .from('notifications')
     .select('id, type, title, message, body, link, is_read, created_at')
