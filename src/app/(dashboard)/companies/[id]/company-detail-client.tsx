@@ -16,6 +16,8 @@ import {
   Building2,
   Globe,
   GraduationCap,
+  Check,
+  X,
 } from 'lucide-react';
 import { cn, timeAgo, getDriveMode } from '@/lib/utils';
 import { CategoryBadge, STATUS_META } from '@/components/ui/status-chip';
@@ -62,6 +64,7 @@ export interface CompanyDetail {
   }[];
   emails: {
     id: string;
+    collegeEmailId?: string | null;
     subject: string;
     sender: string;
     receivedAt: string;
@@ -75,6 +78,7 @@ export interface CompanyDetail {
   candidateMatches: {
     id: string;
     emailId?: string | null;
+    collegeEmailId?: string | null;
     matchType: string;
     matchedValue: string | null;
     matchLocation?: string | null;
@@ -127,6 +131,50 @@ function parseCandidateMatchDetails(matchedValue: string | null, neoId?: string 
   };
 }
 
+function getNotShortlistedDetails(
+  email: { subject: string; snippet?: string; classification?: string; attachmentName?: string | null },
+  candidateRegId?: string | null,
+  companyName?: string
+) {
+  const sub = email.subject.toLowerCase();
+  let roundName = 'Next Round Shortlist';
+  if (sub.includes('interview') || sub.includes('gd') || sub.includes('discussion')) {
+    roundName = 'Interview Shortlist';
+  } else if (sub.includes('offer') || sub.includes('congratulations') || sub.includes('final') || sub.includes('selection list')) {
+    roundName = 'Final Selection List';
+  } else if (sub.includes('test') || sub.includes('assessment') || sub.includes('exam')) {
+    roundName = 'Test Shortlist';
+  } else if (sub.includes('ppt')) {
+    roundName = 'Pre-Placement Shortlist';
+  }
+
+  let filename = email.attachmentName;
+  if (!filename) {
+    const fileMatch = (email.subject + ' ' + (email.snippet || '')).match(/([\w\s\-–\(\)\.]+\.(?:xlsx|xls|pdf|csv))/i);
+    if (fileMatch) {
+      filename = fileMatch[1].trim();
+    } else {
+      let cleanTitle = email.subject
+        .replace(/^(?:(?:re|fw|fwd|update)\s*:\s*)+/i, '')
+        .replace(/^(?:congratulations\s*!*)\s*/i, '')
+        .replace(/\s*is\s+scheduled.*$/i, '')
+        .replace(/\s*-\s*2027\s*batch.*$/i, '')
+        .trim();
+      if (!cleanTitle.toLowerCase().includes('shortlist') && !cleanTitle.toLowerCase().includes('selection')) {
+        cleanTitle += ' Shortlist';
+      }
+      filename = `${cleanTitle}.xlsx`;
+    }
+  }
+
+  return {
+    filename,
+    roundName,
+    identifier: candidateRegId ? `Neo ID: ${candidateRegId}` : 'Candidate ID Scanned',
+    rosterType: email.attachmentName ? 'Attachment Roster' : 'Verified Roster',
+  };
+}
+
 interface CompanyDetailClientProps {
   company: CompanyDetail;
   userCampus?: 'VIT Bhopal' | 'VIT Vellore' | 'VIT Chennai' | 'VIT AP';
@@ -174,10 +222,22 @@ function getCleanEmailSummary(
   rawSnippet: string | null | undefined,
   subject: string,
   classification: string,
-  companyName: string
+  companyName: string,
+  isMatched?: boolean
 ): string {
   if (!rawSnippet || rawSnippet.trim().length === 0) {
-    if (classification === 'shortlist' || subject.toLowerCase().includes('shortlist')) {
+    const subLower = subject.toLowerCase();
+    if (
+      classification === 'shortlist' ||
+      classification === 'selected' ||
+      subLower.includes('shortlist') ||
+      subLower.includes('selection list') ||
+      subLower.includes('next round of selection') ||
+      subLower.includes('selected candidates')
+    ) {
+      if (isMatched === false) {
+        return `Selection roster announced for ${companyName}. Registration ID was not found in the verified shortlist for this round.`;
+      }
       return `Registrations screened and shortlist confirmed for ${companyName}. Candidate matches verified in attachment.`;
     }
     if (classification === 'test' || subject.toLowerCase().includes('test') || subject.toLowerCase().includes('assessment')) {
@@ -864,8 +924,44 @@ export default function CompanyDetailClient({
               const isInterview = email.classification === 'interview' || email.subject.toLowerCase().includes('interview');
               const isOffer = email.classification === 'selected' || email.subject.toLowerCase().includes('offer') || email.subject.toLowerCase().includes('congratulations');
 
-              const Icon = isOffer ? FileSpreadsheet : isInterview ? CalendarPlus : isTest ? AlertTriangle : isShortlist ? FileSpreadsheet : Mail;
-              const iconCls = isOffer
+              const matchedCandidate = company.candidateMatches.find((cm) =>
+                (cm.emailId && cm.emailId === email.id) ||
+                (cm.collegeEmailId && (cm.collegeEmailId === email.id || cm.collegeEmailId === email.collegeEmailId))
+              );
+
+              const isShortlistOrSelection =
+                email.classification === 'shortlist' ||
+                email.classification === 'selected' ||
+                /(?:shortlist|selection\s*list|selected\s*candidates|shortlisted\s*candidates|next\s*round\s*of\s*selection|selection\s*process|offer\s*selection)/i.test(email.subject) ||
+                /(?:shortlist|candidates\s+shortlisted|shortlisted\s+candidates|selection\s+list|selected\s+candidates)/i.test(email.snippet) ||
+                Boolean(email.attachmentName && /shortlist|selection|roster|eligible/i.test(email.attachmentName));
+
+              // "Not Shortlisted" should ONLY appear when there's an actual shortlist/roster that was checked
+              // Require either: explicit shortlist/selected classification, OR a roster-like attachment name
+              // Do NOT show for generic registration/JD emails even if drive is eliminated
+              const hasRosterAttachment = Boolean(email.attachmentName && /shortlist|selection|roster|eligible|shortlisted/i.test(email.attachmentName));
+              const isExplicitShortlistEmail = email.classification === 'shortlist' || email.classification === 'selected';
+              const isNotShortlisted = !matchedCandidate && (isExplicitShortlistEmail || hasRosterAttachment);
+
+              const Icon = matchedCandidate
+                ? FileSpreadsheet
+                : isNotShortlisted
+                ? FileSpreadsheet
+                : isOffer
+                ? FileSpreadsheet
+                : isInterview
+                ? CalendarPlus
+                : isTest
+                ? AlertTriangle
+                : isShortlist
+                ? FileSpreadsheet
+                : Mail;
+
+              const iconCls = matchedCandidate
+                ? 'border-emerald-500/50 bg-[#121218] text-emerald-400'
+                : isNotShortlisted
+                ? 'border-rose-500/50 bg-[#121218] text-rose-400'
+                : isOffer
                 ? 'border-emerald-500/50 bg-[#121218] text-emerald-400'
                 : isInterview
                 ? 'border-cyan-500/50 bg-[#121218] text-cyan-400'
@@ -877,7 +973,6 @@ export default function CompanyDetailClient({
 
               const isOpen = openAccordion === idx;
               const isPersonal = email.sender.includes('noreply.cdcinfo');
-              const matchedCandidate = company.candidateMatches.find((cm) => cm.emailId === email.id);
 
               return (
                 <div key={email.id} data-testid={`timeline-item-${idx}`} className="relative flex items-start gap-3 sm:gap-4 w-full min-w-0">
@@ -895,10 +990,26 @@ export default function CompanyDetailClient({
                         <div className="text-xs sm:text-sm font-semibold text-zinc-200 line-clamp-2 leading-snug wrap-break-word" title={email.subject}>
                           {email.subject}
                         </div>
-                        <div className="mt-1 flex items-center gap-2 font-mono text-[10px] text-zinc-500">
+                        <div className="mt-1 flex flex-wrap items-center gap-2 font-mono text-[10px] text-zinc-500">
                           <span suppressHydrationWarning>{timeAgo(email.receivedAt)}</span>
                           <span>·</span>
                           <span>{isPersonal ? 'personal gmail' : 'college gmail'}</span>
+                          {matchedCandidate && (
+                            <>
+                              <span>·</span>
+                              <span className="inline-flex items-center gap-1 rounded bg-emerald-500/10 border border-emerald-500/20 px-1.5 py-0.5 font-mono text-[9px] font-semibold text-emerald-400">
+                                <Check className="h-2.5 w-2.5" /> Shortlist Verified
+                              </span>
+                            </>
+                          )}
+                          {isNotShortlisted && (
+                            <>
+                              <span>·</span>
+                              <span className="inline-flex items-center gap-1 rounded bg-rose-500/10 border border-rose-500/20 px-1.5 py-0.5 font-mono text-[9px] font-semibold text-rose-400">
+                                <X className="h-2.5 w-2.5" /> Not Shortlisted
+                              </span>
+                            </>
+                          )}
                         </div>
                       </div>
                       <ChevronDown
@@ -920,7 +1031,13 @@ export default function CompanyDetailClient({
                           <div className="border-t border-zinc-800/80 px-4 py-3">
                             {/* Short, clean 1-2 line summary just like the reference designs */}
                             <p className="text-xs leading-relaxed text-zinc-300">
-                              {getCleanEmailSummary(email.snippet, email.subject, email.classification, company.name)}
+                              {getCleanEmailSummary(
+                                email.snippet,
+                                email.subject,
+                                email.classification,
+                                company.name,
+                                matchedCandidate ? true : isNotShortlisted ? false : undefined
+                              )}
                             </p>
 
                             {/* Candidate Match Evidence ONLY if verified on THIS specific email */}
@@ -963,6 +1080,54 @@ export default function CompanyDetailClient({
                                       Venue / Reporting: <span className="text-zinc-200">{matchInfo.venue}</span>
                                     </div>
                                   )}
+                                </div>
+                              );
+                            })()}
+
+                            {/* Not Shortlisted Evidence Card */}
+                            {isNotShortlisted && (() => {
+                              const notShortlistedInfo = getNotShortlistedDetails(
+                                email,
+                                company.candidateRegId || userRegNo,
+                                company.name
+                              );
+                              return (
+                                <div
+                                  data-testid={`not-shortlisted-evidence-${idx}`}
+                                  className="mt-3 overflow-hidden rounded-lg border border-rose-500/25 bg-[#0e0e14]"
+                                >
+                                  <div className="flex items-center justify-between border-b border-zinc-800 bg-rose-500/[0.06] px-3 py-2">
+                                    <span
+                                      className="flex items-center gap-2 font-mono text-[10px] text-rose-300 font-medium truncate"
+                                      title={notShortlistedInfo.filename}
+                                    >
+                                      <FileSpreadsheet className="h-3.5 w-3.5 shrink-0 text-rose-400" />
+                                      <span className="truncate">{notShortlistedInfo.filename}</span>
+                                    </span>
+                                    <span className="font-mono text-[9px] font-semibold text-rose-400 bg-rose-500/10 border border-rose-500/20 px-2 py-0.5 rounded shrink-0 uppercase tracking-wider">
+                                      not shortlisted
+                                    </span>
+                                  </div>
+                                  <div className="overflow-x-auto">
+                                    <div className="min-w-75 grid grid-cols-4 gap-px bg-zinc-800/70 font-mono text-[10px]">
+                                      <div className="bg-[#0b0d11] px-2.5 sm:px-3 py-2 text-zinc-300 truncate font-semibold">
+                                        {notShortlistedInfo.identifier}
+                                      </div>
+                                      <div className="bg-[#0b0d11] px-2.5 sm:px-3 py-2 text-zinc-400 truncate">
+                                        {notShortlistedInfo.roundName}
+                                      </div>
+                                      <div className="bg-[#0b0d11] px-2.5 sm:px-3 py-2 text-zinc-500 truncate">
+                                        {notShortlistedInfo.rosterType}
+                                      </div>
+                                      <div className="bg-[#0b0d11] px-2.5 sm:px-3 py-2 font-bold text-rose-400 whitespace-nowrap text-center">
+                                        NO MATCH ✗
+                                      </div>
+                                    </div>
+                                  </div>
+                                  <div className="border-t border-zinc-800/60 bg-zinc-900/40 px-3 py-1.5 text-[10px] font-mono text-zinc-400 flex items-center gap-1.5">
+                                    <span className="text-rose-400/90 font-bold">ℹ</span>
+                                    <span>Official shortlist roster · Candidate registration ID was not selected for this round</span>
+                                  </div>
                                 </div>
                               );
                             })()}

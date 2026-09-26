@@ -9,8 +9,10 @@ import {
   isInvalidCompanyName,
   extractCompanyAliases,
 } from '@/lib/sync/classifier';
-import { cleanRoleTitle, extractDriveNumber, extractEvents, extractJobDetails, extractTravelRequirement } from '@/lib/sync/events';
+import { cleanRoleTitle, extractDriveNumber, extractEvents, extractJobDetails, extractLatestTravelRequirement, extractTravelRequirement } from '@/lib/sync/events';
 import { isFuzzyCompanyMatch } from '@/lib/sync/engine';
+import { recoverTruncatedEmailBodies } from '@/lib/sync/email-body-recovery';
+import { refreshTravelModeNote } from '@/lib/utils';
 import {
   buildCircularCatalog,
   loadAllDriveResolutions,
@@ -18,7 +20,7 @@ import {
 } from '@/lib/sync/drive-correlator';
 
 export const dynamic = 'force-dynamic';
-export const maxDuration = 300; // 300s — maximum allowed on Vercel Fluid Compute (Hobby & Pro)
+export const maxDuration = 300; // 300s â€” maximum allowed on Vercel Fluid Compute (Hobby & Pro)
 
 /**
  * Re-indexes all stored emails using the strict 2-tier architecture:
@@ -33,20 +35,24 @@ export const maxDuration = 300; // 300s — maximum allowed on Vercel Fluid Comp
  * companies of a user by loading ALL their emails at once and doing holistic analysis.
  *
  * This is the same computation that happens at the end of performReprocess but runs
- * standalone — called from the sync engine after all pages complete to correct any
+ * standalone â€” called from the sync engine after all pages complete to correct any
  * status errors from incremental per-email processing.
  */
 export async function recalculateApplicationStatuses(
   userId: string,
   onProgress?: (p: { step: number; totalSteps: number; message: string }) => void,
-  options?: { deepGSheetScan?: boolean; targetPlacementDriveIds?: string[] }
+  options?: {
+    deepGSheetScan?: boolean;
+    targetPlacementDriveIds?: string[];
+    recalculateStatusesFromRemainingEvidence?: boolean;
+  }
 ): Promise<{ updatedCount: number; results: Array<{ company: string; status: string; role?: string | null; ctc?: string | null }> }> {
   const supabase = createAdminClient();
 
   onProgress?.({
     step: 5,
     totalSteps: 5,
-    message: `Recalculating application stages, CTCs & calendar events for official drives…`,
+    message: `Recalculating application stages, CTCs & calendar events for official drivesâ€¦`,
   });
 
   const { data: userData } = await supabase
@@ -60,37 +66,79 @@ export async function recalculateApplicationStatuses(
 
   if (!userEmail) return { updatedCount: 0, results: [] };
 
+  // Preload college_emails by RFC message ID for rows whose foreign-key link is missing.
+  const { data: canonicalsWithBody } = await supabase
+    .from('college_emails')
+    .select('id, message_id, body_text, body_snippet')
+    .not('message_id', 'is', null)
+    .or('body_text.not.is.null,body_snippet.not.is.null');
+
+  const canonicalByMsgId = new Map<string, string>();
+  for (const c of canonicalsWithBody || []) {
+    const text = c.body_text || c.body_snippet || '';
+    if (text) {
+      if (c.message_id && !canonicalByMsgId.has(c.message_id.toLowerCase().trim())) {
+        canonicalByMsgId.set(c.message_id.toLowerCase().trim(), text);
+      }
+    }
+  }
+
   // Fetch all emails for this user (paginated)
   const allEmails: Array<{
     id: string;
     subject: string | null;
     sender: string | null;
-     body_snippet: string | null;
-     canonical_email_id: string | null;
-     canonical_emails?: { body_text: string | null; body_snippet: string | null }[] | null;
+    body_snippet: string | null;
+    canonical_email_id: string | null;
+    college_email_id: string | null;
+    rfc_message_id?: string | null;
     classification: string | null;
     placement_drive_id: string | null;
     received_at: string | null;
+    gmail_account_id?: string | null;
+    gmail_message_id?: string | null;
     assignment_state?: string | null;
+    assignment_source?: string | null;
+    has_canonical_body?: boolean;
   }> = [];
 
   const pageSize = 1000;
   let page = 0;
   while (true) {
     const { data: chunk, error: chunkErr } = await supabase
-      .from('emails')
-      .select('id, subject, sender, body_snippet, canonical_email_id, canonical_emails(body_text, body_snippet), classification, placement_drive_id, received_at, assignment_state')
+      .from('personal_emails')
+      .select('id, subject, sender, body_snippet, gmail_account_id, gmail_message_id, canonical_email_id, college_email_id, college_emails(body_text, body_snippet), rfc_message_id, classification, placement_drive_id, received_at, assignment_state, assignment_source')
       .eq('user_id', userId)
       .order('received_at', { ascending: true })
       .range(page * pageSize, (page + 1) * pageSize - 1);
 
     if (chunkErr || !chunk || chunk.length === 0) break;
-     allEmails.push(...chunk.map((email) => ({
-       ...email,
-       body_snippet: email.canonical_emails?.[0]?.body_text || email.canonical_emails?.[0]?.body_snippet || email.body_snippet,
-     })));
+    allEmails.push(...chunk.map((email: any) => {
+      const canonical = Array.isArray(email.college_emails)
+        ? email.college_emails[0]
+        : email.college_emails;
+      let fullBody = canonical?.body_text || canonical?.body_snippet || null;
+      if (!fullBody && email.rfc_message_id) {
+        fullBody = canonicalByMsgId.get(email.rfc_message_id.toLowerCase().trim()) || null;
+      }
+      const hasCanonicalBody = Boolean(fullBody && fullBody.length > 500);
+      if (!fullBody) {
+        fullBody = email.body_snippet || '';
+      }
+      return {
+        ...email,
+        body_snippet: fullBody,
+        has_canonical_body: hasCanonicalBody,
+      };
+    }));
     if (chunk.length < pageSize) break;
     page++;
+  }
+
+  const recoveredBodies = await recoverTruncatedEmailBodies(allEmails);
+  for (const email of allEmails) {
+    const recoveredBody = recoveredBodies.get(email.id);
+    if (recoveredBody) email.body_snippet = recoveredBody;
   }
 
   if (allEmails.length === 0) return { updatedCount: 0, results: [] };
@@ -105,12 +153,10 @@ export async function recalculateApplicationStatuses(
   ] = await Promise.all([
     supabase
       .from('companies')
-      .select('id, name, aliases')
-      .eq('user_id', userId),
+      .select('id, name, aliases'),
     supabase
       .from('placement_drives')
-      .select('id, company_id, drive_number, drive_name, role, created_at')
-      .eq('user_id', userId),
+      .select('id, company_id, drive_number, normalized_drive_number, drive_name, role, category, ctc, stipend, location, excluded_email_ids, created_at'),
     supabase
       .from('email_drive_links')
       .select('email_id, placement_drive_id'),
@@ -158,11 +204,10 @@ export async function recalculateApplicationStatuses(
       const { data: newDrive } = await supabase
         .from('placement_drives')
         .insert({
-          user_id: userId,
           company_id: c.id,
           drive_name: c.name,
         })
-        .select('id, company_id, drive_number, drive_name, role, created_at')
+        .select('id, company_id, drive_number, normalized_drive_number, drive_name, role, category, ctc, stipend, location, excluded_email_ids, created_at')
         .single();
       if (newDrive) {
         drivesByCompanyId.set(c.id, [newDrive]);
@@ -184,7 +229,7 @@ export async function recalculateApplicationStatuses(
         const targetDriveId = baseDrives[0]?.id;
         for (const cd of cDrives) {
           if (targetDriveId) {
-            await supabase.from('emails').update({ placement_drive_id: targetDriveId }).eq('placement_drive_id', cd.id);
+            await supabase.from('personal_emails').update({ placement_drive_id: targetDriveId }).eq('placement_drive_id', cd.id);
             await supabase.from('applications').delete().eq('placement_drive_id', cd.id);
             await supabase.from('events').delete().eq('placement_drive_id', cd.id);
             await supabase.from('notifications').delete().eq('placement_drive_id', cd.id);
@@ -208,12 +253,23 @@ export async function recalculateApplicationStatuses(
 
   const { data: candidateMatches } = await supabase
     .from('candidate_matches')
-    .select('id, match_type, email_id, matched_value, matched_round_type')
+    .select('id, match_type, email_id, college_email_id, matched_value, matched_round_type')
     .eq('user_id', userId);
+
+  const driveExclusionsMap = new Map<string, Set<string>>();
+  for (const d of (placementDrives || [])) {
+    if (Array.isArray((d as any).excluded_email_ids) && (d as any).excluded_email_ids.length > 0) {
+      driveExclusionsMap.set(d.id, new Set((d as any).excluded_email_ids));
+    }
+  }
 
   const emailsByDriveId = new Map<string, typeof allEmails>();
   for (const e of allEmails) {
-    if (e.placement_drive_id) {
+    if (e.placement_drive_id && e.assignment_source !== 'admin_unlinked' && e.classification !== 'irrelevant') {
+      const driveExcluded = driveExclusionsMap.get(e.placement_drive_id);
+      if (driveExcluded && (driveExcluded.has(e.id) || (e.canonical_email_id && driveExcluded.has(e.canonical_email_id)))) {
+        continue;
+      }
       const list = emailsByDriveId.get(e.placement_drive_id) || [];
       list.push(e);
       emailsByDriveId.set(e.placement_drive_id, list);
@@ -221,9 +277,56 @@ export async function recalculateApplicationStatuses(
   }
 
   const emailById = new Map(allEmails.map((e) => [e.id, e]));
+  
+  // Collect linked email IDs that aren't in personal_emails (college circulars)
+  const linkedCollegeEmailIds = new Set<string>();
+  for (const link of (driveLinks || [])) {
+    if (!emailById.has(link.email_id)) {
+      linkedCollegeEmailIds.add(link.email_id);
+    }
+  }
+
+  // Fetch missing college circulars
+  if (linkedCollegeEmailIds.size > 0) {
+    const { data: collegeEmails } = await supabase
+      .from('college_emails')
+      .select('id, subject, sender_email, received_at, created_at, body_snippet, body_text, classification')
+      .in('id', Array.from(linkedCollegeEmailIds));
+    
+    for (const ce of (collegeEmails || [])) {
+      const link = (driveLinks || []).find(l => l.email_id === ce.id);
+      if (!link) continue;
+      
+      const driveExcluded = driveExclusionsMap.get(link.placement_drive_id);
+      if (driveExcluded && (driveExcluded.has(ce.id) || driveExcluded.has(ce.id))) continue;
+      
+      const list = emailsByDriveId.get(link.placement_drive_id) || [];
+      if (!list.some(e => e.id === ce.id)) {
+        list.push({
+          id: ce.id,
+          subject: ce.subject,
+          sender: ce.sender_email,
+          received_at: ce.received_at || ce.created_at,
+          body_snippet: ce.body_text || ce.body_snippet || '',
+          classification: ce.classification,
+          placement_drive_id: link.placement_drive_id,
+          college_email_id: ce.id,
+          canonical_email_id: ce.id,
+          assignment_source: 'drive_link',
+          has_canonical_body: Boolean(ce.body_text && ce.body_text.length > 500),
+        });
+        emailsByDriveId.set(link.placement_drive_id, list);
+      }
+    }
+  }
+
   for (const link of (driveLinks || [])) {
     const linkedEmail = emailById.get(link.email_id);
-    if (linkedEmail) {
+    if (linkedEmail && linkedEmail.assignment_source !== 'admin_unlinked' && linkedEmail.classification !== 'irrelevant') {
+      const driveExcluded = driveExclusionsMap.get(link.placement_drive_id);
+      if (driveExcluded && (driveExcluded.has(linkedEmail.id) || (linkedEmail.canonical_email_id && driveExcluded.has(linkedEmail.canonical_email_id)))) {
+        continue;
+      }
       const list = emailsByDriveId.get(link.placement_drive_id) || [];
       if (!list.some(e => e.id === linkedEmail.id)) {
         list.push(linkedEmail);
@@ -261,7 +364,7 @@ export async function recalculateApplicationStatuses(
     onProgress?.({
       step: 5,
       totalSteps: 5,
-      message: `Recalculating application stages, CTCs & calendar events (${Math.min(bIdx + DRIVE_BATCH_SIZE, drivesToProcess.length)} / ${drivesToProcess.length})…`,
+      message: `Recalculating application stages, CTCs & calendar events (${Math.min(bIdx + DRIVE_BATCH_SIZE, drivesToProcess.length)} / ${drivesToProcess.length})â€¦`,
     });
 
     await Promise.all(
@@ -312,7 +415,7 @@ export async function recalculateApplicationStatuses(
     };
 
     for (const e of allEmails) {
-      if (!e.placement_drive_id && e.assignment_state !== 'unassigned' && e.subject && e.received_at) {
+      if (!e.placement_drive_id && e.assignment_source !== 'admin_unlinked' && e.subject && e.received_at) {
         const eTime = new Date(e.received_at).getTime();
         // RULE: Never check or include emails that arrived before this drive came!
         if (driveMinAllowedTime > 0 && eTime < driveMinAllowedTime) {
@@ -330,14 +433,17 @@ export async function recalculateApplicationStatuses(
 
     const companyEmails = driveEmails;
     const emailIds = new Set(companyEmails.map((e) => e.id));
+    const collegeEmailIds = new Set(companyEmails.map((e) => e.college_email_id || e.canonical_email_id).filter(Boolean));
     const matchedEmailIds = new Set(
       (candidateMatches || [])
         .filter((cm) => {
-          const match = cm as unknown as { email_id: string; match_type?: string; matched_value?: string | null };
-          if (!emailIds.has(match.email_id) || match.match_type === 'xlsx_applied_list') return false;
+          const match = cm as unknown as { email_id: string | null; college_email_id: string | null; match_type?: string; matched_value?: string | null };
+          const emailRef = match.email_id || match.college_email_id;
+          if (!emailRef || !emailIds.has(emailRef) && !collegeEmailIds.has(emailRef) || match.match_type === 'xlsx_applied_list') return false;
           return !/applied[\s_-]*list|opt[\s_-]*in[\s_-]*list|opt_in|registration[\s_-]*list|applied[\s_-]*(?:student|candidate)/i.test(match.matched_value || '');
         })
-        .map((cm) => (cm as unknown as { email_id: string }).email_id)
+        .map((cm) => (cm as unknown as { email_id: string | null; college_email_id: string | null }).email_id || (cm as unknown as { college_email_id: string }).college_email_id)
+        .filter(Boolean)
     );
 
     // 0. Scan any Google Sheets pubhtml shortlists in company emails for candidate matches (only when deep scan requested)
@@ -363,7 +469,10 @@ export async function recalculateApplicationStatuses(
         if (!isRelevantCandidateEmail) continue;
 
         const alreadyMatched = (candidateMatches || []).some(
-          (cm) => (cm as unknown as { email_id: string }).email_id === email.id
+          (cm) => {
+            const match = cm as unknown as { email_id: string | null; college_email_id: string | null };
+            return match.email_id === email.id || match.college_email_id === email.id;
+          }
         );
         if (alreadyMatched) continue;
 
@@ -373,7 +482,10 @@ export async function recalculateApplicationStatuses(
           if (gMatch && gMatch.matched) {
             matchedEmailIds.add(email.id);
             const matchExists = (candidateMatches || []).some(
-              (cm) => (cm as unknown as { email_id: string }).email_id === email.id
+              (cm) => {
+                const match = cm as unknown as { email_id: string | null; college_email_id: string | null };
+                return match.email_id === email.id || match.college_email_id === email.id;
+              }
             );
             if (!matchExists) {
               const { error: candidateMatchError } = await supabase.from('candidate_matches').insert({
@@ -522,6 +634,14 @@ export async function recalculateApplicationStatuses(
       if (!extractedJob.backlogRequirement && combinedDetails.backlogRequirement) extractedJob.backlogRequirement = combinedDetails.backlogRequirement;
     }
 
+    // Existing drive metadata is user-scoped; avoid borrowing similarly numbered drives
+    // from another user's placement history.
+    if (!extractedJob.ctc && drive.ctc) extractedJob.ctc = drive.ctc;
+    if (!extractedJob.stipend && drive.stipend) extractedJob.stipend = drive.stipend;
+    if (!extractedJob.location && drive.location) extractedJob.location = drive.location;
+    if (!extractedJob.role && drive.role) extractedJob.role = drive.role;
+    if (!extractedJob.category && drive.category) extractedJob.category = drive.category;
+
     // If critical job details (location, stipend, CTC) are missing because this company
     // is a role-specific record (e.g. "Zluri SDET", "Apple SDET", "Apple SRE") whose circular
     // was announced under the base brand ("Zluri", "Apple"), search user's emails for base brand circulars
@@ -623,7 +743,7 @@ export async function recalculateApplicationStatuses(
       const full = `${subj} ${body}`;
 
       // If subject explicitly announces an online test/assessment (e.g. "WorkIndia online test and selection process is scheduled"),
-      // and does NOT explicitly say "interview", it is a test round email — NOT a next round / interview email!
+      // and does NOT explicitly say "interview", it is a test round email â€” NOT a next round / interview email!
       if (/(?:online\s+)?test|assessment|coding\s+test|\bexam\b/i.test(subj) && !/interview/i.test(subj)) {
         return false;
       }
@@ -714,7 +834,7 @@ export async function recalculateApplicationStatuses(
       // 3. Merely describing duration (e.g. "Online Test: 45-60 minutes") in interview process without scheduling a date
       if (
         /(?:interview|selection|evaluation|recruitment)\s+process/i.test(full) &&
-        /online\s+test\s*[:\-–—]?\s*\d+\s*(?:mins?|minutes?)/i.test(full) &&
+        /online\s+test\s*[:\-â€“â€”]?\s*\d+\s*(?:mins?|minutes?)/i.test(full) &&
         !/(?:test|assessment)\s+(?:is\s+)?scheduled\s+(?:on|for)|\bon\s+\d{1,2}[-/.]\d{1,2}/i.test(full)
       ) {
         return false;
@@ -722,7 +842,7 @@ export async function recalculateApplicationStatuses(
 
       // 4. If email explicitly states date will be informed later and has no test date
       if (
-        /date\s+of\s+visit\s*[:\-–—]?\s*will\s+be\s+informed|will\s+be\s+informed\s+later/i.test(full) &&
+        /date\s+of\s+visit\s*[:\-â€“â€”]?\s*will\s+be\s+informed|will\s+be\s+informed\s+later/i.test(full) &&
         !/(?:test|assessment)\s+(?:is\s+)?scheduled\s+(?:on|for)|\bon\s+\d{1,2}[-/.]\d{1,2}/i.test(full)
       ) {
         return false;
@@ -733,7 +853,7 @@ export async function recalculateApplicationStatuses(
         /(?:online\s+)?(?:test|assessment|exam)\s+(?:is\s+)?scheduled\s+(?:on|for)/i.test(b) ||
         /(?:online\s+)?(?:test|assessment|exam)\s+on\s+\d{1,2}[-/.]\d{1,2}/i.test(b) ||
         /test\s+will\s+be\s+conducted\s+on\s+\d{1,2}/i.test(b) ||
-        /test\s+link\s*[:\-–—]|assessment\s+link\s*[:\-–—]|login\s+window|test\s+window\s*[:\-–—]|test\s+credentials/i.test(b) ||
+        /test\s+link\s*[:\-â€“â€”]|assessment\s+link\s*[:\-â€“â€”]|login\s+window|test\s+window\s*[:\-â€“â€”]|test\s+credentials/i.test(b) ||
         /(?:codility|hackerrank|mettl)\s+(?:test|assessment|link)/i.test(full);
 
       return hasBodySchedule;
@@ -765,15 +885,17 @@ export async function recalculateApplicationStatuses(
           }
           return true;
         })
-        .map((m) => (m as unknown as { email_id: string }).email_id)
+        .map((m) => (m as unknown as { email_id: string | null; college_email_id: string | null }).email_id || (m as unknown as { college_email_id: string }).college_email_id)
         .filter(Boolean)
     );
 
     const roundForMatchedEmail = (emailId: string, round: 'test' | 'interview' | 'selected') =>
-      (candidateMatches || []).some((m) =>
-        m.email_id === emailId &&
-        (m as typeof m & { matched_round_type?: string | null }).matched_round_type === round &&
-        m.match_type !== 'xlsx_applied_list');
+      (candidateMatches || []).some((m) => {
+        const match = m as unknown as { email_id: string | null; college_email_id: string | null; matched_round_type?: string | null; match_type?: string };
+        return (match.email_id === emailId || match.college_email_id === emailId) &&
+          match.matched_round_type === round &&
+          match.match_type !== 'xlsx_applied_list';
+      });
 
     const sortedSelectionEmails = [...selectionEmails].sort(
       (a, b) => (a.received_at ? new Date(a.received_at).getTime() : 0) - (b.received_at ? new Date(b.received_at).getTime() : 0)
@@ -856,9 +978,9 @@ export async function recalculateApplicationStatuses(
       (latestPositiveMatchTime > latestWithdrawalTime || hasDirectPersonalTestInvitation);
 
     // Track why the candidate got 'rejected' so getEffectiveStage can distinguish:
-    // - 'rejected' + 'Eliminated in Test Round' note  → rejected_test (wrote test, failed)
-    // - 'rejected' + 'Interviewed · Not Selected' note → rejected_interview (interviewed, not selected)
-    // - 'not_shortlisted'                              → not shortlisted for test (pre-test screening)
+    // - 'rejected' + 'Eliminated in Test Round' note  â†’ rejected_test (wrote test, failed)
+    // - 'rejected' + 'Interviewed Â· Not Selected' note â†’ rejected_interview (interviewed, not selected)
+    // - 'not_shortlisted'                              â†’ not shortlisted for test (pre-test screening)
     let computedRejectionNote: string | null = null;
 
     if (isWithdrawn && !genuinePositiveMatchAfterWithdrawal) {
@@ -884,11 +1006,11 @@ export async function recalculateApplicationStatuses(
        if (!hasUpcomingInterviewEvent && subsequentSelectionEmails.length > 0) {
         computedStatus = 'rejected';
         // User was interviewed (matched in next-round / interview shortlist) but a
-        // selection list came out afterwards without them → Interviewed · Not Selected
-        computedRejectionNote = 'Interviewed · Not Selected';
+        // selection list came out afterwards without them â†’ Interviewed Â· Not Selected
+        computedRejectionNote = 'Interviewed Â· Not Selected';
       } else if (!hasUpcomingInterviewEvent && interviewTime > 0 && (Date.now() - interviewTime) > 14 * 24 * 60 * 60 * 1000) {
         computedStatus = 'rejected';
-        computedRejectionNote = 'Interviewed · Not Selected';
+        computedRejectionNote = 'Interviewed Â· Not Selected';
       } else if (!hasUpcomingInterviewEvent && interviewTime > 0 && interviewTime < Date.now()) {
         computedStatus = 'interview_completed';
       } else {
@@ -914,7 +1036,7 @@ export async function recalculateApplicationStatuses(
        if (!hasUpcomingTestEvent && subsequentPostTestEmails.length > 0) {
         computedStatus = 'rejected';
         // User was shortlisted for the test (matched in test email) but a post-test
-        // round email came without them → Eliminated in Test Round
+        // round email came without them â†’ Eliminated in Test Round
         computedRejectionNote = 'Eliminated in Test Round';
       } else if (!hasUpcomingTestEvent && selectionEmails.some((e) =>
         Boolean(e.received_at && new Date(e.received_at).getTime() > testMatchTime + 30 * 60 * 1000))) {
@@ -938,7 +1060,7 @@ export async function recalculateApplicationStatuses(
         if (hasAnyMatchInTestEmails) {
           computedStatus = 'test_scheduled';
         } else {
-          // No match in test emails → likely a general schedule announcement without
+          // No match in test emails â†’ likely a general schedule announcement without
           // personal shortlist confirmation. Stay as not_shortlisted if a test existed.
           computedStatus = 'not_shortlisted';
         }
@@ -970,7 +1092,7 @@ export async function recalculateApplicationStatuses(
 
     const existingApp = appsByDriveId.get(drive.id) || null;
 
-    // GUARD: Reprocess only has access to email subjects + body snippets — it cannot
+    // GUARD: Reprocess only has access to email subjects + body snippets â€” it cannot
     // re-scan Excel attachments. The live sync (status-engine) CAN scan attachments and
     // correctly marks candidates as not_shortlisted when their ID is absent from a
     // shortlist Excel. Without this guard, reprocess would overwrite a sync-computed
@@ -978,6 +1100,7 @@ export async function recalculateApplicationStatuses(
     // Preserve not_shortlisted unless there is concrete positive evidence of shortlisting.
     if (
       !existingApp?.manual_override &&
+      !options?.recalculateStatusesFromRemainingEvidence &&
       existingApp?.status === 'not_shortlisted' &&
       ['test_scheduled', 'ppt_scheduled', 'applied'].includes(computedStatus) &&
       !isMatchedInTest &&
@@ -1018,7 +1141,7 @@ export async function recalculateApplicationStatuses(
       hasPriorCandidateEvidence;
     const monotonicStatus =
       existingApp?.manual_override ||
-      (!isPhantomRejection && existingApp?.status && computedPriority < existingPriority && !isEvidenceBackedTerminal)
+      (!options?.recalculateStatusesFromRemainingEvidence && !isPhantomRejection && existingApp?.status && computedPriority < existingPriority && !isEvidenceBackedTerminal)
         ? existingApp.status
         : computedStatus;
 
@@ -1027,26 +1150,29 @@ export async function recalculateApplicationStatuses(
     let finalRole = existingApp?.manual_override ? existingApp.role : extractedJob.role;
     finalRole = cleanRoleTitle(finalRole);
 
-    let driveTravelFromEmails = mainEmailText ? extractTravelRequirement(mainEmailText) : null;
-    if (!driveTravelFromEmails || driveTravelFromEmails === 'online') {
-      for (const e of [...activeDriveEmails].reverse()) {
-        const tr = extractTravelRequirement(`${e.subject || ''}\n${e.body_snippet || ''}`);
-        if (tr && tr !== 'online') {
-          driveTravelFromEmails = tr;
-          break;
-        }
-      }
-    }
-    const travelReq = driveTravelFromEmails || extractTravelRequirement(combinedEmailText);
+    // Travel/venue instructions evolve over the drive lifecycle. Prefer the newest
+    // active email that explicitly states a venue/mode, rather than freezing the
+    // value from the original registration circular.
+    const newestFirstTravelTexts = [...activeDriveEmails]
+      .sort((a, b) => new Date(b.received_at || 0).getTime() - new Date(a.received_at || 0).getTime())
+      .map((email) => `${email.subject || ''}\n${email.body_snippet || ''}`);
+    const travelReq = extractLatestTravelRequirement(newestFirstTravelTexts) ||
+      (mainEmailText ? extractTravelRequirement(mainEmailText) : null) ||
+      extractTravelRequirement(combinedEmailText);
     const existingTravel = existingApp?.notes ? existingApp.notes.split('\n')[0]?.trim() : null;
     const hasCampusLabEvent = allExtractedEvents.some((e) => /campus\s*\/\s*offline|\blc\s*\d+\b|\blab\b/i.test(e.venue || ''));
     const hasOnlineEvent = allExtractedEvents.some((e) => e.mode === 'online' || /online|virtual/i.test(e.venue || ''));
 
-    let finalTravel = existingApp?.manual_override ? (existingApp?.notes || null) : travelReq;
+    const shouldRefreshTravelMode = Boolean(
+      options?.recalculateStatusesFromRemainingEvidence && travelReq
+    );
+    let finalTravel = existingApp?.manual_override && !shouldRefreshTravelMode
+      ? (existingApp?.notes || null)
+      : travelReq;
     if (!finalTravel) {
       if (hasCampusLabEvent) finalTravel = 'bhopal';
       else if (hasOnlineEvent) finalTravel = 'online';
-      else if (existingTravel && ['bhopal', 'bhopal_lab', 'online', 'vellore', 'chennai', 'ap'].includes(existingTravel)) {
+      else if (existingTravel && ['bhopal', 'bhopal_lab', 'online', 'vellore', 'chennai', 'ap', 'respective_campus'].includes(existingTravel)) {
         finalTravel = existingTravel;
       }
     }
@@ -1058,7 +1184,12 @@ export async function recalculateApplicationStatuses(
     // - Otherwise: travel note is used as-is.
     let finalNotes: string | null;
     if (existingApp?.manual_override) {
-      finalNotes = existingApp?.notes || null;
+      const previousNotes = existingApp?.notes || '';
+      if (shouldRefreshTravelMode && travelReq) {
+        finalNotes = refreshTravelModeNote(previousNotes, travelReq);
+      } else {
+        finalNotes = existingApp?.notes || null;
+      }
     } else if (computedRejectionNote) {
       // Rejection context is the primary note; optionally append travel mode
       finalNotes = finalTravel
@@ -1292,7 +1423,7 @@ export async function performReprocess(
   onProgress?.({
     step: 1,
     totalSteps: 5,
-    message: 'Cleaning recipient matches & fetching stored circulars…',
+    message: 'Cleaning recipient matches & fetching stored circularsâ€¦',
   });
 
   // Fetch user details
@@ -1336,7 +1467,20 @@ export async function performReprocess(
     }
   }
 
-  // 2. Fetch ALL stored emails for this user with automatic pagination
+  // 2. Fetch ALL stored emails for this user with automatic pagination.
+  // Full content lives in college_emails after body_snippet was capped at 500 chars.
+  const { data: canonicalBodies } = await supabase
+    .from('college_emails')
+    .select('message_id, body_text, body_snippet')
+    .not('message_id', 'is', null)
+    .or('body_text.not.is.null,body_snippet.not.is.null');
+  const bodyByMessageId = new Map<string, string>();
+  for (const canonical of canonicalBodies || []) {
+    const key = canonical.message_id?.toLowerCase().trim();
+    const text = canonical.body_text || canonical.body_snippet;
+    if (key && text && !bodyByMessageId.has(key)) bodyByMessageId.set(key, text);
+  }
+
   const emails: Array<{
     id: string;
     subject: string | null;
@@ -1345,22 +1489,45 @@ export async function performReprocess(
     classification: string | null;
     placement_drive_id: string | null;
     received_at: string | null;
+    assignment_state?: string | null;
+    assignment_source?: string | null;
+    rfc_message_id?: string | null;
+    canonical_email_id?: string | null;
+    college_email_id?: string | null;
+    is_relevant?: boolean | null;
+    gmail_account_id?: string | null;
+    gmail_message_id?: string | null;
   }> = [];
 
   const pageSize = 1000;
   let page = 0;
   while (true) {
     const { data: chunk, error: chunkErr } = await supabase
-      .from('emails')
-      .select('id, subject, sender, body_snippet, classification, placement_drive_id, received_at')
+      .from('personal_emails')
+      .select('id, subject, sender, body_snippet, gmail_account_id, gmail_message_id, canonical_email_id, college_email_id, is_relevant, college_emails(body_text, body_snippet), rfc_message_id, classification, placement_drive_id, received_at, assignment_state, assignment_source')
       .eq('user_id', userId)
       .order('received_at', { ascending: true })
       .range(page * pageSize, (page + 1) * pageSize - 1);
 
     if (chunkErr || !chunk || chunk.length === 0) break;
-    emails.push(...chunk);
+    emails.push(...chunk.map((email: any) => {
+      const canonical = Array.isArray(email.college_emails) ? email.college_emails[0] : email.college_emails;
+      let fullBody = canonical?.body_text || canonical?.body_snippet ||
+        (email.rfc_message_id ? bodyByMessageId.get(email.rfc_message_id.toLowerCase().trim()) : null) || null;
+      const hasCanonicalBody = Boolean(fullBody && fullBody.length > 500);
+      if (!fullBody) {
+        fullBody = email.body_snippet || '';
+      }
+      return { ...email, body_snippet: fullBody, has_canonical_body: hasCanonicalBody };
+    }));
     if (chunk.length < pageSize) break;
     page++;
+  }
+
+  const recoveredBodies = await recoverTruncatedEmailBodies(emails);
+  for (const email of emails) {
+    const recoveredBody = recoveredBodies.get(email.id);
+    if (recoveredBody) email.body_snippet = recoveredBody;
   }
 
   if (emails.length === 0) {
@@ -1370,10 +1537,11 @@ export async function performReprocess(
   // Separate emails into NeoPAT emails (noreply.cdcinfo@vitstudent.ac.in) and College circulars
   const isNeoPatSender = (sender: string) => /noreply\.cdcinfo@vitstudent\.ac\.in/i.test(sender);
 
-  const neoPatEmails = emails.filter((e) => isNeoPatSender(e.sender || ''));
+  const processableEmails = emails.filter((email) => email.assignment_source !== 'admin_unlinked');
+  const neoPatEmails = processableEmails.filter((e) => isNeoPatSender(e.sender || ''));
   // Process NeoPAT circulars chronologically so registration & eligibility emails establish drive identity
   neoPatEmails.sort((a, b) => new Date(a.received_at || 0).getTime() - new Date(b.received_at || 0).getTime());
-  const collegeEmails = emails.filter((e) => !isNeoPatSender(e.sender || ''));
+  const collegeEmails = processableEmails.filter((e) => !isNeoPatSender(e.sender || ''));
 
   // 2.5 Dynamic Timing Correlation Setup
   const circularCatalog = buildCircularCatalog(collegeEmails);
@@ -1388,19 +1556,17 @@ export async function performReprocess(
   onProgress?.({
     step: 2,
     totalSteps: 5,
-    message: `Analyzing ${neoPatEmails.length} official NeoPAT drives & resolving track numbers…`,
+    message: `Analyzing ${neoPatEmails.length} official NeoPAT drives & resolving track numbersâ€¦`,
   });
 
-  // Pre-load all existing user companies and drives into memory to avoid thousands of slow DB roundtrips
+  // Pre-load all existing global companies and drives into memory to avoid thousands of slow DB roundtrips
   const { data: initialDbCompanies } = await supabase
     .from('companies')
-    .select('id, name, aliases, updated_at')
-    .eq('user_id', userId);
+    .select('id, name, aliases, updated_at');
 
   const { data: initialDbDrives } = await supabase
     .from('placement_drives')
-    .select('id, company_id, drive_number, normalized_drive_number, drive_name, role, created_at, source_email_id')
-    .eq('user_id', userId);
+    .select('id, company_id, drive_number, normalized_drive_number, drive_name, role, excluded_email_ids, created_at, source_email_id');
 
   const companiesById = new Map<string, any>();
   const companiesByName = new Map<string, any>();
@@ -1451,7 +1617,7 @@ export async function performReprocess(
       onProgress?.({
         step: 2,
         totalSteps: 5,
-        message: `Analyzing official NeoPAT drives (${idx + 1}/${neoPatEmails.length})…`,
+        message: `Analyzing official NeoPAT drives (${idx + 1}/${neoPatEmails.length})â€¦`,
       });
     }
 
@@ -1532,7 +1698,6 @@ export async function performReprocess(
         let { data: newComp, error: insertError } = await supabase
           .from('companies')
           .insert({
-            user_id: userId,
             name: normalized,
             aliases: generatedAliases,
           })
@@ -1543,7 +1708,6 @@ export async function performReprocess(
           const { data: existingByName } = await supabase
             .from('companies')
             .select('id, name, aliases')
-            .eq('user_id', userId)
             .eq('name', normalized)
             .maybeSingle();
           if (existingByName) newComp = existingByName;
@@ -1586,18 +1750,17 @@ export async function performReprocess(
                 drive_name: targetDrive.drive_name,
               });
             } else {
-              // Create brand new placement drive!
+              // Create brand new placement drive globally!
               const { data: createdDrive } = await supabase
                 .from('placement_drives')
                 .insert({
-                  user_id: userId,
                   company_id: comp.id,
                   drive_number: driveNumber,
                   normalized_drive_number: dNumLower,
                   drive_name: driveName || comp.name,
                   created_at: emailDate.toISOString(),
                 })
-                .select('id, company_id, drive_number, normalized_drive_number, drive_name, role, created_at, source_email_id')
+                .select('id, company_id, drive_number, normalized_drive_number, drive_name, role, excluded_email_ids, created_at, source_email_id')
                 .single();
               if (createdDrive) {
                 targetDrive = createdDrive;
@@ -1709,49 +1872,31 @@ export async function performReprocess(
   onProgress?.({
     step: 3,
     totalSteps: 5,
-    message: `Verified ${validDriveIdSet.size} official NeoPAT drives across ${validCompanyIdSet.size} companies. Purging unverified entries…`,
+    message: `Verified ${validDriveIdSet.size} official NeoPAT drives across ${validCompanyIdSet.size} companies. Purging unverified entriesâ€¦`,
   });
 
-  const { data: currentDbDrives } = await supabase
-    .from('placement_drives')
-    .select('id, company_id')
+  const { data: userApps } = await supabase
+    .from('applications')
+    .select('placement_drive_id')
     .eq('user_id', userId);
 
-  const orphanDriveIds = (currentDbDrives || [])
-    .filter((d) => !validDriveIdSet.has(d.id))
-    .map((d) => d.id);
+  const orphanDriveIds = (userApps || [])
+    .map((a) => a.placement_drive_id)
+    .filter((id): id is string => Boolean(id) && !validDriveIdSet.has(id));
 
   if (orphanDriveIds.length > 0) {
     await supabase.from('events').delete().eq('user_id', userId).in('placement_drive_id', orphanDriveIds);
     await supabase.from('applications').delete().eq('user_id', userId).in('placement_drive_id', orphanDriveIds);
     await supabase.from('notifications').delete().eq('user_id', userId).in('placement_drive_id', orphanDriveIds);
-    await supabase.from('email_drive_links').delete().in('placement_drive_id', orphanDriveIds);
-    await supabase.from('emails').update({ placement_drive_id: null }).in('placement_drive_id', orphanDriveIds);
-    await supabase.from('placement_drives').delete().in('id', orphanDriveIds);
-  }
-
-  const { data: currentDbCompanies } = await supabase
-    .from('companies')
-    .select('id, name')
-    .eq('user_id', userId);
-
-  const deletedCompanyNames: string[] = [];
-  const invalidCompIds = (currentDbCompanies || [])
-    .filter((comp) => !validCompanyIdSet.has(comp.id))
-    .map((comp) => {
-      deletedCompanyNames.push(comp.name);
-      return comp.id;
-    });
-
-  if (invalidCompIds.length > 0) {
-    await supabase.from('companies').delete().eq('user_id', userId).in('id', invalidCompIds);
+    await supabase.from('email_drive_links').delete().eq('user_id', userId).in('placement_drive_id', orphanDriveIds);
+    await supabase.from('personal_emails').update({ placement_drive_id: null }).eq('user_id', userId).in('placement_drive_id', orphanDriveIds);
   }
 
   // 5. Phase 3: Match College Emails against Official NeoPAT Placement Drives ONLY
   onProgress?.({
     step: 4,
     totalSteps: 5,
-    message: `Matching ${collegeEmails.length} college circulars, test links & shortlists…`,
+    message: `Matching ${collegeEmails.length} college circulars, test links & shortlistsâ€¦`,
   });
 
   let collegeLinkedCount = 0;
@@ -1759,6 +1904,9 @@ export async function performReprocess(
   const collegeDriveLinks: Array<{ user_id: string; email_id: string; placement_drive_id: string; link_type: string; assignment_source: string; confidence: string }> = [];
 
   for (const email of collegeEmails) {
+    if (email.assignment_source === 'admin_unlinked' || email.classification === 'irrelevant' || email.is_relevant === false) {
+      continue;
+    }
     const subject = email.subject || '';
     const sender = email.sender || '';
     const bodySnippet = email.body_snippet || '';
@@ -1786,7 +1934,15 @@ export async function performReprocess(
 
     // 1. Primary Identity Anchor: Drive Number match
     if (driveNumber && driveByNumber.has(driveNumber.toLowerCase().trim())) {
-      matchedDriveId = driveByNumber.get(driveNumber.toLowerCase().trim())!.id;
+      const cand = driveByNumber.get(driveNumber.toLowerCase().trim())!;
+      const isExcluded = Array.isArray(cand.excluded_email_ids) && (
+        cand.excluded_email_ids.includes(email.id) ||
+        (email.canonical_email_id && cand.excluded_email_ids.includes(email.canonical_email_id)) ||
+        (email.college_email_id && cand.excluded_email_ids.includes(email.college_email_id))
+      );
+      if (!isExcluded) {
+        matchedDriveId = cand.id;
+      }
     } else {
       let matchedCompId: string | null = null;
       if (companyName) {
@@ -1820,7 +1976,13 @@ export async function performReprocess(
       }
 
       if (matchedCompId) {
-        const compDrives = drivesByCompanyId.get(matchedCompId) || [];
+        let compDrives = (drivesByCompanyId.get(matchedCompId) || []).filter((d: any) => {
+          if (!Array.isArray(d.excluded_email_ids)) return true;
+          if (d.excluded_email_ids.includes(email.id)) return false;
+          if (email.canonical_email_id && d.excluded_email_ids.includes(email.canonical_email_id)) return false;
+          if (email.college_email_id && d.excluded_email_ids.includes(email.college_email_id)) return false;
+          return true;
+        });
         const isReg = /registration/i.test(subject);
         const graceMs = isReg ? 24 * 60 * 60 * 1000 : 0;
 
@@ -1915,7 +2077,7 @@ export async function performReprocess(
     for (let i = 0; i < ids.length; i += 500) {
       const chunk = ids.slice(i, i + 500);
       await supabase
-        .from('emails')
+        .from('personal_emails')
         .update({
           placement_drive_id: compId,
           classification: cls as any,
@@ -1963,7 +2125,7 @@ export async function performReprocess(
     success: true,
     message: `Successfully re-indexed: ${validDriveIdSet.size} official NeoPAT drives tracked`,
     neoPatDrivesCount: validDriveIdSet.size,
-    deletedNonNeoPatCompanies: deletedCompanyNames,
+    deletedNonNeoPatCompanies: [],
     collegeCircularsLinked: collegeLinkedCount,
     collegeCircularsDiscarded: collegeDiscardedCount,
     updatedApplications: updatedAppsCount,
@@ -2055,7 +2217,7 @@ export async function POST(req: Request) {
         }, 2000);
 
         try {
-          sendEvent('start', { message: 'Analyzing placement archive & re-indexing drives…' });
+          sendEvent('start', { message: 'Analyzing placement archive & re-indexing drivesâ€¦' });
 
           const statusResult = await performReprocess(userId!, (progress) => {
             sendEvent('progress', progress);
