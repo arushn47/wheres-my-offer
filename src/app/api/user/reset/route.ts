@@ -28,9 +28,7 @@ export async function POST() {
     await supabase.from('notifications').delete().eq('user_id', userId);
     await supabase.from('applications').delete().eq('user_id', userId);
     await supabase.from('email_drive_links').delete().eq('user_id', userId);
-    await supabase.from('emails').delete().eq('user_id', userId);
-    await supabase.from('placement_drives').delete().eq('user_id', userId);
-    await supabase.from('companies').delete().eq('user_id', userId);
+    await supabase.from('personal_emails').delete().eq('user_id', userId);
     await supabase.from('sync_pages').delete().eq('user_id', userId);
     await supabase.from('sync_state').delete().eq('user_id', userId);
 

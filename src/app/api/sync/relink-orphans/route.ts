@@ -21,16 +21,14 @@ export async function POST() {
   const supabase = createAdminClient();
   const userId = session.userId;
 
-  // 1. Fetch all companies and placement drives for this user
+  // 1. Fetch all companies and placement drives globally
   const [{ data: companies }, { data: drives }] = await Promise.all([
     supabase
       .from('companies')
-      .select('id, name, aliases')
-      .eq('user_id', userId),
+      .select('id, name, aliases'),
     supabase
       .from('placement_drives')
-      .select('id, company_id, drive_number')
-      .eq('user_id', userId),
+      .select('id, company_id, drive_number'),
   ]);
 
   if (!companies || companies.length === 0) {
@@ -46,8 +44,8 @@ export async function POST() {
 
   // 2. Fetch all emails for this user
   const { data: allEmails, error } = await supabase
-    .from('emails')
-    .select('id, subject, sender, placement_drive_id')
+    .from('personal_emails')
+    .select('id, subject, sender, placement_drive_id, assignment_source')
     .eq('user_id', userId);
 
   if (error || !allEmails || allEmails.length === 0) {
@@ -58,6 +56,10 @@ export async function POST() {
   const details: { subject: string; company: string }[] = [];
 
   for (const email of allEmails) {
+    // This endpoint is an automated repair pass, not an admin override. Respect explicit
+    // admin unlink decisions; only the admin link endpoint may restore these emails.
+    if (email.assignment_source === 'admin_unlinked') continue;
+
     const extractedName = extractCompanyName(email.subject || '', email.sender || '');
     if (!extractedName) continue;
 
@@ -127,8 +129,12 @@ export async function POST() {
 
       if (targetDrive && targetDrive.id !== email.placement_drive_id) {
         await supabase
-          .from('emails')
-          .update({ placement_drive_id: targetDrive.id })
+          .from('personal_emails')
+          .update({
+            placement_drive_id: targetDrive.id,
+            assignment_state: 'assigned',
+            assignment_source: 'relink_orphans',
+          })
           .eq('id', email.id);
 
         await supabase

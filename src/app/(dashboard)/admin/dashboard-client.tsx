@@ -20,6 +20,7 @@ import {
 } from 'lucide-react';
 import { timeAgo, cn } from '@/lib/utils';
 import ReprocessProgressToast, { ReprocessProgressState } from '@/components/admin/reprocess-progress-toast';
+import { appToast } from '@/components/ui/toast';
 
 interface AdminDrive {
   driveKey: string;
@@ -220,9 +221,11 @@ export default function DashboardClient() {
                     : null
                 );
 
+                const successText = `Global reprocess complete: ${totalStudents} students evaluated, ${totalApps} application stage(s) re-evaluated.`;
+                appToast.success('Global reprocess complete', successText, undefined, 5000);
                 setFeedbackMessage({
                   type: 'success',
-                  text: `Global reprocess complete: ${totalStudents} students evaluated, ${totalApps} application stage(s) re-evaluated.`,
+                  text: successText,
                 });
               } else if (event === 'error') {
                 throw new Error(data.message || 'Global reprocess failed');
@@ -235,6 +238,7 @@ export default function DashboardClient() {
       }
       fetchDashboardData();
     } catch (err: any) {
+      appToast.error('Global reprocess failed', err.message || 'Reprocess all failed', undefined, 6000);
       setFeedbackMessage({ type: 'error', text: err.message || 'Reprocess all failed' });
       setReprocessProgress(null);
     } finally {

@@ -29,8 +29,7 @@ export default async function AnalyticsPage() {
   ] = await Promise.all([
     supabase
       .from('placement_drives')
-      .select('id, company_id, drive_number, drive_name, role, category, ctc, stipend, location')
-      .eq('user_id', session.userId),
+      .select('id, company_id, drive_number, drive_name, role, category, ctc, stipend, location'),
     supabase
       .from('applications')
       .select('id, placement_drive_id, status, role, category, ctc, stipend, location, notes, manual_override, applied_at, last_updated, registration_deadline')
@@ -42,15 +41,14 @@ export default async function AnalyticsPage() {
       .order('start_time', { ascending: true }),
     supabase
       .from('companies')
-      .select('id, name')
-      .eq('user_id', session.userId),
+      .select('id, name'),
     supabase
-      .from('emails')
+      .from('personal_emails')
       .select('id', { count: 'exact', head: true })
       .eq('user_id', session.userId),
     supabase
       .from('candidate_matches')
-      .select('id, email_id, placement_drive_id')
+      .select('id, email_id, college_email_id, placement_drive_id')
       .eq('user_id', session.userId)
       .neq('match_type', 'xlsx_applied_list'),
     supabase

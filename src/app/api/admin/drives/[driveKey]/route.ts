@@ -55,7 +55,7 @@ export async function PATCH(
     // 1. Find all matching placement_drives
     let driveQuery = supabase
       .from('placement_drives')
-      .select('id, user_id, company_id, drive_number, normalized_drive_number, drive_name');
+      .select('id, company_id, drive_number, normalized_drive_number, drive_name');
 
     if (searchDriveNumber) {
       driveQuery = driveQuery.or(`drive_number.eq.${searchDriveNumber},normalized_drive_number.eq.${searchDriveNumber}`);

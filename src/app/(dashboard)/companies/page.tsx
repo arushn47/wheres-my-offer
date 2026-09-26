@@ -26,17 +26,16 @@ export default async function CompaniesPage() {
     { data: events },
     { data: matches },
     { data: accounts },
+    { data: sharedDrives },
   ] = await Promise.all([
     supabase
       .from('companies')
       .select('id, name, aliases, updated_at')
-      .eq('user_id', session.userId)
       .order('updated_at', { ascending: false }),
 
     supabase
       .from('placement_drives')
-      .select('id, company_id, drive_number, normalized_drive_number, drive_name, role, category, ctc, stipend, location, created_at, updated_at')
-      .eq('user_id', session.userId),
+      .select('id, company_id, drive_number, normalized_drive_number, drive_name, role, category, ctc, stipend, location, created_at, updated_at'),
 
     supabase
       .from('applications')
@@ -59,6 +58,11 @@ export default async function CompaniesPage() {
       .from('gmail_accounts')
       .select('email, account_type')
       .eq('user_id', session.userId),
+
+    supabase
+      .from('placement_drives')
+      .select('normalized_drive_number, drive_number, role, category, ctc, stipend, location')
+      .or('ctc.not.is.null,location.not.is.null,stipend.not.is.null,role.not.is.null'),
   ]);
 
   const collegeAccount = accounts?.find((a) => a.account_type === 'college');
@@ -67,13 +71,30 @@ export default async function CompaniesPage() {
   // Maps for efficient lookups
   const compMap = new Map((companies || []).map((comp) => [comp.id, comp]));
   
+  // Shared metadata map across all placement drives in the DB (for matching drive numbers)
+  const sharedMetaMap = new Map<string, { role?: string | null; category?: string | null; ctc?: string | null; stipend?: string | null; location?: string | null }>();
+  for (const sd of (sharedDrives || [])) {
+    const num = sd.normalized_drive_number || sd.drive_number;
+    if (!num) continue;
+    const key = num.toLowerCase().trim();
+    const existing = sharedMetaMap.get(key) || {};
+    if (!existing.ctc && sd.ctc) existing.ctc = sd.ctc;
+    if (!existing.stipend && sd.stipend) existing.stipend = sd.stipend;
+    if (!existing.location && sd.location) existing.location = sd.location;
+    if (!existing.role && sd.role) existing.role = sd.role;
+    if (!existing.category && sd.category) existing.category = sd.category;
+    sharedMetaMap.set(key, existing);
+  }
+  
   const nowIso = new Date().toISOString();
 
-  // 1. Combine placement_drives, legacy applications, and companies without drives into unified entities
+  // 1. Combine placement_drives and legacy applications for this user into unified entities
   const entities: { type: 'drive' | 'legacy_app' | 'company_only', drive: any, app: any, company?: any, entityId: string }[] = [];
+  const userDriveIdSet = new Set<string>((applications || []).map((a: any) => a.placement_drive_id).filter(Boolean));
   
   if (placementDrives) {
     for (const drive of placementDrives) {
+      if (!userDriveIdSet.has(drive.id)) continue;
       const app = (applications || []).find((a: any) => a.placement_drive_id === drive.id);
       entities.push({
         type: 'drive',
@@ -92,22 +113,6 @@ export default async function CompaniesPage() {
           drive: null,
           app,
           entityId: app.id,
-        });
-      }
-    }
-  }
-
-  // Include any company that doesn't have a placement drive yet so all 70 companies are represented
-  const companiesWithDrives = new Set((placementDrives || []).map((d: any) => d.company_id));
-  if (companies) {
-    for (const comp of companies) {
-      if (!companiesWithDrives.has(comp.id)) {
-        entities.push({
-          type: 'company_only',
-          drive: null,
-          app: null,
-          company: comp,
-          entityId: comp.id,
         });
       }
     }
@@ -190,6 +195,9 @@ export default async function CompaniesPage() {
     const comp = companyId ? compMap.get(companyId) : undefined;
     const effectiveLatestDate = drive?.updated_at || app?.last_updated || comp?.updated_at || drive?.created_at || new Date().toISOString();
     
+    const normNum = drive?.normalized_drive_number || drive?.drive_number;
+    const shared = normNum ? sharedMetaMap.get(normNum.toLowerCase().trim()) : undefined;
+
     return {
       id: comp?.id || companyId || entityId, 
       appId: app ? app.id : undefined,
@@ -204,11 +212,11 @@ export default async function CompaniesPage() {
       application: app ? {
         id: app.id,
         status: app.status,
-        role: app.role || drive?.role || null,
-        category: app.category || drive?.category || null,
-        ctc: app.ctc || drive?.ctc || null,
-        stipend: app.stipend || drive?.stipend || null,
-        location: app.location || drive?.location || null,
+        role: app.role || drive?.role || shared?.role || null,
+        category: app.category || drive?.category || shared?.category || null,
+        ctc: app.ctc || drive?.ctc || shared?.ctc || null,
+        stipend: app.stipend || drive?.stipend || shared?.stipend || null,
+        location: app.location || drive?.location || shared?.location || null,
         notes: app.notes || null,
         manual_override: app.manual_override || false,
         applied_at: app.applied_at || null,
@@ -218,11 +226,11 @@ export default async function CompaniesPage() {
         // Dummy unapplied application to show drive details
         id: '',
         status: 'not_applied',
-        role: drive?.role || null,
-        category: drive?.category || null,
-        ctc: drive?.ctc || null,
-        stipend: drive?.stipend || null,
-        location: drive?.location || null,
+        role: drive?.role || shared?.role || null,
+        category: drive?.category || shared?.category || null,
+        ctc: drive?.ctc || shared?.ctc || null,
+        stipend: drive?.stipend || shared?.stipend || null,
+        location: drive?.location || shared?.location || null,
         notes: null,
         manual_override: false,
         applied_at: null,

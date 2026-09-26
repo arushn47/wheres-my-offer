@@ -3,7 +3,7 @@
 import { useMemo, useState, useEffect, useRef } from 'react';
 import Link from 'next/link';
 import { AnimatePresence, motion } from 'framer-motion';
-import { appToast } from '@/lib/toast';
+import { appToast } from '@/components/ui/toast';
 import { cleanEventTitle } from '@/lib/sync/events';
 import {
   CalendarPlus,

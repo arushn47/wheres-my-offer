@@ -1,7 +1,6 @@
 'use client';
 
 import { useState, useMemo, useEffect, useRef } from 'react';
-import { useSearchParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
 import {
@@ -114,6 +113,27 @@ export const isCompanyEliminated = (comp: CompanyWithDetails): boolean => {
   if (eff.eliminatedStage !== -1) return true;
   if (isEliminatedStatus(eff.effectiveStatus)) return true;
 
+  return false;
+};
+
+/**
+ * Detects if a placement drive currently has an open registration window
+ * awaiting the student's application on NeoPAT before the deadline expires.
+ */
+export const isCompanyRegistrationOpen = (comp: CompanyWithDetails): boolean => {
+  const rawStatus = (comp.application?.status || '').toLowerCase().trim();
+  const eff = getEffectiveStage(
+    rawStatus || 'not_applied',
+    comp.latestEvent,
+    comp.events,
+    comp.application?.notes,
+    comp.application?.manual_override
+  );
+  if (eff.effectiveStatus === 'registration_open') return true;
+  if (rawStatus === 'registration_open') return true;
+  if (['not_applied', 'unknown', ''].includes(rawStatus) && hasFutureRegistrationDeadline(comp)) {
+    return true;
+  }
   return false;
 };
 
@@ -346,61 +366,28 @@ export default function CompaniesClient({
   companies,
   userCampus = 'VIT Bhopal',
 }: CompaniesClientProps) {
-  const router = useRouter();
-  const searchParams = useSearchParams();
-  const [q, setQ] = useState(searchParams.get('q') || searchParams.get('search') || '');
-  const urlFilter = searchParams.get('filter');
-  const normalizedFilter = useMemo(() => {
-    if (!urlFilter) return 'active';
-    if (urlFilter === 'test_shortlisted' || urlFilter === 'interview_shortlisted') return 'active';
-    if (urlFilter === 'eliminated') return 'not_shortlisted';
-    return urlFilter;
-  }, [urlFilter]);
-  const [filter, setFilter] = useState(normalizedFilter);
+  // Pure local React state - NO URL search params or router updates to avoid lag, dropped keystrokes, and URL churning
+  const [filter, setFilter] = useState<string>('active');
+  const [q, setQ] = useState<string>('');
 
-  const updateUrl = (newFilter: string, newQ?: string) => {
-    const params = new URLSearchParams();
-    if (newFilter) {
-      params.set('filter', newFilter);
+  // Clean any legacy/existing query params from the browser URL on mount without triggering a page reload
+  useEffect(() => {
+    if (typeof window !== 'undefined' && window.location.search) {
+      window.history.replaceState(null, '', window.location.pathname);
     }
-    const currentQ = newQ !== undefined ? newQ : q;
-    if (currentQ.trim()) {
-      params.set('q', currentQ.trim());
-    }
-    const qs = params.toString();
-    router.replace(qs ? `/companies?${qs}` : '/companies', { scroll: false });
-  };
+  }, []);
 
   const handleFilterChange = (newFilter: string) => {
     setFilter(newFilter);
-    updateUrl(newFilter, q);
   };
 
   const handleSearchChange = (val: string) => {
     setQ(val);
-    updateUrl(filter, val);
   };
 
   const handleClearSearch = () => {
     setQ('');
-    updateUrl(filter, '');
   };
-
-  useEffect(() => {
-    let currentParam = searchParams.get('filter') || 'active';
-    if (currentParam === 'test_shortlisted' || currentParam === 'interview_shortlisted') {
-      currentParam = 'active';
-    } else if (currentParam === 'eliminated') {
-      currentParam = 'not_shortlisted';
-    }
-    if (currentParam !== filter) {
-      setFilter(currentParam);
-    }
-    const currentQ = searchParams.get('q') || searchParams.get('search') || '';
-    if (currentQ !== q) {
-      setQ(currentQ);
-    }
-  }, [searchParams, filter, q]);
 
   const filteredCompanies = useMemo(() => {
     const list = companies
@@ -418,67 +405,110 @@ export default function CompaniesClient({
     if (filter === 'active') {
       const now = Date.now();
       return [...list].sort((a, b) => {
-        // 1. Any open registration deadline or confirmed upcoming round (Interview, Test, PPT) sorted by soonest date first
-        const getNextRoundTime = (comp: CompanyWithDetails) => {
-          const rawStatus = comp.application?.status || 'not_applied';
-          const effective = getEffectiveStage(
+        const getPriorityGroup = (comp: CompanyWithDetails) => {
+          // 1. Registration open
+          if (isCompanyRegistrationOpen(comp)) return 1;
+
+          const rawStatus = (comp.application?.status || 'applied').toLowerCase();
+          const eff = getEffectiveStage(
             rawStatus,
             comp.latestEvent,
             comp.events,
             comp.application?.notes,
             comp.application?.manual_override
           );
-          const registrationStillRelevant = ['not_applied', 'unknown', 'registration_open'].includes(
-            effective.effectiveStatus
-          );
-          const regDeadline = registrationStillRelevant ? getFutureRegistrationDeadline(comp) : null;
-          const compEvents = comp.events || (comp.latestEvent ? [comp.latestEvent] : []);
-          const upcoming = compEvents
-            .filter((e) => {
-              const isRound = /interview|test|coding|assessment|ppt|pre-placement|registration_deadline/i.test(
-                `${e.event_type || ''} ${e.title || ''}`
-              );
-              const t = e.start_time ? new Date(e.start_time).getTime() : 0;
-              return isRound && t > now;
-            })
-            .sort((x, y) => new Date(x.start_time!).getTime() - new Date(y.start_time!).getTime());
-
-          const nextEvtTime = upcoming.length > 0 ? new Date(upcoming[0].start_time!).getTime() : null;
-          if (regDeadline && nextEvtTime) return Math.min(regDeadline.getTime(), nextEvtTime);
-          if (regDeadline) return regDeadline.getTime();
-          return nextEvtTime;
-        };
-
-        const nextA = getNextRoundTime(a);
-        const nextB = getNextRoundTime(b);
-
-        // If both have upcoming rounds/deadlines, earliest date/time takes top priority
-        if (nextA !== null && nextB !== null) return nextA - nextB;
-        // If one has an upcoming round/deadline, it floats above non-scheduled drives
-        if (nextA !== null) return -1;
-        if (nextB !== null) return 1;
-
-        // 2. Funnel Progression Rank (Deepest in recruitment pipeline first)
-        const getRank = (comp: CompanyWithDetails) => {
-          const rawStatus = comp.application?.status || 'applied';
-          const eff = getEffectiveStage(rawStatus, comp.latestEvent, comp.events, comp.application?.notes, comp.application?.manual_override);
           const s = eff.effectiveStatus.toLowerCase();
-          if (s === 'selected' || s === 'offer' || s === 'offer_received') return 100;
-          if (s === 'interview_completed') return 90;
-          if (s === 'interview_scheduled' || s === 'interview') return 80;
-          if (s === 'test_completed') return 70;
-          if (s === 'test_scheduled' || s === 'test') return 60;
-          if (s === 'ppt_completed') return 50;
-          if (s === 'ppt_scheduled' || s === 'ppt') return 40;
-          if (s === 'registration_open') return 35;
-          return 10; // applied
+
+          // Offer / Selected celebration
+          if (['selected', 'offer', 'offer_received'].includes(s)) return 0;
+
+          // 2. Scheduled stuff (interview, test, ppt, ongoing, or future round event)
+          const compEvents = comp.events || (comp.latestEvent ? [comp.latestEvent] : []);
+          const hasUpcomingRound = compEvents.some((e) => {
+            const isRound = /interview|test|coding|assessment|ppt|pre-placement/i.test(
+              `${e.event_type || ''} ${e.title || ''}`
+            );
+            const t = e.start_time ? new Date(e.start_time).getTime() : 0;
+            return isRound && t > now;
+          });
+          const isScheduled =
+            s.includes('scheduled') ||
+            s.includes('ongoing') ||
+            ['interview', 'test', 'ppt'].includes(s) ||
+            hasUpcomingRound;
+          if (isScheduled) return 2;
+
+          // 3. Completed stuff (interview_completed, test_completed, ppt_completed)
+          if (s.includes('completed')) return 3;
+
+          // 4. Applied (applied, shortlisted)
+          return 4;
         };
 
-        const rankA = getRank(a);
-        const rankB = getRank(b);
-        if (rankB !== rankA) return rankB - rankA;
+        const groupA = getPriorityGroup(a);
+        const groupB = getPriorityGroup(b);
 
-        // 3. Secondary: drive number descending, then most recent email / applied date
+        if (groupA !== groupB) {
+          return groupA - groupB;
+        }
+
+        // Within Group 1 (Registration Open): soonest deadline first
+        if (groupA === 1) {
+          const deadA = getFutureRegistrationDeadline(a)?.getTime() ?? Infinity;
+          const deadB = getFutureRegistrationDeadline(b)?.getTime() ?? Infinity;
+          if (deadA !== deadB) return deadA - deadB;
+        }
+
+        // Within Group 2 (Scheduled stuff): soonest upcoming event date first
+        if (groupA === 2) {
+          const getNextRoundTime = (comp: CompanyWithDetails) => {
+            const compEvents = comp.events || (comp.latestEvent ? [comp.latestEvent] : []);
+            const upcoming = compEvents
+              .filter((e) => {
+                const isRound = /interview|test|coding|assessment|ppt|pre-placement/i.test(
+                  `${e.event_type || ''} ${e.title || ''}`
+                );
+                const t = e.start_time ? new Date(e.start_time).getTime() : 0;
+                return isRound && t > now;
+              })
+              .sort((x, y) => new Date(x.start_time!).getTime() - new Date(y.start_time!).getTime());
+
+            return upcoming.length > 0 ? new Date(upcoming[0].start_time!).getTime() : null;
+          };
+
+          const nextA = getNextRoundTime(a);
+          const nextB = getNextRoundTime(b);
+
+          if (nextA !== null && nextB !== null && nextA !== nextB) return nextA - nextB;
+          if (nextA !== null) return -1;
+          if (nextB !== null) return 1;
+
+          // Subscore for scheduled rounds: interview > test > ppt
+          const getScheduledRank = (comp: CompanyWithDetails) => {
+            const eff = getEffectiveStage(comp.application?.status || '', comp.latestEvent, comp.events, comp.application?.notes, comp.application?.manual_override);
+            const s = eff.effectiveStatus.toLowerCase();
+            if (s.includes('interview')) return 3;
+            if (s.includes('test')) return 2;
+            return 1;
+          };
+          const diff = getScheduledRank(b) - getScheduledRank(a);
+          if (diff !== 0) return diff;
+        }
+
+        // Within Group 3 (Completed stuff): interview_completed > test_completed > ppt_completed
+        if (groupA === 3) {
+          const getCompletedRank = (comp: CompanyWithDetails) => {
+            const eff = getEffectiveStage(comp.application?.status || '', comp.latestEvent, comp.events, comp.application?.notes, comp.application?.manual_override);
+            const s = eff.effectiveStatus.toLowerCase();
+            if (s.includes('interview')) return 3;
+            if (s.includes('test')) return 2;
+            return 1;
+          };
+          const diff = getCompletedRank(b) - getCompletedRank(a);
+          if (diff !== 0) return diff;
+        }
+
+        // Secondary tie-breaker across all groups: drive number descending, then most recent date
         const numDiff = getDriveNum(b) - getDriveNum(a);
         if (numDiff !== 0) return numDiff;
 
@@ -507,7 +537,28 @@ export default function CompaniesClient({
       });
     }
 
-    // Default for 'all', 'withdrawn', 'not_applied':
+    if (filter === 'not_applied' || filter === 'all') {
+      return [...list].sort((a, b) => {
+        // Registration Open drives always float to the top
+        const regA = isCompanyRegistrationOpen(a);
+        const regB = isCompanyRegistrationOpen(b);
+        if (regA && !regB) return -1;
+        if (!regA && regB) return 1;
+        if (regA && regB) {
+          const deadA = getFutureRegistrationDeadline(a)?.getTime() ?? Infinity;
+          const deadB = getFutureRegistrationDeadline(b)?.getTime() ?? Infinity;
+          if (deadA !== deadB) return deadA - deadB;
+        }
+
+        const numDiff = getDriveNum(b) - getDriveNum(a);
+        if (numDiff !== 0) return numDiff;
+        const dateA = new Date(a.latestEmailDate || a.updated_at || 0).getTime();
+        const dateB = new Date(b.latestEmailDate || b.updated_at || 0).getTime();
+        return dateB - dateA;
+      });
+    }
+
+    // Default for 'withdrawn':
     // Sort according to descending order of drive numbers (highest drive number first, e.g. 1324 > 1320...)
     return [...list].sort((a, b) => {
       const numDiff = getDriveNum(b) - getDriveNum(a);

@@ -19,6 +19,7 @@ import {
   Shield,
 } from 'lucide-react';
 import { timeAgo, cn } from '@/lib/utils';
+import { appToast } from '@/components/ui/toast';
 
 interface AdminDrive {
   driveKey: string;
@@ -58,7 +59,9 @@ interface DriveEmail {
   classification: string | null;
   bodySnippet: string;
   canonicalEmailId: string | null;
+  collegeEmailId?: string | null;
   isCanonical: boolean;
+  isCollegeCircular?: boolean;
   receiptCount: number;
   emailIds: string[];
   students: { userId: string; userName: string; userEmail: string }[];
@@ -84,6 +87,15 @@ export default function DrivesClient() {
   const [reprocessingDrives, setReprocessingDrives] = useState<Record<string, boolean>>({});
   const [feedbackMessage, setFeedbackMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
+  // Unlinking progress & active status state
+  const [unlinkingEmailId, setUnlinkingEmailId] = useState<string | null>(null);
+  const [unlinkingProgress, setUnlinkingProgress] = useState<{
+    emailId: string;
+    step: number;
+    stage: string;
+    studentCount: number;
+  } | null>(null);
+
   // Edit Drive Form state
   const [editingDrive, setEditingDrive] = useState<AdminDrive | null>(null);
   const [editCompanyName, setEditCompanyName] = useState('');
@@ -104,14 +116,18 @@ export default function DrivesClient() {
   const [linkingEmailId, setLinkingEmailId] = useState<string | null>(null);
   const [autoAddAlias, setAutoAddAlias] = useState(true);
 
-  const fetchDrives = async () => {
+  const fetchDrives = async (manual: boolean = false) => {
     setLoading(true);
     try {
       const res = await fetch('/api/admin/drives');
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to load drives');
       setDrives(data.drives || []);
+      if (manual) {
+        appToast.success('Drives refreshed', `Loaded ${data.drives?.length || 0} recruitment campaigns.`);
+      }
     } catch (err: any) {
+      appToast.error('Failed to load drives', err.message || 'Failed to load drives');
       setFeedbackMessage({ type: 'error', text: err.message || 'Failed to load drives' });
     } finally {
       setLoading(false);
@@ -145,22 +161,40 @@ export default function DrivesClient() {
   };
 
   const handleReprocessDrive = async (driveKey: string) => {
+    const targetDrive = drives.find((d) => d.driveKey === driveKey);
+    const driveName = targetDrive?.companyName || driveKey;
     setReprocessingDrives((prev) => ({ ...prev, [driveKey]: true }));
+    const toastId = 'reprocess-' + driveKey;
+    appToast.loading(
+      'Reprocessing drive…',
+      `Recalculating application statuses and circular correlations for ${driveName}…`,
+      undefined,
+      Infinity,
+      toastId
+    );
     setFeedbackMessage({
       type: 'success',
-      text: 'Recalculating application statuses and circular correlations for this drive…',
+      text: `Recalculating application statuses and circular correlations for ${driveName}…`,
     });
     try {
       const res = await fetch(`/api/admin/drives/${encodeURIComponent(driveKey)}/reprocess`, { method: 'POST' });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Drive reprocess failed');
       const affected = data.usersAffected ?? data.result?.usersAffected ?? 0;
+      appToast.success(
+        'Drive reprocessed successfully',
+        `Recalculated across ${affected} student account${affected === 1 ? '' : 's'}.`,
+        undefined,
+        5000,
+        toastId
+      );
       setFeedbackMessage({
         type: 'success',
         text: `Drive reprocessed successfully across ${affected} student account${affected === 1 ? '' : 's'}.`,
       });
       fetchDrives();
     } catch (err: any) {
+      appToast.error('Reprocess failed', err.message || 'Drive reprocess failed', undefined, 7000, toastId);
       setFeedbackMessage({ type: 'error', text: err.message || 'Reprocess failed' });
     } finally {
       setReprocessingDrives((prev) => ({ ...prev, [driveKey]: false }));
@@ -184,6 +218,9 @@ export default function DrivesClient() {
     if (!editingDrive || !editCompanyName.trim()) return;
 
     setSavingDrive(true);
+    const toastId = 'save-drive-' + editingDrive.driveKey;
+    appToast.loading('Saving drive edits…', `Updating "${editCompanyName}" across student accounts…`, undefined, Infinity, toastId);
+
     try {
       const aliasArray = editAliases
         .split(',')
@@ -208,24 +245,28 @@ export default function DrivesClient() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to update placement drive');
 
+      const successText = `Drive "${editCompanyName}" updated successfully across ${data.updatedCount || 'all'} student accounts.`;
+      appToast.success('Drive updated', successText, undefined, 5000, toastId);
       setFeedbackMessage({
         type: 'success',
-        text: `Drive "${editCompanyName}" updated successfully across ${data.updatedCount || 'all'} student accounts.`,
+        text: successText,
       });
 
       setEditingDrive(null);
       fetchDrives();
     } catch (err: any) {
+      appToast.error('Failed to save drive', err.message || 'Drive update failed', undefined, 7000, toastId);
       setFeedbackMessage({ type: 'error', text: err.message || 'Failed to save drive edits' });
     } finally {
       setSavingDrive(false);
     }
   };
 
-  const searchUnassignedEmails = async (query: string) => {
+  const searchUnassignedEmails = async (query: string, driveKey?: string) => {
     setSearchingEmails(true);
     try {
-      const res = await fetch(`/api/admin/emails/search?q=${encodeURIComponent(query)}&unassignedOnly=true`);
+      const driveKeyParam = driveKey ? `&driveKey=${encodeURIComponent(driveKey)}` : '';
+      const res = await fetch(`/api/admin/emails/search?q=${encodeURIComponent(query)}&unassignedOnly=true${driveKeyParam}`);
       const data = await res.json();
       if (res.ok) {
         setSearchResults(data.results || []);
@@ -242,12 +283,14 @@ export default function DrivesClient() {
     // Pre-populate search query with first word or company name if available
     const initialQuery = drive.companyName ? drive.companyName.split(' ')[0] : '';
     setLinkSearchQuery(initialQuery);
-    searchUnassignedEmails(initialQuery);
+    searchUnassignedEmails(initialQuery, drive.driveKey);
   };
 
   const handleLinkEmailToDrive = async (email: SearchEmailResult) => {
     if (!linkingDrive) return;
     setLinkingEmailId(email.id);
+    const toastId = 'link-email-' + email.id;
+    appToast.loading('Linking circular to drive…', `Connecting circular to "${linkingDrive.companyName}"…`, undefined, Infinity, toastId);
 
     try {
       let aliasToAdd: string | undefined = undefined;
@@ -274,9 +317,12 @@ export default function DrivesClient() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to link email to drive');
 
+      const affected = data.result?.usersAffected ?? (email.students?.length || 1);
+      const successText = `Linked circular to "${linkingDrive.companyName}" across ${affected} student account${affected === 1 ? '' : 's'}.`;
+      appToast.success('Circular linked successfully', successText, undefined, 5000, toastId);
       setFeedbackMessage({
         type: 'success',
-        text: `Linked circular to "${linkingDrive.companyName}" across ${data.result?.usersAffected ?? (email.students?.length || 1)} student accounts.`,
+        text: successText,
       });
 
       setSearchResults((prev) => prev.filter((r) => r.id !== email.id));
@@ -294,6 +340,7 @@ export default function DrivesClient() {
       fetchDrives();
       setLinkingDrive(null);
     } catch (err: any) {
+      appToast.error('Linking failed', err.message || 'Failed to link email to drive', undefined, 7000, toastId);
       setFeedbackMessage({ type: 'error', text: err.message || 'Linking failed' });
     } finally {
       setLinkingEmailId(null);
@@ -301,36 +348,110 @@ export default function DrivesClient() {
   };
 
   const handleUnlinkEmail = async (email: DriveEmail, driveKey: string) => {
+    const targetDrive = drives.find((d) => d.driveKey === driveKey);
+    const driveName = targetDrive?.companyName || 'placement drive';
     const studentCount = email.students?.length || 1;
     const emailCount = email.receiptCount || email.emailIds?.length || studentCount;
     const confirmMsg =
       studentCount > 1
-        ? `Unlink this circular from this placement drive for all ${studentCount} students (${emailCount} total copies)?`
-        : 'Unlink this email from this placement drive?';
+        ? `Unlink this circular from "${driveName}" for all ${studentCount} students (${emailCount} total copies)?\n\nThis permanently protects it from auto-sync re-attachment and recalculates application statuses.`
+        : `Unlink this circular from "${driveName}"?\n\nThis permanently protects it from auto-sync re-attachment and recalculates application status.`;
     if (!confirm(confirmMsg)) return;
+
+    setUnlinkingEmailId(email.id);
+    setUnlinkingProgress({
+      emailId: email.id,
+      step: 1,
+      stage: 'Guarding email & unlinking from placement drive…',
+      studentCount,
+    });
+
+    const toastId = 'unlink-email-' + email.id;
+    appToast.loading(
+      'Unlinking circular…',
+      `Disconnecting from "${driveName}" across ${studentCount} student account${studentCount === 1 ? '' : 's'}…`,
+      undefined,
+      Infinity,
+      toastId
+    );
+
+    // Staged progress indication as server-side reconciliation executes
+    const timer1 = setTimeout(() => {
+      setUnlinkingProgress((prev) =>
+        prev && prev.emailId === email.id
+          ? { ...prev, step: 2, stage: 'Clearing matches, email drive links & timeline events…' }
+          : prev
+      );
+    }, 700);
+
+    const timer2 = setTimeout(() => {
+      setUnlinkingProgress((prev) =>
+        prev && prev.emailId === email.id
+          ? { ...prev, step: 3, stage: 'Recalculating student application statuses from remaining evidence…' }
+          : prev
+      );
+    }, 1800);
 
     try {
       const res = await fetch(`/api/admin/emails/${email.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ unlinkDrive: true, emailIds: email.emailIds || [email.id] }),
+        body: JSON.stringify({
+          unlinkDrive: true,
+          driveKey,
+          emailIds: email.emailIds || [email.id],
+        }),
       });
       const data = await res.json();
+      clearTimeout(timer1);
+      clearTimeout(timer2);
+
       if (!res.ok) throw new Error(data.error || 'Failed to unlink');
+
       setDriveEmails((prev) => ({
         ...prev,
         [driveKey]: (prev[driveKey] || []).filter((e) => e.id !== email.id),
       }));
+
+      setDrives((prev) =>
+        prev.map((d) =>
+          d.driveKey === driveKey
+            ? { ...d, totalEmails: Math.max(0, d.totalEmails - 1) }
+            : d
+        )
+      );
+
+      const successDetail =
+        data.message ||
+        `Circular unlinked from "${driveName}" for ${studentCount} student account${studentCount === 1 ? '' : 's'}. Application statuses recalculated.`;
+
+      appToast.success(
+        'Circular unlinked successfully',
+        successDetail,
+        undefined,
+        6000,
+        toastId
+      );
+
       setFeedbackMessage({
         type: 'success',
-        text: `Circular unlinked from drive for ${studentCount} student(s). Click "Reprocess Drive" to recalculate statuses.`,
+        text: successDetail,
       });
     } catch (err: any) {
+      clearTimeout(timer1);
+      clearTimeout(timer2);
+      appToast.error('Unlink failed', err.message || 'Failed to unlink circular', undefined, 7000, toastId);
       setFeedbackMessage({ type: 'error', text: err.message || 'Unlink failed' });
+    } finally {
+      setUnlinkingEmailId(null);
+      setUnlinkingProgress(null);
     }
   };
 
   const handleUpdateEmailClassification = async (email: DriveEmail, driveKey: string, newClass: string) => {
+    const targetDrive = drives.find((d) => d.driveKey === driveKey);
+    const classLabel = CLASSIFICATION_OPTIONS.find((c) => c.value === newClass)?.label || newClass || 'Auto';
+    const toastId = 'classify-' + email.id;
     try {
       const res = await fetch(`/api/admin/emails/${email.id}`, {
         method: 'PATCH',
@@ -338,19 +459,39 @@ export default function DrivesClient() {
         body: JSON.stringify({
           action: 'update_classification',
           classification: newClass,
+          driveKey,
           emailIds: email.emailIds || [email.id],
         }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Update failed');
-      setDriveEmails((prev) => ({
-        ...prev,
-        [driveKey]: (prev[driveKey] || []).map((e) =>
-          e.id === email.id ? { ...e, classification: newClass } : e
-        ),
-      }));
-      setFeedbackMessage({ type: 'success', text: `Classification set to ${newClass} across student receipts.` });
+      if (newClass === 'irrelevant') {
+        setDriveEmails((prev) => ({
+          ...prev,
+          [driveKey]: (prev[driveKey] || []).filter((e) => e.id !== email.id),
+        }));
+        setDrives((prev) =>
+          prev.map((d) =>
+            d.driveKey === driveKey
+              ? { ...d, totalEmails: Math.max(0, d.totalEmails - 1) }
+              : d
+          )
+        );
+      } else {
+        setDriveEmails((prev) => ({
+          ...prev,
+          [driveKey]: (prev[driveKey] || []).map((e) =>
+            e.id === email.id ? { ...e, classification: newClass } : e
+          ),
+        }));
+      }
+      const successText = newClass === 'irrelevant'
+        ? `Circular marked as irrelevant and permanently unlinked from "${targetDrive?.companyName || 'drive'}".`
+        : `Classification set to ${classLabel} across student receipts.`;
+      appToast.success('Classification updated', successText, undefined, 4500, toastId);
+      setFeedbackMessage({ type: 'success', text: successText });
     } catch (err: any) {
+      appToast.error('Update failed', err.message || 'Failed to update classification', undefined, 6000, toastId);
       setFeedbackMessage({ type: 'error', text: err.message || 'Update failed' });
     }
   };
@@ -387,7 +528,7 @@ export default function DrivesClient() {
 
         <div className="flex items-center gap-2.5">
           <button
-            onClick={fetchDrives}
+            onClick={() => fetchDrives(true)}
             disabled={loading}
             className="inline-flex items-center gap-2 px-3.5 py-2 text-xs font-semibold text-zinc-200 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 rounded-lg border border-zinc-700/60 transition-colors cursor-pointer"
           >
@@ -629,95 +770,152 @@ export default function DrivesClient() {
                             const emailCount = email.receiptCount || email.emailIds?.length || studentCount;
                             const studentNames = email.students?.map((s) => s.userName || s.userEmail).join(', ') || '';
 
+                            const isUnlinkingThis = unlinkingEmailId === email.id;
+
                             return (
                               <div
                                 key={email.id}
-                                className="p-4 rounded-xl border border-zinc-800/90 bg-zinc-900/60 hover:bg-zinc-900 transition-colors flex flex-col md:flex-row md:items-center justify-between gap-3 text-xs"
+                                className={cn(
+                                  'p-4 rounded-xl border transition-all text-xs',
+                                  isUnlinkingThis
+                                    ? 'border-amber-500/50 bg-amber-500/[0.04] ring-1 ring-amber-500/30 shadow-lg shadow-amber-500/5'
+                                    : 'border-zinc-800/90 bg-zinc-900/60 hover:bg-zinc-900'
+                                )}
                               >
-                                <div className="min-w-0 flex-1 space-y-1.5">
-                                  <div className="flex items-center gap-2 flex-wrap">
-                                    {email.isCanonical && (
-                                      <span className="px-2 py-0.5 rounded text-[10px] font-mono font-semibold bg-emerald-500/15 text-emerald-300 border border-emerald-500/25">
-                                        Canonical Broadcast
-                                      </span>
-                                    )}
-                                    {studentCount > 1 ? (
-                                      <span
-                                        className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-indigo-500/15 text-indigo-300 border border-indigo-500/25 cursor-help"
-                                        title={`Synced by ${studentCount} students (${emailCount} total email records): ${studentNames}`}
-                                      >
-                                        {studentCount} Students Synced
-                                        {emailCount > studentCount && (
-                                          <span className="text-indigo-400/80 font-normal ml-1">({emailCount} copies)</span>
-                                        )}
-                                      </span>
-                                    ) : (
-                                      <span className="text-zinc-400 font-medium">
-                                        {studentNames || '1 Student'}
-                                        {emailCount > 1 && (
-                                          <span className="text-zinc-500 text-[10px] font-mono ml-1">({emailCount} copies)</span>
-                                        )}
-                                      </span>
-                                    )}
-                                    <span className="text-[11px] text-zinc-400 font-mono truncate max-w-xs">
-                                      {email.sender}
-                                    </span>
-                                    {email.receivedAt && (
-                                      <>
-                                        <span className="text-zinc-600">·</span>
-                                        <span className="text-[11px] text-zinc-500 font-mono">
-                                          {timeAgo(email.receivedAt)}
+                                <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+                                  <div className="min-w-0 flex-1 space-y-1.5">
+                                    <div className="flex items-center gap-2 flex-wrap">
+                                      {(email.isCollegeCircular || email.isCanonical) && (
+                                        <span className="px-2 py-0.5 rounded text-[10px] font-mono font-semibold bg-emerald-500/15 text-emerald-300 border border-emerald-500/25">
+                                          College Circular
                                         </span>
-                                      </>
+                                      )}
+                                      {studentCount > 1 ? (
+                                        <span
+                                          className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-indigo-500/15 text-indigo-300 border border-indigo-500/25 cursor-help"
+                                          title={`Synced by ${studentCount} students (${emailCount} total email records): ${studentNames}`}
+                                        >
+                                          {studentCount} Students Synced
+                                          {emailCount > studentCount && (
+                                            <span className="text-indigo-400/80 font-normal ml-1">({emailCount} copies)</span>
+                                          )}
+                                        </span>
+                                      ) : (
+                                        <span className="text-zinc-400 font-medium">
+                                          {studentNames || '1 Student'}
+                                          {emailCount > 1 && (
+                                            <span className="text-zinc-500 text-[10px] font-mono ml-1">({emailCount} copies)</span>
+                                          )}
+                                        </span>
+                                      )}
+                                      <span className="text-[11px] text-zinc-400 font-mono truncate max-w-xs">
+                                        {email.sender}
+                                      </span>
+                                      {email.receivedAt && (
+                                        <>
+                                          <span className="text-zinc-600">·</span>
+                                          <span className="text-[11px] text-zinc-500 font-mono">
+                                            {timeAgo(email.receivedAt)}
+                                          </span>
+                                        </>
+                                      )}
+                                    </div>
+
+                                    <div className="font-semibold text-white text-sm">
+                                      {email.subject}
+                                    </div>
+
+                                    {(email.bodySnippet || (email as any).snippet) && (
+                                      <p className="text-[11px] text-zinc-400 line-clamp-2 leading-relaxed">
+                                        {email.bodySnippet || (email as any).snippet}
+                                      </p>
+                                    )}
+
+                                    {studentNames && studentCount > 1 && (
+                                      <p className="text-[10px] text-zinc-500 font-mono truncate">
+                                        Recipients ({studentCount}): <span className="text-zinc-400">{studentNames}</span>
+                                      </p>
                                     )}
                                   </div>
 
-                                  <div className="font-semibold text-white text-sm">
-                                    {email.subject}
+                                  <div className="flex items-center justify-between sm:justify-end gap-2 shrink-0 w-full sm:w-auto mt-2 sm:mt-0">
+                                    <select
+                                      value={email.classification || ''}
+                                      disabled={isUnlinkingThis || unlinkingEmailId !== null}
+                                      onChange={(e) =>
+                                        handleUpdateEmailClassification(email, drive.driveKey, e.target.value)
+                                      }
+                                      className="flex-1 sm:flex-initial px-2.5 py-1.5 text-[11px] font-medium bg-zinc-800 border border-zinc-700 rounded-lg text-zinc-200 focus:outline-none focus:border-amber-500/50 disabled:opacity-50"
+                                    >
+                                      <option value="">Classification: Auto</option>
+                                      {CLASSIFICATION_OPTIONS.map((c) => (
+                                        <option key={c.value} value={c.value}>
+                                          {c.label}
+                                        </option>
+                                      ))}
+                                    </select>
+
+                                    <button
+                                      onClick={() => handleUnlinkEmail(email, drive.driveKey)}
+                                      disabled={unlinkingEmailId !== null}
+                                      className={cn(
+                                        'px-3 py-1.5 text-[11px] font-medium rounded-lg border transition-all flex items-center gap-1.5 shrink-0',
+                                        isUnlinkingThis
+                                          ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 cursor-wait shadow-sm'
+                                          : 'text-red-400 hover:text-red-300 hover:bg-red-500/10 border-red-500/20 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed'
+                                      )}
+                                      title={
+                                        studentCount > 1
+                                          ? `Unlink from drive for all ${studentCount} students (${emailCount} total emails)`
+                                          : `Unlink from this drive (${emailCount} email${emailCount > 1 ? 's' : ''})`
+                                      }
+                                    >
+                                      {isUnlinkingThis ? (
+                                        <>
+                                          <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-400 shrink-0" />
+                                          <span>Unlinking…</span>
+                                        </>
+                                      ) : (
+                                        <>
+                                          <Unlink className="w-3.5 h-3.5 shrink-0" />
+                                          <span>{studentCount > 1 ? `Unlink (${studentCount})` : 'Unlink'}</span>
+                                        </>
+                                      )}
+                                    </button>
                                   </div>
-
-                                  {(email.bodySnippet || (email as any).snippet) && (
-                                    <p className="text-[11px] text-zinc-400 line-clamp-2 leading-relaxed">
-                                      {email.bodySnippet || (email as any).snippet}
-                                    </p>
-                                  )}
-
-                                  {studentNames && studentCount > 1 && (
-                                    <p className="text-[10px] text-zinc-500 font-mono truncate">
-                                      Recipients ({studentCount}): <span className="text-zinc-400">{studentNames}</span>
-                                    </p>
-                                  )}
                                 </div>
 
-                                <div className="flex items-center justify-between sm:justify-end gap-2 shrink-0 w-full sm:w-auto mt-2 sm:mt-0">
-                                  <select
-                                    value={email.classification || ''}
-                                    onChange={(e) =>
-                                      handleUpdateEmailClassification(email, drive.driveKey, e.target.value)
-                                    }
-                                    className="flex-1 sm:flex-initial px-2.5 py-1.5 text-[11px] font-medium bg-zinc-800 border border-zinc-700 rounded-lg text-zinc-200 focus:outline-none focus:border-amber-500/50"
-                                  >
-                                    <option value="">Classification: Auto</option>
-                                    {CLASSIFICATION_OPTIONS.map((c) => (
-                                      <option key={c.value} value={c.value}>
-                                        {c.label}
-                                      </option>
-                                    ))}
-                                  </select>
-
-                                  <button
-                                    onClick={() => handleUnlinkEmail(email, drive.driveKey)}
-                                    className="px-3 py-1.5 text-[11px] font-medium text-red-400 hover:text-red-300 hover:bg-red-500/10 rounded-lg border border-red-500/20 transition-colors flex items-center gap-1.5 cursor-pointer shrink-0"
-                                    title={
-                                      studentCount > 1
-                                        ? `Unlink from drive for all ${studentCount} students (${emailCount} total emails)`
-                                        : `Unlink from this drive (${emailCount} email${emailCount > 1 ? 's' : ''})`
-                                    }
-                                  >
-                                    <Unlink className="w-3.5 h-3.5" />
-                                    <span>{studentCount > 1 ? `Unlink (${studentCount})` : 'Unlink'}</span>
-                                  </button>
-                                </div>
+                                {/* Active Unlinking Progress Meter */}
+                                {isUnlinkingThis && (
+                                  <div className="mt-3 p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-xs space-y-2 animate-fade-in">
+                                    <div className="flex items-center justify-between gap-2">
+                                      <div className="flex items-center gap-2 text-amber-300 font-medium text-[11px]">
+                                        <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-400 shrink-0" />
+                                        <span>{unlinkingProgress?.stage || 'Unlinking circular & recalculating statuses…'}</span>
+                                      </div>
+                                      <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-200 border border-amber-500/30 shrink-0">
+                                        Step {unlinkingProgress?.step || 1} of 3
+                                      </span>
+                                    </div>
+                                    <div className="h-1.5 w-full bg-zinc-800/80 rounded-full overflow-hidden">
+                                      <div
+                                        className="h-full bg-gradient-to-r from-amber-500 to-amber-400 rounded-full transition-all duration-500 ease-out shadow-[0_0_8px_rgba(251,191,36,0.6)]"
+                                        style={{
+                                          width:
+                                            unlinkingProgress?.step === 1
+                                              ? '33%'
+                                              : unlinkingProgress?.step === 2
+                                              ? '66%'
+                                              : '92%',
+                                        }}
+                                      />
+                                    </div>
+                                    <div className="flex items-center justify-between text-[10px] text-zinc-400 font-mono">
+                                      <span>Protected by admin guard against auto-sync re-attachment</span>
+                                      <span>{studentCount} student account{studentCount === 1 ? '' : 's'}</span>
+                                    </div>
+                                  </div>
+                                )}
                               </div>
                             );
                           })}
@@ -943,7 +1141,7 @@ export default function DrivesClient() {
                   value={linkSearchQuery}
                   onChange={(e) => {
                     setLinkSearchQuery(e.target.value);
-                    searchUnassignedEmails(e.target.value);
+                    searchUnassignedEmails(e.target.value, linkingDrive?.driveKey);
                   }}
                   className="w-full pl-10 pr-4 py-2.5 text-xs bg-zinc-950 border border-zinc-800 rounded-xl text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-amber-500/50 shadow-inner"
                 />

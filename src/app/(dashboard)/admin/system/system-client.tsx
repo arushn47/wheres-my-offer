@@ -16,6 +16,7 @@ import {
   HardDrive,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { appToast } from '@/components/ui/toast';
 
 interface CanonicalStats {
   totalCanonical: number;
@@ -52,16 +53,21 @@ export default function SystemClient() {
   const handleRunBackfill = async () => {
     setBackfilling(true);
     setFeedbackMessage(null);
+    const toastId = 'backfill-canonical';
+    appToast.loading('Running canonical backfill…', 'Linking existing receipts to canonical emails…', undefined, Infinity, toastId);
     try {
       const res = await fetch('/api/admin/canonical/backfill', { method: 'POST' });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Backfill failed');
+      const successText = data.message || 'Canonical backfill completed.';
+      appToast.success('Canonical backfill completed', successText, undefined, 5000, toastId);
       setFeedbackMessage({
         type: 'success',
-        text: data.message || 'Canonical backfill completed.',
+        text: successText,
       });
       fetchStats();
     } catch (err: any) {
+      appToast.error('Backfill failed', err.message || 'Backfill failed', undefined, 7000, toastId);
       setFeedbackMessage({ type: 'error', text: err.message || 'Backfill failed' });
     } finally {
       setBackfilling(false);
@@ -197,7 +203,7 @@ export default function SystemClient() {
             Storage Quota Remediation
           </div>
           <p className="text-xs text-zinc-400 leading-relaxed">
-            Broadcast emails sent from <span className="font-mono text-zinc-300">vitlions2027@vitbhopal.ac.in</span> contain identical bodies, schedules, and job criteria across students. Rather than storing 10KB–50KB full HTML bodies inside the <span className="font-mono text-zinc-300">emails</span> table for every individual student, the body is canonicalized once in <span className="font-mono text-zinc-300">canonical_emails</span>.
+            Broadcast emails sent from <span className="font-mono text-zinc-300">vitlions2027@vitbhopal.ac.in</span> contain identical bodies, schedules, and job criteria across students. Rather than storing full HTML bodies inside the <span className="font-mono text-zinc-300">personal_emails</span> table for every individual student, the body is stored once in <span className="font-mono text-zinc-300">college_emails</span>.
           </p>
           <div className="p-3.5 rounded-lg bg-zinc-950/70 border border-zinc-800 space-y-2 text-xs">
             <div className="flex items-center justify-between text-zinc-400">
@@ -210,7 +216,7 @@ export default function SystemClient() {
             </div>
             <div className="flex items-center justify-between text-zinc-400">
               <span>Excel Shortlist Attachments</span>
-              <span className="font-mono font-bold text-amber-300">{stats?.totalCanonicalAttachments ?? 0} indexed in canonical</span>
+              <span className="font-mono font-bold text-amber-300">{stats?.totalCanonicalAttachments ?? 0} indexed in college_attachments</span>
             </div>
           </div>
         </div>

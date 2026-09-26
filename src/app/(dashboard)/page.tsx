@@ -37,12 +37,10 @@ export default async function DashboardPage() {
   ] = await Promise.all([
     supabase
       .from('placement_drives')
-      .select('id, company_id, drive_number, drive_name, role, category, ctc, stipend, location')
-      .eq('user_id', session.userId),
+      .select('id, company_id, drive_number, drive_name, role, category, ctc, stipend, location'),
     supabase
       .from('companies')
-      .select('id, name')
-      .eq('user_id', session.userId),
+      .select('id, name'),
     supabase
       .from('applications')
       .select('id, status, role, category, ctc, stipend, location, notes, manual_override, last_updated, placement_drive_id, registration_deadline')
@@ -81,8 +79,10 @@ export default async function DashboardPage() {
     }
   }
 
+  const userDriveIds = new Set((applications || []).map((a: any) => a.placement_drive_id).filter(Boolean));
+
   const stats = {
-    total_companies: placementDrives?.length || 0,
+    total_companies: userDriveIds.size,
     active_applications: 0,
     total_applied: 0,
     applied: 0,

@@ -77,10 +77,10 @@ export async function resolvePlacementDrive(params: {
   }
 
   if (normalizedDriveNumber) {
+    // 1. Check if the drive already exists globally by normalized_drive_number
     const { data: existing } = await params.supabase
       .from('placement_drives')
       .select('id, company_id')
-      .eq('user_id', params.userId)
       .eq('normalized_drive_number', normalizedDriveNumber)
       .maybeSingle();
 
@@ -94,10 +94,13 @@ export async function resolvePlacementDrive(params: {
       };
     }
 
+    // 2. Concurrency-safe insert:
+    // NOTE: This catch-then-SELECT pattern works because these are isolated Supabase JS client calls
+    // (each call auto-committing its own transaction). If this logic is ever wrapped in a single
+    // PostgreSQL transaction / RPC, a caught 23505 without a SAVEPOINT will poison the transaction!
     const { data: created, error } = await params.supabase
       .from('placement_drives')
       .insert({
-        user_id: params.userId,
         company_id: params.companyId,
         drive_number: params.driveNumber?.trim() || normalizedDriveNumber,
         normalized_drive_number: normalizedDriveNumber,
@@ -129,12 +132,11 @@ export async function resolvePlacementDrive(params: {
       };
     }
 
-    // A concurrent creator may have won the unique normalized-drive index.
+    // A concurrent sync run may have won the unique normalized-drive index race (Postgres error 23505).
     if (error?.code === '23505') {
       const { data: concurrent } = await params.supabase
         .from('placement_drives')
         .select('id, company_id')
-        .eq('user_id', params.userId)
         .eq('normalized_drive_number', normalizedDriveNumber)
         .maybeSingle();
 
@@ -161,7 +163,6 @@ export async function resolvePlacementDrive(params: {
   const { data: companyDrives } = await params.supabase
     .from('placement_drives')
     .select('id, company_id, drive_name, created_at')
-    .eq('user_id', params.userId)
     .eq('company_id', params.companyId)
     .in('identity_state', ['assigned', 'manually_assigned'])
     .order('created_at', { ascending: false });

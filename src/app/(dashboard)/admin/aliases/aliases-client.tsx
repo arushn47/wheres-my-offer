@@ -15,6 +15,7 @@ import {
   Info,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { appToast } from '@/components/ui/toast';
 
 interface DriveAlias {
   id: string;
@@ -109,17 +110,21 @@ export default function AliasesClient() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to save alias rule');
 
+      const successMsg = isEdit
+        ? `Rule for "${formCompanyName}" updated and synchronized.`
+        : `Rule saved for "${formCompanyName}". It is now permanently active in the sync engine.`;
+
+      appToast.success('Rule saved', successMsg, undefined, 5000);
       setFeedbackMessage({
         type: 'success',
-        text: isEdit
-          ? `Rule for "${formCompanyName}" updated and synchronized.`
-          : `Rule saved for "${formCompanyName}". It is now permanently active in the sync engine.`,
+        text: successMsg,
       });
 
       setShowAliasModal(false);
       setEditingAlias(null);
       fetchAliases();
     } catch (err: any) {
+      appToast.error('Failed to save rule', err.message || 'Failed to save rule', undefined, 6000);
       setFeedbackMessage({ type: 'error', text: err.message || 'Failed to save rule' });
     } finally {
       setSavingAlias(false);
@@ -135,8 +140,10 @@ export default function AliasesClient() {
       if (!res.ok) throw new Error(data.error || 'Failed to delete rule');
 
       setAliases((prev) => prev.filter((a) => a.id !== id));
+      appToast.success('Rule deleted', `Rule for "${name}" deleted.`, undefined, 4500);
       setFeedbackMessage({ type: 'success', text: `Rule for "${name}" deleted.` });
     } catch (err: any) {
+      appToast.error('Delete failed', err.message || 'Delete failed', undefined, 6000);
       setFeedbackMessage({ type: 'error', text: err.message || 'Delete failed' });
     }
   };

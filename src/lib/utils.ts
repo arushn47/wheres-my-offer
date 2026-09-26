@@ -139,10 +139,24 @@ export function getDriveMode(
   if (notesStr.includes('online') || notesStr.includes('virtual')) {
     return 'Online';
   }
+  if (
+    notesStr.includes('respective_campus') ||
+    notesStr.includes('respective') ||
+    notesStr.includes('tbd') ||
+    notesStr.includes('tba')
+  ) {
+    return homeLabs;
+  }
   if (notesStr.includes('vellore')) {
+    if (notesStr.includes('respective') || notesStr.includes('others')) {
+      return homeLabs;
+    }
     return campus === 'VIT Vellore' ? 'Vellore Labs' : 'VIT Vellore';
   }
   if (notesStr.includes('chennai')) {
+    if (notesStr.includes('respective') || notesStr.includes('others')) {
+      return homeLabs;
+    }
     return campus === 'VIT Chennai' ? 'Chennai Labs' : 'VIT Chennai';
   }
   if (notesStr.includes('ap') || notesStr.includes('amaravati')) {
@@ -154,3 +168,17 @@ export function getDriveMode(
   return homeLabs;
 }
 
+/** Update a recognized stored travel-mode note without discarding other manual notes. */
+export function refreshTravelModeNote(notes: string | null | undefined, travelMode: string): string {
+  const previousNotes = notes || '';
+  const recognizedTravelNote = /^(?:bhopal|bhopal_lab|online|vellore|chennai|ap|respective_campus)$/i;
+  const noteLines = previousNotes.split('\n');
+  const travelLineIndex = noteLines.findIndex((line) => recognizedTravelNote.test(line.trim()));
+
+  if (travelLineIndex >= 0) {
+    noteLines[travelLineIndex] = travelMode;
+    return noteLines.filter(Boolean).join('\n');
+  }
+  if (!previousNotes.trim()) return travelMode;
+  return `${previousNotes}\n${travelMode}`;
+}

@@ -80,7 +80,7 @@ CREATE TABLE public.emails (
   sender text,
   subject text,
   received_at timestamp with time zone,
-  body_snippet text CHECK (body_snippet IS NULL OR length(body_snippet) <= 500),
+  body_snippet text,
   classification text CHECK (classification = ANY (ARRAY['registration'::text, 'registration_confirmation'::text, 'application_status'::text, 'withdrawal'::text, 'decline'::text, 'shortlist'::text, 'ppt'::text, 'test'::text, 'interview'::text, 'jd'::text, 'venue_update'::text, 'result'::text, 'general'::text, 'unclassified_placement_notice'::text, 'irrelevant'::text, 'unclassified'::text])),
   is_processed boolean DEFAULT false,
   is_relevant boolean DEFAULT true,

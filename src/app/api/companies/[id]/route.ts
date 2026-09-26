@@ -20,12 +20,11 @@ export async function DELETE(
   const { id: companyId } = await params;
   const supabase = createAdminClient();
 
-  // Verify the company belongs to this user
+  // Verify the company exists
   const { data: company, error: fetchError } = await supabase
     .from('companies')
     .select('id, name')
     .eq('id', companyId)
-    .eq('user_id', session.userId)
     .single();
 
   if (fetchError || !company) {
@@ -36,72 +35,52 @@ export async function DELETE(
   const { data: drives } = await supabase
     .from('placement_drives')
     .select('id')
-    .eq('user_id', session.userId)
     .eq('company_id', companyId);
 
   const driveIds = (drives || []).map((d) => d.id);
 
   if (driveIds.length > 0) {
-    // Unlink emails (set placement_drive_id to null instead of deleting emails)
+    // Unlink emails for this user (set placement_drive_id to null instead of deleting emails)
     await supabase
-      .from('emails')
+      .from('personal_emails')
       .update({ placement_drive_id: null })
       .in('placement_drive_id', driveIds)
       .eq('user_id', session.userId);
 
-    // Delete email_drive_links
+    // Delete email_drive_links for this user
     await supabase
       .from('email_drive_links')
       .delete()
       .in('placement_drive_id', driveIds)
       .eq('user_id', session.userId);
 
-    // Delete events for these drives
+    // Delete events for this user
     await supabase
       .from('events')
       .delete()
       .in('placement_drive_id', driveIds)
       .eq('user_id', session.userId);
 
-    // Delete notifications for these drives
+    // Delete notifications for this user
     await supabase
       .from('notifications')
       .delete()
       .in('placement_drive_id', driveIds)
       .eq('user_id', session.userId);
 
-    // Delete candidate matches for these drives
+    // Delete candidate matches for this user
     await supabase
       .from('candidate_matches')
       .delete()
       .in('placement_drive_id', driveIds)
       .eq('user_id', session.userId);
 
-    // Delete applications for these drives
+    // Delete applications for this user
     await supabase
       .from('applications')
       .delete()
       .in('placement_drive_id', driveIds)
       .eq('user_id', session.userId);
-
-    // Delete placement drives
-    await supabase
-      .from('placement_drives')
-      .delete()
-      .eq('company_id', companyId)
-      .eq('user_id', session.userId);
-  }
-
-  // Delete the company itself
-  const { error: deleteError } = await supabase
-    .from('companies')
-    .delete()
-    .eq('id', companyId)
-    .eq('user_id', session.userId);
-
-  if (deleteError) {
-    console.error('Failed to delete company:', deleteError);
-    return NextResponse.json({ error: 'Failed to delete company' }, { status: 500 });
   }
 
   return NextResponse.json({ success: true, deleted: company.name });

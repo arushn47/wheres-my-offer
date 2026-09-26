@@ -32,12 +32,9 @@ export async function POST() {
     await supabase.from('applications').delete().eq('user_id', userId);
 
     // 5. Delete all stored emails
-    await supabase.from('emails').delete().eq('user_id', userId);
+    await supabase.from('personal_emails').delete().eq('user_id', userId);
 
-    // 6. Delete all companies
-    await supabase.from('companies').delete().eq('user_id', userId);
-
-    // 7. Delete sync pages & sync state
+    // 6. Delete sync pages & sync state
     await supabase.from('sync_pages').delete().eq('user_id', userId);
     await supabase.from('sync_state').delete().eq('user_id', userId);
 

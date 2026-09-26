@@ -314,13 +314,11 @@ export async function reconcileUserGoogleCalendar(userId: string): Promise<Recon
 
     supabase
       .from('companies')
-      .select('id, name')
-      .eq('user_id', userId),
+      .select('id, name'),
 
     supabase
       .from('placement_drives')
-      .select('id, company_id')
-      .eq('user_id', userId),
+      .select('id, company_id'),
 
     supabase
       .from('applications')

@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { timeAgo, cn } from '@/lib/utils';
 import ReprocessProgressToast, { ReprocessProgressState } from '@/components/admin/reprocess-progress-toast';
+import { appToast } from '@/components/ui/toast';
 
 interface UserAccount {
   id: string;
@@ -141,20 +142,25 @@ export default function UsersClient() {
       if (!res.ok) throw new Error(data.error || 'Sync failed');
 
       if (data.alreadyRunning) {
+        const warnText = 'Sync is currently active for this user. If it appears stuck, click "Reset & Sync".';
+        appToast.warning('Sync already active', warnText);
         setFeedbackMessage({
           type: 'error',
-          text: 'Sync is currently active for this user. If it appears stuck, click "Reset & Sync".',
+          text: warnText,
         });
       } else {
+        const successText = force
+          ? `Sync lock cleared and sync completed: ${data.result?.newEmails ?? 0} new emails, ${data.result?.newCompanies ?? 0} new companies.`
+          : `Sync completed: ${data.result?.newEmails ?? 0} new emails, ${data.result?.newCompanies ?? 0} new companies.`;
+        appToast.sync('User sync completed', successText);
         setFeedbackMessage({
           type: 'success',
-          text: force
-            ? `Sync lock cleared and sync completed: ${data.result?.newEmails ?? 0} new emails, ${data.result?.newCompanies ?? 0} new companies.`
-            : `Sync completed: ${data.result?.newEmails ?? 0} new emails, ${data.result?.newCompanies ?? 0} new companies.`,
+          text: successText,
         });
       }
       fetchUsers();
     } catch (err: any) {
+      appToast.error('Sync failed', err.message || 'Sync failed');
       setFeedbackMessage({ type: 'error', text: err.message || 'Sync failed' });
     } finally {
       setSyncingUsers((prev) => ({ ...prev, [userId]: false }));
@@ -235,9 +241,11 @@ export default function UsersClient() {
                       }
                     : null
                 );
+                const successText = `Reprocess completed for ${userName}: ${appsUpdated} applications updated across ${data.neoPatDrivesCount ?? 0} drives.`;
+                appToast.success('Reprocess completed', successText, undefined, 5000);
                 setFeedbackMessage({
                   type: 'success',
-                  text: `Reprocess completed for ${userName}: ${appsUpdated} applications updated across ${data.neoPatDrivesCount ?? 0} drives.`,
+                  text: successText,
                 });
               } else if (event === 'error') {
                 throw new Error(data.message || 'Reprocess failed');
@@ -250,6 +258,7 @@ export default function UsersClient() {
       }
       fetchUsers();
     } catch (err: any) {
+      appToast.error('Reprocess failed', err.message || 'Reprocess failed', undefined, 6000);
       setFeedbackMessage({ type: 'error', text: err.message || 'Reprocess failed' });
       setReprocessProgress(null);
     } finally {
@@ -375,9 +384,11 @@ export default function UsersClient() {
                     : null
                 );
 
+                const successText = `Global reprocess complete: ${totalStudents} students evaluated, ${totalApps} application stage(s) re-evaluated.`;
+                appToast.success('Global reprocess complete', successText, undefined, 5000);
                 setFeedbackMessage({
                   type: 'success',
-                  text: `Global reprocess complete: ${totalStudents} students evaluated, ${totalApps} application stage(s) re-evaluated.`,
+                  text: successText,
                 });
               } else if (event === 'error') {
                 throw new Error(data.message || 'Global reprocess failed');
@@ -390,6 +401,7 @@ export default function UsersClient() {
       }
       fetchUsers();
     } catch (err: any) {
+      appToast.error('Global reprocess failed', err.message || 'Reprocess all failed', undefined, 6000);
       setFeedbackMessage({ type: 'error', text: err.message || 'Reprocess all failed' });
       setReprocessProgress(null);
     } finally {

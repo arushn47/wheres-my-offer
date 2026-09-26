@@ -17,7 +17,7 @@ import {
 } from 'lucide-react';
 import { cn, timeAgo } from '@/lib/utils';
 import { usePushNotifications } from '@/hooks/use-push-notifications';
-import { appToast } from '@/lib/toast';
+import { appToast } from '@/components/ui/toast';
 
 export interface InAppNotification {
   id: string;

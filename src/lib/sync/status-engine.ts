@@ -124,7 +124,6 @@ export async function processEmailForEventsAndStatus(
     const { data: drive } = await supabase
       .from('placement_drives')
       .select('id')
-      .eq('user_id', userId)
       .eq('company_id', companyId)
       .order('created_at', { ascending: false })
       .limit(1)
@@ -140,6 +139,7 @@ export async function processEmailForEventsAndStatus(
 
   const { classifyEmail } = await import('@/lib/sync/classifier');
   const emailClass = classifyEmail(email).classification;
+  const isCollegeBroadcast = isApprovedCanonicalSender(email.senderEmail || email.sender);
 
   // Temporal filter removed. Idempotency requires that evaluating an email's effect
   // must depend purely on its own timestamp vs other emails in the transaction,
@@ -336,22 +336,37 @@ export async function processEmailForEventsAndStatus(
 
   if (isNeoMatched) {
     // Only record genuine shortlist matches (never applied/opt-in rosters)
-    const { error: candidateMatchError } = await supabase.from('candidate_matches').insert({
+    const matchPayload: any = {
       user_id: userId,
-      email_id: emailDbId,
       placement_drive_id: targetDriveId,
       neo_id: userNeoId || userEmail,
       match_type: matchType,
       matched_round_type: (isShortlistEmail || hasPersonalTestCredentials) ? announcedRound : null,
       matched_value: matchDetail || email.subject.slice(0, 100),
       confidence: 'high',
-    });
+    };
+    if (isCollegeBroadcast) {
+      matchPayload.college_email_id = emailDbId;
+    } else {
+      matchPayload.email_id = emailDbId;
+    }
+
+    const { error: candidateMatchError } = await supabase.from('candidate_matches').insert(matchPayload);
     if (candidateMatchError?.code === '23505' && announcedRound &&
         (isShortlistEmail || hasPersonalTestCredentials)) {
-      const { error: tagError } = await supabase.from('candidate_matches')
+      const matchQuery = supabase.from('candidate_matches')
         .update({ matched_round_type: announcedRound })
-        .eq('user_id', userId).eq('email_id', emailDbId)
-        .eq('placement_drive_id', targetDriveId).eq('match_type', matchType);
+        .eq('user_id', userId)
+        .eq('placement_drive_id', targetDriveId)
+        .eq('match_type', matchType);
+
+      if (isCollegeBroadcast) {
+        matchQuery.eq('college_email_id', emailDbId);
+      } else {
+        matchQuery.eq('email_id', emailDbId);
+      }
+
+      const { error: tagError } = await matchQuery;
       if (tagError) throw tagError;
     } else if (candidateMatchError) {
       throw candidateMatchError;
@@ -485,20 +500,26 @@ export async function processEmailForEventsAndStatus(
         const finalTitle = `${displayComp} - ${event.title}`;
 
         // Insert new unique event into DB
+        const eventInsertPayload: any = {
+          user_id: userId,
+          placement_drive_id: targetDriveId,
+          event_type: event.eventType,
+          title: finalTitle,
+          start_time: startTimeIso,
+          end_time: event.endTime ? event.endTime.toISOString() : null,
+          venue: event.venue,
+          mode: event.mode,
+          confidence: event.confidence,
+        };
+        if (isCollegeBroadcast) {
+          eventInsertPayload.college_email_id = emailDbId;
+        } else {
+          eventInsertPayload.source_email_id = emailDbId;
+        }
+
         const { data: insertedEvt } = await supabase
           .from('events')
-          .insert({
-            user_id: userId,
-            placement_drive_id: targetDriveId,
-            source_email_id: emailDbId,
-            event_type: event.eventType,
-            title: finalTitle,
-            start_time: startTimeIso,
-            end_time: event.endTime ? event.endTime.toISOString() : null,
-            venue: event.venue,
-            mode: event.mode,
-            confidence: event.confidence,
-          })
+          .insert(eventInsertPayload)
           .select('id')
           .single();
 
@@ -1073,8 +1094,6 @@ export async function processEmailForEventsAndStatus(
       throw applicationError;
     }
   }
-
-  const isCollegeBroadcast = isApprovedCanonicalSender(email.senderEmail || email.sender);
 
   if (isRecentEmail && isDriveDiscoveryEmail && isInitialApplication && isCollegeBroadcast) {
     const { notifyNewDrive } = await import('@/lib/notifications/service');

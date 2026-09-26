@@ -31,7 +31,7 @@ export async function GET() {
           'user_id, is_syncing, phase, total_messages, processed_messages, new_emails, new_companies, current_subject, last_error, updated_at, started_at, completed_at, lease_expires_at, account_email, is_initial_sync, current_page_index, total_pages'
         ),
       supabase
-        .from('canonical_emails')
+        .from('college_emails')
         .select('*', { count: 'exact', head: true }),
     ]);
 
@@ -56,14 +56,14 @@ export async function GET() {
     const userMetricsPromises = users.map(async (u) => {
       const [emailsRes, canonicalRes] = await Promise.all([
         supabase
-          .from('emails')
+          .from('personal_emails')
           .select('*', { count: 'exact', head: true })
           .eq('user_id', u.id),
         supabase
-          .from('emails')
+          .from('candidate_matches')
           .select('*', { count: 'exact', head: true })
           .eq('user_id', u.id)
-          .not('canonical_email_id', 'is', null),
+          .not('college_email_id', 'is', null),
       ]);
 
       return {

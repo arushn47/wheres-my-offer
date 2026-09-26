@@ -22,7 +22,7 @@ import { usePushNotifications } from '@/hooks/use-push-notifications';
 import { cn } from '@/lib/utils';
 import type { NotificationPreferences } from '@/lib/notifications/preferences';
 import { DEFAULT_PREFERENCES } from '@/lib/notifications/preferences';
-import { appToast } from '@/lib/toast';
+import { appToast } from '@/components/ui/toast';
 import { Switch } from '@/components/ui/switch';
 
 const REMINDER_EVENT_OPTIONS = [

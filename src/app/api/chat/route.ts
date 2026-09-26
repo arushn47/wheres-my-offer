@@ -50,8 +50,7 @@ export async function POST(request: Request) {
       .single(),
     supabase
       .from('companies')
-      .select('id, name, aliases')
-      .eq('user_id', session.userId),
+      .select('id, name, aliases'),
     supabase
       .from('applications')
       .select('id, placement_drive_id, status, role, ctc, stipend, location, manual_override, notes, applied_at, registration_deadline')
@@ -63,8 +62,7 @@ export async function POST(request: Request) {
       .order('start_time', { ascending: true }),
     supabase
       .from('placement_drives')
-      .select('id, company_id, drive_number, drive_name, role, category, ctc, stipend, location, registration_deadline')
-      .eq('user_id', session.userId),
+      .select('id, company_id, drive_number, drive_name, role, category, ctc, stipend, location, registration_deadline'),
   ]);
 
   const companyList = companies || [];

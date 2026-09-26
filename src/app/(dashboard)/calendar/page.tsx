@@ -31,13 +31,11 @@ export default async function CalendarPage() {
 
     supabase
       .from('companies')
-      .select('id, name')
-      .eq('user_id', session.userId),
+      .select('id, name'),
 
     supabase
       .from('placement_drives')
-      .select('id, company_id, drive_name, drive_number')
-      .eq('user_id', session.userId),
+      .select('id, company_id, drive_name, drive_number'),
 
     supabase
       .from('applications')

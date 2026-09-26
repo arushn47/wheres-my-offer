@@ -625,7 +625,7 @@ function determineMode(
   return 'unknown';
 }
 
-export type TravelRequirement = 'vellore' | 'chennai' | 'ap' | 'bhopal' | 'bhopal_lab' | 'online' | null;
+export type TravelRequirement = 'vellore' | 'chennai' | 'ap' | 'bhopal' | 'bhopal_lab' | 'respective_campus' | 'online' | null;
 
 /**
  * Extracts campus travel requirement / Mode for VIT Bhopal students strictly from the main circular email.
@@ -646,6 +646,19 @@ export function extractTravelRequirement(text: string): TravelRequirement {
   // 1. Isolate the "Date of Visit" / Process Schedule section if present
   const scheduleMatch = cleanBody.match(/(?:Date\s+of\s+Visit|Process\s+details|Process\s+schedule|Hiring\s+process)[\s\S]{1,600}?(?=(?:Eligible|Eligibility|CTC|Stipend|Selection|Website|Last\s+date)|$)/i);
   const targetText = scheduleMatch ? scheduleMatch[0] : cleanBody;
+
+  // A named venue followed by "others in respective campus venues" is a
+  // multi-campus event; use the student's home campus rather than the named host.
+  const hasRespectiveCampusNotice =
+    /\bothers?\s+in\s+(?:their\s+)?respective\s+campus(?:\s*(?:venues?|labs?|campuses?))?\b/i.test(cleanBody) ||
+    /@\s*respective\s+campus(?:\s*(?:venues?|labs?|campuses?))?\b/i.test(cleanBody) ||
+    /\bat\s+respective\s+campus(?:\s*(?:venues?|labs?|campuses?))?\b/i.test(cleanBody) ||
+    /\bin\s+respective\s+campus(?:\s*(?:venues?|labs?|campuses?))?\b/i.test(cleanBody) ||
+    /\brespective\s+campus\s+(?:venues?|labs?|campuses?)\b/i.test(cleanBody);
+
+  if (hasRespectiveCampusNotice) {
+    return 'respective_campus';
+  }
 
   // 2. Bhopal exemption / deferred schedule / virtual mode check:
   // e.g. "Virtual Interview : 31st August 2026 (AP & Bhopal Campus Students)"
@@ -732,6 +745,15 @@ export function extractTravelRequirement(text: string): TravelRequirement {
     return 'online';
   }
 
+  return null;
+}
+
+/** Return the latest explicitly stated travel requirement from newest-first email text. */
+export function extractLatestTravelRequirement(textsNewestFirst: string[]): TravelRequirement {
+  for (const text of textsNewestFirst) {
+    const requirement = extractTravelRequirement(text);
+    if (requirement) return requirement;
+  }
   return null;
 }
 

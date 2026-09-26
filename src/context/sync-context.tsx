@@ -2,7 +2,7 @@
 
 import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
-import { appToast } from '@/lib/toast';
+import { appToast } from '@/components/ui/toast';
 import { createClient } from '@/lib/supabase/client';
 
 export interface SyncProgress {

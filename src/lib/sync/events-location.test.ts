@@ -60,6 +60,25 @@ describe('cleanLocationString normalization', () => {
 });
 
 describe('drive mode and travel requirement extraction', () => {
+  it('uses each student\'s campus for a named host plus respective-campus venues', async () => {
+    const { extractLatestTravelRequirement, extractTravelRequirement } = await import('./events');
+    const { getDriveMode } = await import('../utils');
+    const emailText = `Date of Visit:
+Test - 26th Sept 2026 (4 PM) @ VIT Vellore campus & others in respective campus venues
+Physical Interview - Will be announced later`;
+
+    const travelRequirement = extractTravelRequirement(emailText);
+    expect(travelRequirement).toBe('respective_campus');
+    expect(getDriveMode(travelRequirement, 'VIT Bhopal')).toBe('Bhopal Labs');
+    expect(getDriveMode(travelRequirement, 'VIT Vellore')).toBe('Vellore Labs');
+    expect(getDriveMode(travelRequirement, 'VIT Chennai')).toBe('Chennai Labs');
+    expect(extractLatestTravelRequirement([
+      'Physical Interview - Will be announced later',
+      emailText,
+      'Date of Visit: Interview at VIT Vellore',
+    ])).toBe('respective_campus');
+  });
+
   it('extracts chennai for physical process at chennai campus (for all)', async () => {
     const { extractTravelRequirement } = await import('./events');
     const emailText = `
@@ -91,11 +110,13 @@ describe('drive mode and travel requirement extraction', () => {
   });
 
   it('resolves drive mode display correctly for user campus', async () => {
-    const { getDriveMode } = await import('../utils');
+    const { getDriveMode, refreshTravelModeNote } = await import('../utils');
     expect(getDriveMode('chennai', 'VIT Bhopal')).toBe('VIT Chennai');
     expect(getDriveMode('chennai', 'VIT Chennai')).toBe('Chennai Labs');
     expect(getDriveMode('vellore', 'VIT Bhopal')).toBe('VIT Vellore');
     expect(getDriveMode('online', 'VIT Bhopal')).toBe('Online');
+    expect(refreshTravelModeNote('vellore', 'respective_campus')).toBe('respective_campus');
+    expect(refreshTravelModeNote('Interviewed · Not Selected\nvellore', 'respective_campus'))
+      .toBe('Interviewed · Not Selected\nrespective_campus');
   });
 });
-

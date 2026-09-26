@@ -143,60 +143,35 @@ export default function DashboardClient({
       return ev?.start_time ? new Date(ev.start_time).getTime() : null;
     };
 
-    const getStageTierAndScore = (item: ActiveApplicationItem) => {
+    const getPriorityGroup = (item: ActiveApplicationItem) => {
       const s = (item.status || '').toLowerCase();
+      if (['selected', 'offer', 'offer_received'].includes(s)) return 0;
+      if (s === 'registration_open') return 1;
 
-      // Offers / Selected - top celebration
-      if (['selected', 'offer', 'offer_received'].includes(s)) {
-        return { tier: 4, subScore: 100 };
-      }
-
-      // TIER 3: SCHEDULED & ONGOING ROUNDS (Requires candidate participation)
       const hasUpcomingEvt = getNextEventTime(item) !== null;
-      const isLive = s.includes('ongoing');
       const isScheduled =
         s.includes('scheduled') ||
+        s.includes('ongoing') ||
         ['interview', 'test', 'ppt'].includes(s) ||
         hasUpcomingEvt;
+      if (isScheduled) return 2;
 
-      if (isLive || isScheduled) {
-        let subScore = 50;
-        if (s.includes('interview')) subScore = 90;
-        else if (s.includes('test')) subScore = 80;
-        else if (s.includes('ppt')) subScore = 70;
-        else subScore = 60;
-        return { tier: 3, subScore };
-      }
+      if (s.includes('completed')) return 3;
 
-      // TIER 2: COMPLETED ROUNDS (Test completed, PPT completed, awaiting results)
-      const isCompleted = s.includes('completed');
-      if (isCompleted) {
-        let subScore = 50;
-        if (s.includes('interview_completed')) subScore = 90;
-        else if (s.includes('test_completed')) subScore = 80;
-        else if (s.includes('ppt_completed')) subScore = 70;
-        return { tier: 2, subScore };
-      }
-
-      // TIER 1: APPLIED / SHORTLISTED (Awaiting initial test shortlist or schedule)
-      let subScore = 10;
-      if (s === 'shortlisted') subScore = 30;
-      else if (s === 'registration_open') return { tier: 1, subScore: 20 };
-      return { tier: 1, subScore };
+      return 4; // applied / shortlisted
     };
 
     return [...active]
       .sort((a, b) => {
-        const aRank = getStageTierAndScore(a);
-        const bRank = getStageTierAndScore(b);
+        const groupA = getPriorityGroup(a);
+        const groupB = getPriorityGroup(b);
 
-        // 1. Primary sort: Tier (Scheduled [3] > Completed [2] > Applied [1])
-        if (bRank.tier !== aRank.tier) {
-          return bRank.tier - aRank.tier;
+        if (groupA !== groupB) {
+          return groupA - groupB;
         }
 
-        // 2. If both are Scheduled: soonest upcoming event time first
-        if (aRank.tier === 3 && bRank.tier === 3) {
+        // Within Scheduled: soonest upcoming event time first
+        if (groupA === 2) {
           const nextA = getNextEventTime(a);
           const nextB = getNextEventTime(b);
           if (nextA !== null && nextB !== null && nextA !== nextB) {
@@ -204,14 +179,25 @@ export default function DashboardClient({
           }
           if (nextA !== null) return -1;
           if (nextB !== null) return 1;
+
+          // Subscore for scheduled: interview > test > ppt
+          const sA = (a.status || '').toLowerCase();
+          const sB = (b.status || '').toLowerCase();
+          const rank = (st: string) => (st.includes('interview') ? 3 : st.includes('test') ? 2 : 1);
+          const diff = rank(sB) - rank(sA);
+          if (diff !== 0) return diff;
         }
 
-        // 3. Subscore within the tier (e.g. Interview > Test > PPT)
-        if (bRank.subScore !== aRank.subScore) {
-          return bRank.subScore - aRank.subScore;
+        // Within Completed: interview_completed > test_completed > ppt_completed
+        if (groupA === 3) {
+          const sA = (a.status || '').toLowerCase();
+          const sB = (b.status || '').toLowerCase();
+          const rank = (st: string) => (st.includes('interview') ? 3 : st.includes('test') ? 2 : 1);
+          const diff = rank(sB) - rank(sA);
+          if (diff !== 0) return diff;
         }
 
-        // 4. Secondary sort: recency of update
+        // Secondary sort: recency of update
         return new Date(b.lastUpdated || 0).getTime() - new Date(a.lastUpdated || 0).getTime();
       })
       .slice(0, 4);

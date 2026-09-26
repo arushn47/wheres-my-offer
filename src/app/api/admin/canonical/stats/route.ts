@@ -19,23 +19,23 @@ export async function GET() {
   try {
     const [canonicalTotalRes, canonicalCompleteRes, linkedEmailsRes, unlinkedCollegeRes, attachmentsRes] = await Promise.all([
       supabase
-        .from('canonical_emails')
+        .from('college_emails')
         .select('id', { count: 'exact', head: true }),
       supabase
-        .from('canonical_emails')
+        .from('college_emails')
         .select('id', { count: 'exact', head: true })
         .eq('processing_status', 'complete'),
       supabase
-        .from('emails')
+        .from('personal_emails')
         .select('id', { count: 'exact', head: true })
         .not('canonical_email_id', 'is', null),
       supabase
-        .from('emails')
+        .from('personal_emails')
         .select('id', { count: 'exact', head: true })
         .is('canonical_email_id', null)
         .ilike('sender', '%vitlions2027@vitbhopal.ac.in%'),
       supabase
-        .from('canonical_attachments')
+        .from('college_attachments')
         .select('id', { count: 'exact', head: true }),
     ]);
 

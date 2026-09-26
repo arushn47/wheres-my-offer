@@ -22,13 +22,13 @@ export async function GET() {
     const [drivesRes, companiesRes, emailsRes, appsRes] = await Promise.all([
       supabase
         .from('placement_drives')
-        .select('id, user_id, company_id, drive_number, normalized_drive_number, drive_name, role, category, ctc, stipend, location, updated_at')
+        .select('id, company_id, drive_number, normalized_drive_number, drive_name, role, category, ctc, stipend, location, updated_at')
         .order('updated_at', { ascending: false }),
       supabase
         .from('companies')
-        .select('id, user_id, name, aliases'),
+        .select('id, name, aliases'),
       supabase
-        .from('emails')
+        .from('personal_emails')
         .select('id, placement_drive_id, received_at, classification'),
       supabase
         .from('applications')

@@ -43,8 +43,8 @@ export async function scanAndPersistCandidateMatches(
 
   // 3. Fetch candidate test/shortlist circular emails linked to placement drives
   let emailQuery = supabase
-    .from('emails')
-    .select('id, gmail_message_id, gmail_account_id, subject, placement_drive_id, classification, body_snippet')
+    .from('personal_emails')
+    .select('id, gmail_message_id, gmail_account_id, subject, placement_drive_id, classification, body_snippet, college_email_id')
     .eq('user_id', userId)
     .not('placement_drive_id', 'is', null)
     .or('subject.ilike.%shortlist%,subject.ilike.%online test%,subject.ilike.%coding test%,subject.ilike.%assessment%,subject.ilike.%pearl research park%,subject.ilike.%prp%,subject.ilike.%anna auditorium%,classification.eq.shortlist');
@@ -59,11 +59,15 @@ export async function scanAndPersistCandidateMatches(
   // 4. Check which emails already have a recorded candidate match
   const { data: existingMatches } = await supabase
     .from('candidate_matches')
-    .select('email_id')
+    .select('email_id, college_email_id')
     .eq('user_id', userId);
 
-  const matchedEmailIds = new Set((existingMatches || []).map((m) => m.email_id));
-  let emailsToScan = relevantEmails.filter((e) => !matchedEmailIds.has(e.id));
+  const matchedEmailIds = new Set(
+    (existingMatches || [])
+      .map((m: any) => m.college_email_id || m.email_id)
+      .filter(Boolean)
+  );
+  let emailsToScan = relevantEmails.filter((e) => !matchedEmailIds.has(e.id) && !matchedEmailIds.has((e as any).college_email_id));
   if (emailsToScan.length === 0) return 0;
 
   // Cap emails to scan to prevent quota exhaustion
@@ -127,9 +131,8 @@ export async function scanAndPersistCandidateMatches(
       );
 
       if (excelMatch && excelMatch.matched && excelMatch.isActualShortlist) {
-        const { error: insertError } = await supabase.from('candidate_matches').insert({
+        const matchPayload: any = {
           user_id: userId,
-          email_id: email.id,
           placement_drive_id: email.placement_drive_id,
           neo_id: userNeoId || userEmail,
           match_type: 'xlsx_cell',
@@ -139,7 +142,14 @@ export async function scanAndPersistCandidateMatches(
             : null,
           matched_value: excelMatch.details,
           confidence: 'high',
-        });
+        };
+        if ((email as any).college_email_id) {
+          matchPayload.college_email_id = (email as any).college_email_id;
+        } else {
+          matchPayload.email_id = email.id;
+        }
+
+        const { error: insertError } = await supabase.from('candidate_matches').insert(matchPayload);
 
         if (!insertError || insertError.code === '23505') {
           newMatchesCount++;

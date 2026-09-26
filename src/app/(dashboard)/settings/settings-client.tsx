@@ -4,7 +4,7 @@ import { useState, useEffect } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { motion, AnimatePresence } from 'framer-motion';
-import { appToast } from '@/lib/toast';
+import { appToast } from '@/components/ui/toast';
 import {
   Mail,
   Fingerprint,

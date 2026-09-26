@@ -27,7 +27,6 @@ export async function fetchHistoryChanges(
         startHistoryId,
         maxResults: 100,
         pageToken,
-        historyTypes: ['messageAdded', 'labelAdded', 'labelRemoved', 'messageDeleted'],
       });
 
       if (response.data.historyId) {
@@ -36,6 +35,11 @@ export async function fetchHistoryChanges(
 
       if (response.data.history) {
         for (const record of response.data.history) {
+          if (record.messages) {
+            for (const msg of record.messages) {
+              if (msg.id) messageIds.add(msg.id);
+            }
+          }
           if (record.messagesAdded) {
             for (const item of record.messagesAdded) {
               if (item.message?.id) {

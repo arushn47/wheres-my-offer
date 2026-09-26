@@ -20,20 +20,19 @@ export default async function SearchPage() {
     { data: companies },
     { data: placementDrives },
     { data: applications },
-    { data: emails },
+    { data: personalEmails },
+    { data: collegeEmails },
     { data: events },
     { data: accounts },
   ] = await Promise.all([
     supabase
       .from('companies')
       .select('id, name, aliases, updated_at')
-      .eq('user_id', session.userId)
       .order('updated_at', { ascending: false }),
 
     supabase
       .from('placement_drives')
-      .select('id, company_id, drive_name, drive_number, role, category, ctc, stipend, location, updated_at')
-      .eq('user_id', session.userId),
+      .select('id, company_id, drive_name, drive_number, role, category, ctc, stipend, location, updated_at'),
 
     supabase
       .from('applications')
@@ -41,9 +40,15 @@ export default async function SearchPage() {
       .eq('user_id', session.userId),
 
     supabase
-      .from('emails')
-      .select('id, subject, sender, received_at, body_snippet, canonical_emails(body_text, body_snippet), placement_drive_id')
+      .from('personal_emails')
+      .select('id, subject, sender, received_at, body_snippet, college_email_id, placement_drive_id')
       .eq('user_id', session.userId)
+      .order('received_at', { ascending: false })
+      .limit(100),
+
+    supabase
+      .from('college_emails')
+      .select('id, subject, sender_email, received_at, created_at, body_snippet, body_text, parsed_company_name, parsed_drive_numbers')
       .order('received_at', { ascending: false })
       .limit(100),
 
@@ -163,22 +168,51 @@ export default async function SearchPage() {
     }
   }
 
+  const mappedPersonalEmails = (personalEmails || []).map((em) => {
+    const drive = em.placement_drive_id ? driveMap.get(em.placement_drive_id) : null;
+    const compId = drive?.company_id || em.placement_drive_id;
+    const comp = compId ? companyMap.get(compId) : null;
+    return {
+      id: em.id,
+      driveId: em.placement_drive_id,
+      subject: em.subject,
+      sender: em.sender,
+      receivedAt: em.received_at,
+      companyId: compId,
+      companyName: comp?.name || drive?.drive_name || null,
+      snippet: em.body_snippet,
+    };
+  });
+
+  const mappedCollegeEmails = (collegeEmails || []).map((ce) => {
+    // Match drive by parsed_drive_numbers or company name
+    let matchedDrive = null;
+    if (ce.parsed_drive_numbers && ce.parsed_drive_numbers.length > 0) {
+      for (const dn of ce.parsed_drive_numbers) {
+        matchedDrive = (placementDrives || []).find((d) => d.drive_number === dn) || null;
+        if (matchedDrive) break;
+      }
+    }
+    const compId = matchedDrive?.company_id || null;
+    const comp = compId ? companyMap.get(compId) : null;
+    return {
+      id: ce.id,
+      driveId: matchedDrive?.id || null,
+      subject: ce.subject,
+      sender: ce.sender_email,
+      receivedAt: (ce as any).received_at || ce.created_at,
+      companyId: compId,
+      companyName: comp?.name || ce.parsed_company_name || matchedDrive?.drive_name || null,
+      snippet: ce.body_text || ce.body_snippet,
+    };
+  });
+
   const searchData: SearchData = {
     companies: companyItems,
-    emails: (emails || []).map((em) => {
-      const drive = em.placement_drive_id ? driveMap.get(em.placement_drive_id) : null;
-      const compId = drive?.company_id || em.placement_drive_id;
-      const comp = compId ? companyMap.get(compId) : null;
-      return {
-        id: em.id,
-        driveId: em.placement_drive_id,
-        subject: em.subject,
-        sender: em.sender,
-        receivedAt: em.received_at,
-        companyId: compId,
-        companyName: comp?.name || drive?.drive_name || null,
-        snippet: em.canonical_emails?.[0]?.body_text || em.canonical_emails?.[0]?.body_snippet || em.body_snippet,
-      };
+    emails: [...mappedPersonalEmails, ...mappedCollegeEmails].sort((a, b) => {
+      const tA = a.receivedAt ? new Date(a.receivedAt).getTime() : 0;
+      const tB = b.receivedAt ? new Date(b.receivedAt).getTime() : 0;
+      return tB - tA;
     }),
     events: (events || []).map((ev) => {
       const drive = ev.placement_drive_id ? driveMap.get(ev.placement_drive_id) : null;

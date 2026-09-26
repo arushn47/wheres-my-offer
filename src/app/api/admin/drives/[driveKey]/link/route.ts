@@ -49,10 +49,10 @@ export async function POST(
       }
     }
 
-    // 2. Fetch target placement drives across all users
+    // 2. Fetch target placement drives
     let driveQuery = supabase
       .from('placement_drives')
-      .select('id, user_id, company_id, drive_number, normalized_drive_number, drive_name');
+      .select('id, company_id, drive_number, normalized_drive_number, drive_name, excluded_email_ids, source_college_email_id');
 
     if (driveNumber) {
       driveQuery = driveQuery.or(`drive_number.eq.${driveNumber},normalized_drive_number.eq.${driveNumber}`);
@@ -69,80 +69,66 @@ export async function POST(
       return NextResponse.json({ error: 'Target placement drive not found' }, { status: 404 });
     }
 
-    // Map user_id to placement_drive row
-    const userDriveMap = new Map<string, typeof matchedDrives[0]>();
-    for (const d of matchedDrives) {
-      userDriveMap.set(d.user_id, d);
-    }
-
     // 3. Resolve all email IDs to link
     let idsToLink: string[] = emailIds && emailIds.length > 0 ? emailIds : [emailId];
 
     if (!emailIds || emailIds.length === 0) {
       const { data: baseEmail } = await supabase
-        .from('emails')
-        .select('id, canonical_email_id, subject')
+        .from('personal_emails')
+        .select('id, college_email_id, canonical_email_id, subject')
         .eq('id', emailId)
         .maybeSingle();
 
-      if (baseEmail?.canonical_email_id) {
+      const collegeRef = baseEmail?.college_email_id || baseEmail?.canonical_email_id;
+      if (collegeRef) {
         const { data: siblings } = await supabase
-          .from('emails')
+          .from('personal_emails')
           .select('id')
-          .eq('canonical_email_id', baseEmail.canonical_email_id);
+          .or(`college_email_id.eq.${collegeRef},canonical_email_id.eq.${collegeRef}`);
         if (siblings && siblings.length > 0) {
           idsToLink = siblings.map((s) => s.id);
         }
       }
     }
 
+    // 3b. Remove linked email IDs from excluded_email_ids on matched drives
+    for (const d of matchedDrives) {
+      if (Array.isArray(d.excluded_email_ids) && d.excluded_email_ids.length > 0) {
+        const toRemove = new Set([...idsToLink, emailId].filter(Boolean));
+        const updatedExcluded = d.excluded_email_ids.filter((id: string) => !toRemove.has(id));
+        if (updatedExcluded.length !== d.excluded_email_ids.length) {
+          await supabase
+            .from('placement_drives')
+            .update({ excluded_email_ids: updatedExcluded })
+            .eq('id', d.id);
+        }
+      }
+    }
+
     // 4. Fetch the emails to identify their user_id
     const { data: targetEmails, error: emailFetchErr } = await supabase
-      .from('emails')
+      .from('personal_emails')
       .select('id, user_id, subject')
       .in('id', idsToLink);
-
-    if (emailFetchErr || !targetEmails || targetEmails.length === 0) {
-      return NextResponse.json({ error: 'No matching emails found to link' }, { status: 404 });
-    }
 
     const referenceDrive = matchedDrives[0];
     const affectedUserIds = new Set<string>();
 
-    for (const em of targetEmails) {
-      let userDrive = userDriveMap.get(em.user_id);
-
-      // If user doesn't have a placement_drive record for this company yet, create one
-      if (!userDrive) {
-        const { data: newDrive } = await supabase
-          .from('placement_drives')
-          .insert({
-            user_id: em.user_id,
-            company_id: referenceDrive.company_id,
-            drive_name: referenceDrive.drive_name,
-            drive_number: referenceDrive.drive_number,
-            normalized_drive_number: referenceDrive.normalized_drive_number,
-          })
-          .select('id, user_id, company_id, drive_number, normalized_drive_number, drive_name')
-          .single();
-
-        if (newDrive) {
-          userDrive = newDrive;
-          userDriveMap.set(em.user_id, newDrive);
-        }
-      }
-
-      if (userDrive) {
+    if (!emailFetchErr && targetEmails && targetEmails.length > 0) {
+      for (const em of targetEmails) {
         affectedUserIds.add(em.user_id);
 
-        // Update email to point to this placement_drive
+        // Update email to point directly to the global placement_drive
         await supabase
-          .from('emails')
+          .from('personal_emails')
           .update({
-            placement_drive_id: userDrive.id,
+            placement_drive_id: referenceDrive.id,
             assignment_state: 'manual',
             assignment_confidence: 'high',
             assignment_source: 'admin_manual',
+            is_relevant: true,
+            is_processed: true,
+            processed_at: new Date().toISOString(),
           })
           .eq('id', em.id);
 
@@ -152,7 +138,7 @@ export async function POST(
           .upsert(
             {
               email_id: em.id,
-              placement_drive_id: userDrive.id,
+              placement_drive_id: referenceDrive.id,
               user_id: em.user_id,
               link_type: 'primary',
               confidence: 'high',
@@ -161,6 +147,83 @@ export async function POST(
             },
             { onConflict: 'email_id,placement_drive_id' }
           );
+      }
+    } else {
+      // Check if target is a college broadcast circular
+      const { data: collegeEmails } = await supabase
+        .from('college_emails')
+        .select('id, subject, parsed_drive_numbers, parsed_company_name')
+        .in('id', idsToLink);
+
+      if (collegeEmails && collegeEmails.length > 0) {
+        const primaryCollegeEmail = collegeEmails[0];
+
+        // Set source_college_email_id on the drive if not already set
+        if (!matchedDrives[0].source_college_email_id) {
+          await supabase
+            .from('placement_drives')
+            .update({ source_college_email_id: primaryCollegeEmail.id })
+            .in('id', matchedDrives.map((d) => d.id));
+        }
+
+        // Update college_emails.parsed_drive_numbers so subsequent searches
+        // can detect this circular is already assigned
+        for (const ce of collegeEmails) {
+          const existingDriveNums: string[] = ce.parsed_drive_numbers || [];
+          const driveNum = referenceDrive.drive_number || referenceDrive.normalized_drive_number;
+          if (driveNum && !existingDriveNums.includes(driveNum)) {
+            await supabase
+              .from('college_emails')
+              .update({
+                parsed_drive_numbers: [...existingDriveNums, driveNum],
+                parsed_company_name: ce.parsed_company_name || referenceDrive.drive_name || null,
+              })
+              .eq('id', ce.id);
+          }
+        }
+
+        // Also link all personal_email receipts for this college circular to the drive,
+        // so the search API's unassignedOnly filter excludes them correctly.
+        const ceIds = collegeEmails.map((ce) => ce.id);
+        const { data: ceReceipts } = await supabase
+          .from('personal_emails')
+          .select('id, user_id')
+          .or(ceIds.map((id) => `college_email_id.eq.${id}`).join(','));
+
+        if (ceReceipts && ceReceipts.length > 0) {
+          for (const r of ceReceipts) {
+            affectedUserIds.add(r.user_id);
+            await supabase
+              .from('personal_emails')
+              .update({
+                placement_drive_id: referenceDrive.id,
+                assignment_state: 'manual',
+                assignment_confidence: 'high',
+                assignment_source: 'admin_manual',
+                is_relevant: true,
+                is_processed: true,
+                processed_at: new Date().toISOString(),
+              })
+              .eq('id', r.id);
+
+            await supabase
+              .from('email_drive_links')
+              .upsert(
+                {
+                  email_id: r.id,
+                  placement_drive_id: referenceDrive.id,
+                  user_id: r.user_id,
+                  link_type: 'primary',
+                  confidence: 'high',
+                  assignment_source: 'admin_manual',
+                  is_primary: true,
+                },
+                { onConflict: 'email_id,placement_drive_id' }
+              );
+          }
+        }
+      } else {
+        return NextResponse.json({ error: 'No matching emails found to link' }, { status: 404 });
       }
     }
 
@@ -206,22 +269,21 @@ export async function POST(
 
     // 6. Reprocess the drive for all affected users
     for (const userId of affectedUserIds) {
-      const drive = userDriveMap.get(userId);
-      if (drive) {
-        try {
-          await recalculateApplicationStatuses(userId, undefined, {
-            targetPlacementDriveIds: [drive.id],
-          });
-        } catch (repErr) {
-          console.error(`[Admin Link Email] Reprocess failed for user ${userId}:`, repErr);
-        }
+      try {
+        await recalculateApplicationStatuses(userId, undefined, {
+          targetPlacementDriveIds: [referenceDrive.id],
+          recalculateStatusesFromRemainingEvidence: true,
+        });
+      } catch (repErr) {
+        console.error(`[Admin Link Email] Reprocess failed for user ${userId}:`, repErr);
       }
     }
 
+    const linkedCount = targetEmails?.length || 1;
     return NextResponse.json({
       success: true,
-      message: `Successfully linked circular across ${targetEmails.length} student receipt(s) to ${referenceDrive.drive_name}.`,
-      linkedCount: targetEmails.length,
+      message: `Successfully linked circular across ${linkedCount} student receipt(s) to ${referenceDrive.drive_name}.`,
+      linkedCount,
       usersAffected: affectedUserIds.size,
     });
   } catch (err: any) {

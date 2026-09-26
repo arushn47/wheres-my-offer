@@ -15,6 +15,7 @@ import {
   X,
   ArrowUpRight,
   Zap,
+  Loader2,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { InAppNotification } from '@/components/notifications/notification-bell';
@@ -29,7 +30,8 @@ export type ToastVariant =
   | 'shortlist'
   | 'test'
   | 'interview'
-  | 'sync';
+  | 'sync'
+  | 'loading';
 
 export interface ToastAction {
   label: string;
@@ -95,6 +97,11 @@ const VARIANT_CONFIGS: Record<
     glowColor: 'from-emerald-500/20 via-transparent to-transparent',
     dotColor: 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]',
   },
+  loading: {
+    borderColor: 'border-amber-500/35 hover:border-amber-500/50',
+    glowColor: 'from-amber-500/20 via-transparent to-transparent',
+    dotColor: 'bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.8)]',
+  },
 };
 
 /**
@@ -143,15 +150,21 @@ export function PremiumToast({
         )}
       />
 
-      {/* App Logo Mark with micro status dot */}
+      {/* App Logo Mark with micro status dot or spinner */}
       <div className="relative shrink-0 flex items-center justify-center">
         <AppLogoMark size={28} className="shadow-md" />
-        <span
-          className={cn(
-            'absolute -bottom-0.5 -right-0.5 h-2 w-2 rounded-full ring-2 ring-[#0d0d11]',
-            config.dotColor
-          )}
-        />
+        {variant === 'loading' ? (
+          <span className="absolute -bottom-1 -right-1 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-[#0d0d11] ring-2 ring-[#0d0d11]">
+            <Loader2 className="h-2.5 w-2.5 text-amber-400 animate-spin" />
+          </span>
+        ) : (
+          <span
+            className={cn(
+              'absolute -bottom-0.5 -right-0.5 h-2 w-2 rounded-full ring-2 ring-[#0d0d11]',
+              config.dotColor
+            )}
+          />
+        )}
       </div>
 
       {/* Content Area: Title & Short Desc */}
@@ -187,6 +200,41 @@ export function PremiumToast({
 // ============================================
 
 export const appToast = {
+  /**
+   * Active loading / progress notification
+   */
+  loading: (
+    title: string,
+    description?: string,
+    action?: ToastAction,
+    duration = Infinity,
+    toastId?: string | number
+  ) => {
+    return toast.custom(
+      (id) => (
+        <PremiumToast
+          id={id}
+          variant="loading"
+          title={title}
+          description={description}
+          action={action}
+        />
+      ),
+      { id: toastId, duration }
+    );
+  },
+
+  /**
+   * Dismiss a toast by id, or all toasts
+   */
+  dismiss: (id?: string | number) => {
+    if (id !== undefined) {
+      toast.dismiss(id);
+    } else {
+      toast.dismiss();
+    }
+  },
+
   /**
    * Shortlist cracked alert
    */
@@ -272,7 +320,8 @@ export const appToast = {
     title: string,
     description?: string,
     action?: ToastAction,
-    duration = Infinity
+    duration = 5000,
+    toastId?: string | number
   ) => {
     return toast.custom(
       (id) => (
@@ -284,7 +333,7 @@ export const appToast = {
           action={action}
         />
       ),
-      { duration }
+      { id: toastId, duration }
     );
   },
 
@@ -295,7 +344,8 @@ export const appToast = {
     title: string,
     description?: string,
     action?: ToastAction,
-    duration = Infinity
+    duration = 7000,
+    toastId?: string | number
   ) => {
     return toast.custom(
       (id) => (
@@ -307,7 +357,7 @@ export const appToast = {
           action={action}
         />
       ),
-      { duration }
+      { id: toastId, duration }
     );
   },
 
@@ -318,7 +368,8 @@ export const appToast = {
     title: string,
     description?: string,
     action?: ToastAction,
-    duration = Infinity
+    duration = 6000,
+    toastId?: string | number
   ) => {
     return toast.custom(
       (id) => (
@@ -330,7 +381,7 @@ export const appToast = {
           action={action}
         />
       ),
-      { duration }
+      { id: toastId, duration }
     );
   },
 
@@ -341,7 +392,8 @@ export const appToast = {
     title: string,
     description?: string,
     action?: ToastAction,
-    duration = Infinity
+    duration = 5000,
+    toastId?: string | number
   ) => {
     return toast.custom(
       (id) => (
@@ -353,7 +405,7 @@ export const appToast = {
           action={action}
         />
       ),
-      { duration }
+      { id: toastId, duration }
     );
   },
 
@@ -364,7 +416,8 @@ export const appToast = {
     title: string,
     description?: string,
     action?: ToastAction,
-    duration = Infinity
+    duration = 6000,
+    toastId?: string | number
   ) => {
     return toast.custom(
       (id) => (
@@ -376,7 +429,7 @@ export const appToast = {
           action={action}
         />
       ),
-      { duration }
+      { id: toastId, duration }
     );
   },
 

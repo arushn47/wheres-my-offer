@@ -41,10 +41,10 @@ export async function POST(
       }
     }
 
-    // 1. Find all matching placement_drives to identify affected users
+    // 1. Find all matching placement_drives
     let query = supabase
       .from('placement_drives')
-      .select('id, user_id, drive_number, normalized_drive_number, drive_name');
+      .select('id, drive_number, normalized_drive_number, drive_name');
 
     if (driveNumber) {
       query = query.or(`drive_number.eq.${driveNumber},normalized_drive_number.eq.${driveNumber}`);
@@ -57,7 +57,27 @@ export async function POST(
       return NextResponse.json({ error: driveErr.message }, { status: 500 });
     }
 
-    const distinctUserIds = Array.from(new Set((drives || []).map((d) => d.user_id)));
+    const driveIds = (drives || []).map((d) => d.id);
+    if (driveIds.length === 0) {
+      return NextResponse.json({
+        success: true,
+        message: 'No drives found to reprocess',
+        usersAffected: 0,
+      });
+    }
+
+    // Find all users who track these drives via applications or linked emails
+    const [{ data: apps }, { data: links }] = await Promise.all([
+      supabase.from('applications').select('user_id').in('placement_drive_id', driveIds),
+      supabase.from('email_drive_links').select('user_id').in('placement_drive_id', driveIds),
+    ]);
+
+    const distinctUserIds = Array.from(
+      new Set([
+        ...(apps || []).map((a) => a.user_id),
+        ...(links || []).map((l) => l.user_id),
+      ])
+    );
 
     if (distinctUserIds.length === 0) {
       return NextResponse.json({
@@ -67,20 +87,13 @@ export async function POST(
       });
     }
 
-    // 2. Map drive IDs by user and reprocess ONLY this drive
-    const userDrivesMap = new Map<string, string[]>();
-    for (const d of drives || []) {
-      const list = userDrivesMap.get(d.user_id) || [];
-      list.push(d.id);
-      userDrivesMap.set(d.user_id, list);
-    }
-
     const results: Array<{ userId: string; updatedCount: number }> = [];
 
-    for (const [userId, targetDriveIds] of userDrivesMap.entries()) {
+    for (const userId of distinctUserIds) {
       try {
         const res = await recalculateApplicationStatuses(userId, undefined, {
-          targetPlacementDriveIds: targetDriveIds,
+          targetPlacementDriveIds: driveIds,
+          recalculateStatusesFromRemainingEvidence: true,
         });
         results.push({ userId, updatedCount: res.updatedCount });
       } catch (userErr) {

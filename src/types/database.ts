@@ -32,7 +32,6 @@ export interface DbGmailAccount {
 
 export interface DbCompany {
   id: string;
-  user_id: string;
   name: string;
   legal_name: string | null;
   aliases: string[];
@@ -42,7 +41,6 @@ export interface DbCompany {
 
 export interface DbPlacementDrive {
   id: string;
-  user_id: string;
   company_id: string;
 
   drive_number: string | null;
@@ -62,6 +60,7 @@ export interface DbPlacementDrive {
   identity_confidence: 'high' | 'medium' | 'low';
   identity_source: string | null;
   source_email_id: string | null;
+  source_college_email_id?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -92,7 +91,7 @@ export interface DbApplication {
   created_at: string;
 }
 
-export interface DbEmail {
+export interface DbPersonalEmail {
   id: string;
   gmail_account_id: string;
   user_id: string;
@@ -108,12 +107,57 @@ export interface DbEmail {
   assignment_confidence: 'high' | 'medium' | 'low' | null;
   assignment_source: string | null;
   rfc_message_id?: string | null;
+  college_email_id?: string | null;
   canonical_email_id?: string | null;
   is_processed: boolean;
   is_relevant: boolean;
   processed_at: string | null;
   created_at: string;
 }
+
+export type DbEmail = DbPersonalEmail;
+
+export interface DbCollegeEmail {
+  id: string;
+  content_key: string;
+  sender_email: string;
+  subject: string;
+  body_snippet: string | null;
+  body_text: string | null;
+  classification: string | null;
+  classification_confidence: number | null;
+  parsed_company_name: string | null;
+  parsed_drive_numbers: string[] | null;
+  parsed_job_details: Record<string, unknown> | null;
+  parsed_events: Record<string, unknown>[] | null;
+  parser_version: number;
+  processing_status: string;
+  message_id: string | null;
+  has_attachments: boolean;
+  metadata_key: string | null;
+  identity_version: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export type CanonicalEmail = DbCollegeEmail;
+
+export interface DbCollegeAttachment {
+  id: string;
+  college_email_id: string;
+  gmail_message_id: string;
+  gmail_account_id: string;
+  attachment_id: string;
+  filename: string;
+  size_bytes: number;
+  content_hash?: string | null;
+  extracted_rows?: Record<string, unknown>[] | null;
+  parse_status: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export type CanonicalAttachment = DbCollegeAttachment;
 
 export interface DbEmailDriveLink {
   id: string;
@@ -146,6 +190,7 @@ export interface DbCandidateMatch {
   user_id: string;
   attachment_id: string | null;
   email_id: string | null;
+  college_email_id?: string | null;
   placement_drive_id: string;
   neo_id: string;
   match_type: 'xlsx_cell' | 'xlsx_applied_list' | 'pdf_text' | 'docx_text' | 'email_body' | 'email_subject';
@@ -166,6 +211,7 @@ export interface DbEvent {
   venue: string | null;
   mode: 'online' | 'offline' | 'hybrid' | 'unknown' | null;
   source_email_id: string | null;
+  college_email_id?: string | null;
   confidence: 'high' | 'medium' | 'low' | 'ai';
   manual_override: boolean;
   gcal_event_id?: string | null;

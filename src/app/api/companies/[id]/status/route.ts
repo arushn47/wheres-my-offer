@@ -53,16 +53,15 @@ export async function PATCH(
   let targetDriveId: string | null = requestedDriveId || null;
 
   if (targetDriveId) {
-    const { data: ownedDrive } = await supabase
+    const { data: drive } = await supabase
       .from('placement_drives')
       .select('id, company_id')
       .eq('id', targetDriveId)
-      .eq('user_id', session.userId)
       .maybeSingle();
-    if (!ownedDrive) {
+    if (!drive) {
       return NextResponse.json({ error: { message: 'Placement drive not found', code: 'drive_not_found' } }, { status: 404 });
     }
-    targetDriveId = ownedDrive.id;
+    targetDriveId = drive.id;
   }
 
   // Resolve whether companyOrDriveId is a placement_drive id or company id
@@ -71,7 +70,6 @@ export async function PATCH(
       .from('placement_drives')
       .select('id, company_id')
       .eq('id', companyOrDriveId)
-      .eq('user_id', session.userId)
       .maybeSingle();
 
     if (directDrive) {
@@ -81,26 +79,23 @@ export async function PATCH(
       const { data: drives } = await supabase
         .from('placement_drives')
         .select('id')
-        .eq('user_id', session.userId)
         .eq('company_id', companyOrDriveId);
 
       if (drives && drives.length > 0) {
         targetDriveId = drives[0].id;
       } else {
-        const { data: ownedCompany } = await supabase
+        const { data: company } = await supabase
           .from('companies')
           .select('id')
           .eq('id', companyOrDriveId)
-          .eq('user_id', session.userId)
           .maybeSingle();
-        if (!ownedCompany) {
+        if (!company) {
           return NextResponse.json({ error: { message: 'Company not found', code: 'company_not_found' } }, { status: 404 });
         }
-        // Create initial drive for this company
+        // Create initial drive globally for this company
         const { data: newDrive } = await supabase
           .from('placement_drives')
           .insert({
-            user_id: session.userId,
             company_id: companyOrDriveId,
             identity_state: 'manually_assigned',
             identity_confidence: 'high',
