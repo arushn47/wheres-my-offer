@@ -39,6 +39,9 @@ interface SyncContextValue {
   progressPercent: number;
   lastSyncAt: string | null;
   startSync: (silent?: boolean) => Promise<void>;
+  pauseSync: () => Promise<void>;
+  isPausing: boolean;
+  isPaused: boolean;
   syncResult: SyncResult | null;
   dismissResult: () => void;
 }
@@ -54,6 +57,8 @@ export function SyncProvider({
 }) {
   const router = useRouter();
   const [isSyncing, setIsSyncing] = useState(false);
+  const [isPausing, setIsPausing] = useState(false);
+  const [isPaused, setIsPaused] = useState(false);
   const [syncProgress, setSyncProgress] = useState<SyncProgress | null>(null);
   const [syncResult, setSyncResult] = useState<SyncResult | null>(null);
   const [lastSyncAt, setLastSyncAt] = useState<string | null>(initialLastSyncAt || null);
@@ -104,6 +109,15 @@ export function SyncProvider({
             setSyncProgress(data.progress);
           }
         } else {
+          if (data.phase === 'paused' || data.progress?.paused) {
+            stopPolling();
+            isSyncingRef.current = false;
+            setIsSyncing(false);
+            setIsPausing(false);
+            setIsPaused(true);
+            setSyncProgress(data.progress || null);
+            return;
+          }
           // If pending, a batch just finished and more pages are queued — resume immediately
           if (data.phase === 'pending') {
             stopPolling();
@@ -167,6 +181,8 @@ export function SyncProvider({
   const handleSync = useCallback(
     async (silent: boolean = false, isChained: boolean = false) => {
       if (isSyncingRef.current && !isChained) return;
+      setIsPaused(false);
+      setIsPausing(false);
       isSyncingRef.current = true;
       setIsSyncing(true);
       setSyncResult(null);
@@ -261,8 +277,17 @@ export function SyncProvider({
                     if (parsed.lastSyncAt || parsed.result?.lastSyncAt) {
                       setLastSyncAt(parsed.lastSyncAt || parsed.result?.lastSyncAt);
                     }
-                    if (parsed.result?.hasMorePagesPending) {
-                      willAdvanceNextChunk = true;
+                    if (parsed.result?.paused || parsed.result?.hasMorePagesPending) {
+                      if (parsed.result?.paused) {
+                         stopPolling();
+                         isSyncingRef.current = false;
+                         setIsSyncing(false);
+                         setIsPausing(false);
+                         setIsPaused(true);
+                         setSyncProgress((prev) => prev ? { ...prev, phase: 'processing', currentSubject: 'Paused at saved checkpoint' } : null);
+                        return;
+                       }
+                       willAdvanceNextChunk = true;
                       setSyncProgress((prev) =>
                         prev
                           ? {
@@ -347,6 +372,16 @@ export function SyncProvider({
                 startPolling(true);
                 return;
               }
+              if (data.phase === 'pending' && (data.progress?.paused || data.progress?.errors?.some((error: string) => error.startsWith('Paused by user')))) {
+                stopPolling();
+                setIsSyncing(false);
+                isSyncingRef.current = false;
+                setIsPausing(false);
+                setIsPaused(true);
+                setSyncProgress(data.progress ? { ...data.progress, phase: 'processing' } : null);
+                router.refresh();
+                return;
+              }
               if (data.phase === 'pending') {
                 willAdvanceNextChunk = true;
                 if (chainedTimeoutRef.current) clearTimeout(chainedTimeoutRef.current);
@@ -354,6 +389,16 @@ export function SyncProvider({
                   chainedTimeoutRef.current = null;
                   handleSync(false, true);
                 }, 800);
+                return;
+              }
+              if (data.phase === 'paused' || data.progress?.paused) {
+                stopPolling();
+                setIsSyncing(false);
+                isSyncingRef.current = false;
+                setIsPausing(false);
+                setIsPaused(true);
+                setSyncProgress(data.progress ? { ...data.progress, phase: 'processing' } : null);
+                router.refresh();
                 return;
               }
               if (data.phase === 'complete') {
@@ -395,6 +440,16 @@ export function SyncProvider({
             if (data.isSyncing) {
               startPolling(true);
               return;
+            }
+            if (data.phase === 'pending' && (data.progress?.paused || data.progress?.errors?.some((error: string) => error.startsWith('Paused by user')))) {
+                stopPolling();
+                setIsSyncing(false);
+                isSyncingRef.current = false;
+                setIsPausing(false);
+                setIsPaused(true);
+                setSyncProgress(data.progress || null);
+                router.refresh();
+                return;
             }
             if (data.phase === 'pending') {
               willAdvanceNextChunk = true;
@@ -583,6 +638,19 @@ export function SyncProvider({
     setSyncResult(null);
   }, []);
 
+  const pauseSync = useCallback(async () => {
+    if (!isSyncingRef.current) return;
+    setIsPausing(true);
+    try {
+      const response = await fetch('/api/sync/pause', { method: 'POST' });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || 'Could not pause sync');
+    } catch (error) {
+      setIsPausing(false);
+      appToast.error('Pause failed', error instanceof Error ? error.message : 'Could not pause sync');
+    }
+  }, []);
+
   return (
     <SyncContext.Provider
       value={{
@@ -591,6 +659,9 @@ export function SyncProvider({
         progressPercent,
         lastSyncAt,
         startSync: handleSync,
+        pauseSync,
+        isPausing,
+        isPaused,
         syncResult,
         dismissResult,
       }}

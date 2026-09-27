@@ -1,4 +1,4 @@
-import { PlacementAiExtraction } from './ai-schema';
+import type { PlacementAiExtraction } from './ai-schema';
 import { parseDateTimeWithConfidence } from './events';
 
 export interface ValidatedAiExtraction {

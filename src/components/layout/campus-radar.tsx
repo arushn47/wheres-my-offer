@@ -1,6 +1,6 @@
 'use client';
 
-import { RefreshCw, CheckCircle2, Radio, Layers, Sparkles } from 'lucide-react';
+import { RefreshCw, CheckCircle2, Pause, Radio, Layers, Sparkles } from 'lucide-react';
 import { cn, timeAgo } from '@/lib/utils';
 import { useSync } from '@/context/sync-context';
 
@@ -22,6 +22,9 @@ export default function CampusRadar({ className, compact = false }: CampusRadarP
     progressPercent,
     lastSyncAt,
     startSync,
+    pauseSync,
+    isPausing,
+    isPaused,
     syncResult,
   } = useSync();
 
@@ -55,15 +58,21 @@ export default function CampusRadar({ className, compact = false }: CampusRadarP
         </div>
 
         {isSyncing ? (
-          <div className="flex items-center gap-1.5 rounded-lg border border-emerald-500/35 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-mono font-semibold text-emerald-300">
-            <RefreshCw className="h-2.5 w-2.5 text-emerald-400 animate-spin shrink-0" />
-            <span>
-              {hasMultiplePages
-                ? `P${currentPage}/${totalPages}`
-                : progressPercent > 0
-                  ? `${progressPercent}%`
-                  : 'Syncing'}
-            </span>
+          <div className="flex items-center gap-1.5">
+            <div className="flex items-center gap-1.5 rounded-lg border border-emerald-500/35 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-mono font-semibold text-emerald-300">
+              <RefreshCw className="h-2.5 w-2.5 text-emerald-400 animate-spin shrink-0" />
+              <span>{isPausing ? 'Pausing…' : hasMultiplePages ? `P${currentPage}/${totalPages}` : progressPercent > 0 ? `${progressPercent}%` : 'Syncing'}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => void pauseSync()}
+              disabled={isPausing}
+              className="flex items-center gap-1 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-semibold text-amber-200 hover:bg-amber-500/20 disabled:opacity-60"
+              title="Save progress and pause after the current batch"
+            >
+              <Pause className="h-2.5 w-2.5" />
+              Pause
+            </button>
           </div>
         ) : (
           <button
@@ -78,7 +87,7 @@ export default function CampusRadar({ className, compact = false }: CampusRadarP
             }
           >
             <RefreshCw className="h-3 w-3 text-emerald-400" />
-            <span>Sync</span>
+            <span>{isPaused ? 'Resume' : 'Sync'}</span>
           </button>
         )}
       </div>
@@ -103,15 +112,15 @@ export default function CampusRadar({ className, compact = false }: CampusRadarP
                 </span>
               )}
               <span className="truncate text-emerald-400 font-medium">
-                {syncProgress?.phase === 'initializing'
-                  ? 'Connecting inboxes…'
+                  {syncProgress?.phase === 'initializing'
+                  ? 'Connecting Personal inbox…'
                   : syncProgress?.phase === 'fetching'
-                    ? `Scanning ${syncProgress.accountType === 'personal' ? 'Personal' : 'College'}…`
+                    ? 'Scanning Personal inbox…'
                     : syncProgress?.phase === 'processing'
-                      ? `${syncProgress.accountType === 'personal' ? 'Personal' : 'College'} Inbox`
+                      ? 'Personal Inbox'
                       : syncProgress?.phase === 'complete'
-                        ? 'Finalizing index…'
-                        : 'Syncing inboxes…'}
+                        ? 'Finalizing shared archive matches…'
+                        : 'Syncing Personal inbox…'}
               </span>
             </div>
 
@@ -153,11 +162,11 @@ export default function CampusRadar({ className, compact = false }: CampusRadarP
         /* Idle Telemetry View */
         <div className="mt-2.5 space-y-1.5">
           <div className="flex items-center justify-between text-[10px] font-mono text-zinc-400">
-            <span>{lastSyncAt ? `Synced ${timeAgo(lastSyncAt)}` : 'Live radar active'}</span>
+            <span>{isPaused ? 'Paused · progress saved' : lastSyncAt ? `Synced ${timeAgo(lastSyncAt)}` : 'Live radar active'}</span>
             <span className="text-emerald-400/80 font-medium">Real-time Pub/Sub</span>
           </div>
           <p className="text-[10px] text-zinc-500 leading-tight">
-            Continuous radar indexing official CDC announcements and test circulars.
+              Personal inbox sync with shared College circular and shortlist matching.
           </p>
         </div>
       )}

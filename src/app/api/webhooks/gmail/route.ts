@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse, after } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { runSync } from '@/lib/sync/engine';
+import { runSharedCollegeSync } from '@/lib/sync/shared-college-sync';
 import { OAuth2Client } from 'google-auth-library';
 import { randomUUID } from 'node:crypto';
 
@@ -104,7 +105,7 @@ export async function POST(req: NextRequest) {
     // Find the user who owns this Gmail account
     const { data: account, error } = await supabase
       .from('gmail_accounts')
-      .select('id, user_id, last_history_id')
+      .select('id, user_id, account_type, email, access_token_encrypted, refresh_token_encrypted, token_expiry, last_sync_at, last_history_id')
       .eq('email', emailAddress)
       .eq('is_connected', true)
       .single();
@@ -122,10 +123,27 @@ export async function POST(req: NextRequest) {
 
     // Keep the invocation alive after acknowledging Pub/Sub. The lease in
     // runSync still deduplicates concurrent/replayed notifications.
-    console.log(`[Pub/Sub] Triggering background sync for user ${account.user_id} (${emailAddress}) at historyId ${historyId}`);
+    const isSharedCollegeSource =
+      account.account_type === 'college' &&
+      emailAddress.toLowerCase() === (process.env.SHARED_COLLEGE_EMAIL || 'arush.23bce10472@vitbhopal.ac.in').toLowerCase();
+
+    console.log(`[Pub/Sub] Triggering ${isSharedCollegeSource ? 'shared College ingest' : 'Personal sync'} for ${emailAddress} at historyId ${historyId}`);
     after(async () => {
       try {
-        await runSync(account.user_id);
+        if (isSharedCollegeSource) {
+          let result: Awaited<ReturnType<typeof runSharedCollegeSync>>;
+          let runs = 0;
+          do {
+            result = await runSharedCollegeSync({ limit: 100 });
+            runs++;
+            if (result.alreadyRunning || result.failed > 0 || !result.hasMore) break;
+          } while (runs < 20);
+          console.log(`[Shared College Ingest] ${emailAddress}:`, { runs, ...result });
+        } else if (account.account_type === 'personal') {
+          await runSync(account.user_id);
+        } else {
+          console.warn(`[Pub/Sub] Ignoring non-primary College inbox ${emailAddress}; configure SHARED_COLLEGE_EMAIL to ingest it.`);
+        }
         const { error: completeError } = await supabase.rpc('complete_gmail_pubsub_message', {
           p_subscription: subscription,
           p_message_id: messageId,

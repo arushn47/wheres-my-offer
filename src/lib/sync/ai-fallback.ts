@@ -1,16 +1,18 @@
 import crypto from 'crypto';
 import { GoogleGenAI } from '@google/genai';
 import {
-  PlacementAiExtraction,
   PlacementAiExtractionSchema,
   MODEL_ID,
   PROMPT_VERSION,
   SCHEMA_VERSION,
 } from './ai-schema';
 import { EXTRACTION_SYSTEM_PROMPT, buildUserPrompt } from './ai-prompt';
+import type { PlacementAiExtraction } from './ai-schema';
+import type {
+  ValidatedAiExtraction,
+} from './ai-deterministic-postprocess';
 import {
   postProcessAndSanitizeAiExtraction,
-  ValidatedAiExtraction,
 } from './ai-deterministic-postprocess';
 
 // In-memory cache for fast repeated runs during a session or dev server run

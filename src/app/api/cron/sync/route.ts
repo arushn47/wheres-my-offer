@@ -5,7 +5,7 @@ import { runSync, CRON_TOTAL_BUDGET_MS } from '@/lib/sync/engine';
 export const dynamic = 'force-dynamic';
 export const maxDuration = 300; // 5 min — handles multi-user sync on Vercel Pro
 
-async function executeBackgroundSync(userIds: string[]) {
+async function executeBackgroundSync(userIds: string[], includeSharedCollege = false) {
   const supabase = createAdminClient();
 
   // Renew any Gmail Pub/Sub watch subscriptions expiring within 48 hours.
@@ -53,6 +53,22 @@ async function executeBackgroundSync(userIds: string[]) {
   // can't stack and exceed maxDuration when there are multiple users.
   const globalDeadline = Date.now() + CRON_TOTAL_BUDGET_MS;
 
+  if (includeSharedCollege && Date.now() < globalDeadline) {
+    try {
+      const { runSharedCollegeSync } = await import('@/lib/sync/shared-college-sync');
+      let sharedResult: Awaited<ReturnType<typeof runSharedCollegeSync>>;
+      let batches = 0;
+      do {
+        sharedResult = await runSharedCollegeSync({ limit: 100 });
+        batches++;
+        if (sharedResult.alreadyRunning || sharedResult.failed > 0 || !sharedResult.hasMore) break;
+      } while (batches < 20 && Date.now() < globalDeadline - 5000);
+      console.log('[Cron Sync] Shared College inbox sync:', { batches, ...sharedResult });
+    } catch (error) {
+      console.error('[Cron Sync] Shared College inbox sync failed:', error);
+    }
+  }
+
   for (const userId of userIds) {
     if (Date.now() >= globalDeadline) {
       console.log(`[Cron Sync] Global deadline reached. Skipping remaining ${userIds.length - userIds.indexOf(userId)} user(s) — they will be picked up on the next tick.`);
@@ -84,7 +100,7 @@ async function executeBackgroundSync(userIds: string[]) {
 /**
  * GET /api/cron/sync
  * Scheduled background sync endpoint for Vercel Cron or external cron services (e.g. cron-job.org).
- * Runs sync automatically for all active users even when the web app is closed.
+ * Runs sync automatically for all active users; optionally includes the central shared College inbox (?sharedCollege=true).
  * Also renews Gmail Pub/Sub watch subscriptions that are close to expiry (7-day limit).
  */
 export async function GET(req: NextRequest) {
@@ -109,6 +125,7 @@ export async function GET(req: NextRequest) {
 
   try {
     const supabase = createAdminClient();
+    const includeSharedCollege = process.env.SHARED_COLLEGE_SYNC_ENABLED === 'true';
 
     // Get all users who have connected Gmail accounts
     const { data: accounts, error } = await supabase
@@ -156,11 +173,11 @@ export async function GET(req: NextRequest) {
     // Non-blocking execution for external cron services (cron-job.org):
     // Dispatches background work via Next.js after() and immediately responds 200 OK in ~50ms
     // to prevent external cron HTTP 30-second timeouts.
-    after(executeBackgroundSync(userIds));
+    after(executeBackgroundSync(userIds, includeSharedCollege));
 
     return NextResponse.json({
       success: true,
-      message: `Background sync triggered for ${userIds.length} user(s)`,
+      message: `Background sync triggered for ${userIds.length} user(s)${includeSharedCollege ? ' plus the shared College inbox' : ''}`,
       usersCount: userIds.length,
     });
   } catch (err: any) {

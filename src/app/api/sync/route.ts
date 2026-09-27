@@ -50,8 +50,8 @@ export async function POST(req: Request) {
   }
 
   const stream = new ReadableStream({
-    async start(controller) {
-      streamController = controller;
+  async start(controller) {
+    streamController = controller;
 
       const sendEvent = (event: string, data: unknown) => {
         if (isClosed || req.signal.aborted) return;

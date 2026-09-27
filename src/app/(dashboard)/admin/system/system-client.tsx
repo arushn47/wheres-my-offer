@@ -7,7 +7,6 @@ import {
   Clock,
   ExternalLink,
   Shield,
-  Loader2,
   CheckCircle2,
   AlertCircle,
   Database,
@@ -16,7 +15,7 @@ import {
   HardDrive,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { appToast } from '@/components/ui/toast';
+import type { SharedArchiveRefreshResult } from '@/lib/sync/shared-archive-refresh';
 
 interface CanonicalStats {
   totalCanonical: number;
@@ -26,51 +25,122 @@ interface CanonicalStats {
   totalCanonicalAttachments: number;
 }
 
+interface CanonicalAudit {
+  dryRun: true;
+  generatedAt: string;
+  archive: {
+    total: number;
+    bodyTextMissing: number;
+    bodyTextShort: number;
+    messageIdMissing: number;
+    outdatedIdentityVersion: number;
+    outdatedParserVersion: number;
+    classificationMissing: number;
+    parsedCompanyMissing: number;
+    parsedJobDetailsMissing: number;
+    parsedEventsMissing: number;
+    receivedAtMissing: number;
+    processingStatusCounts: Record<string, number>;
+    attachmentCount: number;
+    attachmentStatusCounts: Record<string, number>;
+    attachmentsMissingExtractedRows: number;
+    attachmentsMissingContentHash: number;
+    staleSamples: Array<{ id: string; subject: string; reasons: string[] }>;
+  };
+  onboarding: {
+    connectedCollegeInboxCount: number;
+    connectedCollegeInboxEmails: string[];
+  };
+  userTracking: {
+    applicationCount: number;
+    unsupportedNonManualApplicationCount: number;
+    unsupportedSamples: Array<{
+      userEmail: string | null;
+      company: string | null;
+      driveNumber: string | null;
+      status: string;
+      statusSource: string | null;
+    }>;
+  };
+}
+
 export default function SystemClient() {
   const [stats, setStats] = useState<CanonicalStats | null>(null);
   const [loading, setLoading] = useState(true);
-  const [backfilling, setBackfilling] = useState(false);
+  const [auditing, setAuditing] = useState(false);
+  const [audit, setAudit] = useState<CanonicalAudit | null>(null);
+  const [refreshPreview, setRefreshPreview] = useState<SharedArchiveRefreshResult | null>(null);
   const [feedbackMessage, setFeedbackMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
-  const fetchStats = async () => {
-    setLoading(true);
+  const fetchStats = async (showLoading = true) => {
+    if (showLoading) setLoading(true);
     try {
       const res = await fetch('/api/admin/canonical/stats');
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to load system stats');
+      if (!res.ok) throw new Error(typeof data.error === 'string' ? data.error : 'Failed to load system stats');
       setStats(data.stats || null);
-    } catch (err: any) {
-      setFeedbackMessage({ type: 'error', text: err.message || 'Failed to load system stats' });
+    } catch (error) {
+      setFeedbackMessage({ type: 'error', text: error instanceof Error ? error.message : 'Failed to load system stats' });
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    fetchStats();
+    void fetch('/api/admin/canonical/stats', { cache: 'no-store' })
+      .then(async (res) => {
+        const data = await res.json();
+        if (!res.ok) throw new Error(typeof data.error === 'string' ? data.error : 'Failed to load system stats');
+        setStats(data.stats || null);
+      })
+      .catch((error: unknown) => {
+        setFeedbackMessage({ type: 'error', text: error instanceof Error ? error.message : 'Failed to load system stats' });
+      })
+      .finally(() => setLoading(false));
   }, []);
 
-  const handleRunBackfill = async () => {
-    setBackfilling(true);
+  const handleRunArchiveAudit = async () => {
+    setAuditing(true);
     setFeedbackMessage(null);
-    const toastId = 'backfill-canonical';
-    appToast.loading('Running canonical backfill…', 'Linking existing receipts to canonical emails…', undefined, Infinity, toastId);
     try {
-      const res = await fetch('/api/admin/canonical/backfill', { method: 'POST' });
+      const res = await fetch('/api/admin/canonical/audit', { cache: 'no-store' });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Backfill failed');
-      const successText = data.message || 'Canonical backfill completed.';
-      appToast.success('Canonical backfill completed', successText, undefined, 5000, toastId);
+      if (!res.ok) throw new Error(data.error || 'Archive audit failed');
+      setAudit(data as CanonicalAudit);
       setFeedbackMessage({
         type: 'success',
-        text: successText,
+        text: `Read-only audit complete: ${data.archive.total} shared circulars, ${data.archive.bodyTextMissing} missing bodies, ${data.archive.attachmentsMissingExtractedRows} attachments without extracted rows, and ${data.userTracking.unsupportedNonManualApplicationCount} unsupported applications to review. No data was changed.`,
       });
-      fetchStats();
-    } catch (err: any) {
-      appToast.error('Backfill failed', err.message || 'Backfill failed', undefined, 7000, toastId);
-      setFeedbackMessage({ type: 'error', text: err.message || 'Backfill failed' });
+    } catch (err) {
+      setFeedbackMessage({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'Archive audit failed',
+      });
     } finally {
-      setBackfilling(false);
+      setAuditing(false);
+    }
+  };
+
+  const handleRefreshPreview = async (pageCursor?: string) => {
+    setAuditing(true);
+    setFeedbackMessage(null);
+    try {
+      const res = await fetch('/api/admin/canonical/refresh', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dryRun: true, limit: 100, pageCursor }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Archive refresh preview failed');
+      setRefreshPreview(data.result as SharedArchiveRefreshResult);
+      setFeedbackMessage({
+        type: 'success',
+        text: `Read-only refresh preview: ${data.result.scanned} message IDs scanned from ${data.result.sourceInbox || 'no available College inbox'}, ${data.result.reused} existing broadcasts reusable, ${data.result.wouldCreate} would create, ${data.result.attachmentsParsed} workbook attachments parseable. No database rows were changed.`,
+      });
+    } catch (error) {
+      setFeedbackMessage({ type: 'error', text: error instanceof Error ? error.message : 'Archive refresh preview failed' });
+    } finally {
+      setAuditing(false);
     }
   };
 
@@ -96,12 +166,21 @@ export default function SystemClient() {
 
         <div className="flex flex-wrap items-center gap-2">
           <button
-            onClick={handleRunBackfill}
-            disabled={backfilling}
-            className="inline-flex items-center justify-center gap-2 px-4 py-2 text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 rounded-lg shadow-sm transition-colors cursor-pointer flex-1 sm:flex-initial"
+            onClick={handleRunArchiveAudit}
+            disabled={auditing}
+            className="inline-flex items-center justify-center gap-2 px-4 py-2 text-xs font-semibold text-zinc-100 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 rounded-lg border border-zinc-700 transition-colors cursor-pointer flex-1 sm:flex-initial"
           >
-            <RefreshCw className={cn('w-3.5 h-3.5', backfilling && 'animate-spin')} />
-            <span>{backfilling ? 'Backfilling…' : 'Canonical Backfill'}</span>
+            <Activity className={cn('w-3.5 h-3.5', auditing && 'animate-pulse')} />
+            <span>{auditing ? 'Auditing…' : 'Read-only Archive Audit'}</span>
+          </button>
+
+          <button
+            onClick={() => void handleRefreshPreview()}
+            disabled={auditing}
+            className="inline-flex items-center justify-center gap-2 px-4 py-2 text-xs font-semibold text-zinc-100 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 rounded-lg border border-zinc-700 transition-colors cursor-pointer flex-1 sm:flex-initial"
+          >
+            <HardDrive className={cn('w-3.5 h-3.5', auditing && 'animate-pulse')} />
+            <span>{auditing ? 'Previewing…' : 'Refresh Preview · Dry Run'}</span>
           </button>
 
           <a
@@ -116,7 +195,7 @@ export default function SystemClient() {
           </a>
 
           <button
-            onClick={fetchStats}
+            onClick={() => void fetchStats()}
             disabled={loading}
             className="inline-flex items-center justify-center gap-2 px-3.5 py-2 text-xs font-semibold text-zinc-200 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 rounded-lg border border-zinc-700/60 transition-colors cursor-pointer"
           >
@@ -151,6 +230,145 @@ export default function SystemClient() {
             Dismiss
           </button>
         </div>
+      )}
+
+      {audit && (
+        <section className="space-y-4 rounded-xl border border-amber-500/25 bg-amber-500/[0.035] p-4 sm:p-5" data-testid="canonical-audit-results">
+          <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h2 className="text-sm font-semibold text-white">Shared archive audit · read-only</h2>
+              <p className="mt-1 text-xs text-zinc-500">Generated {new Date(audit.generatedAt).toLocaleString()} · no database rows were changed</p>
+            </div>
+            <span className="w-fit rounded-full border border-amber-500/25 bg-amber-500/10 px-2.5 py-1 font-mono text-[10px] font-semibold text-amber-300">
+              DRY RUN
+            </span>
+          </div>
+
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            {[
+              ['Shared circulars', audit.archive.total],
+              ['Missing bodies', audit.archive.bodyTextMissing],
+              ['Old identity version', audit.archive.outdatedIdentityVersion],
+              ['Attachments not parsed', audit.archive.attachmentsMissingExtractedRows],
+              ['Unsupported apps', audit.userTracking.unsupportedNonManualApplicationCount],
+              ['Connected College inboxes', audit.onboarding.connectedCollegeInboxCount],
+              ['Attachments in archive', audit.archive.attachmentCount],
+              ['Missing message IDs', audit.archive.messageIdMissing],
+            ].map(([label, value]) => (
+              <div key={label} className="rounded-lg border border-zinc-800/80 bg-zinc-950/65 p-3">
+                <div className="text-[10px] font-medium uppercase tracking-wide text-zinc-500">{label}</div>
+                <div className="mt-1.5 font-mono text-lg font-bold text-zinc-100">{Number(value).toLocaleString()}</div>
+              </div>
+            ))}
+          </div>
+
+          <div className="grid grid-cols-1 gap-3 text-xs sm:grid-cols-2">
+            <div className="rounded-lg border border-zinc-800/80 bg-zinc-950/65 p-3">
+              <div className="mb-2 font-semibold text-zinc-200">Other archive gaps</div>
+              <ul className="space-y-1 text-zinc-400">
+                <li>Short body text: {audit.archive.bodyTextShort}</li>
+                <li>Old parser version: {audit.archive.outdatedParserVersion}</li>
+                <li>Missing classification: {audit.archive.classificationMissing}</li>
+                <li>Missing company parse: {audit.archive.parsedCompanyMissing}</li>
+                <li>Missing job details: {audit.archive.parsedJobDetailsMissing}</li>
+                <li>Missing parsed events: {audit.archive.parsedEventsMissing}</li>
+                <li>Attachments without content hash: {audit.archive.attachmentsMissingContentHash}</li>
+              </ul>
+            </div>
+            <div className="rounded-lg border border-zinc-800/80 bg-zinc-950/65 p-3">
+              <div className="mb-2 font-semibold text-zinc-200">Shared attachment states</div>
+              {Object.entries(audit.archive.attachmentStatusCounts).length === 0 ? (
+                <p className="text-zinc-500">No attachment rows found.</p>
+              ) : (
+                <ul className="space-y-1 text-zinc-400">
+                  {Object.entries(audit.archive.attachmentStatusCounts).map(([state, count]) => (
+                    <li key={state}>{state}: {count}</li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
+
+          {audit.userTracking.unsupportedSamples.length > 0 && (
+            <div className="overflow-x-auto rounded-lg border border-zinc-800/80 bg-zinc-950/65">
+              <div className="border-b border-zinc-800 px-3 py-2.5 text-xs font-semibold text-zinc-200">
+                Applications without Personal or shortlist evidence (sample)
+              </div>
+              <table className="w-full min-w-[650px] text-left text-[11px]">
+                <thead className="text-zinc-500">
+                  <tr>
+                    <th className="px-3 py-2 font-medium">Student</th>
+                    <th className="px-3 py-2 font-medium">Company</th>
+                    <th className="px-3 py-2 font-medium">Drive</th>
+                    <th className="px-3 py-2 font-medium">Status source</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {audit.userTracking.unsupportedSamples.map((row, index) => (
+                    <tr key={`${row.userEmail}-${row.driveNumber}-${index}`} className="border-t border-zinc-800/70 text-zinc-300">
+                      <td className="px-3 py-2">{row.userEmail || 'Unknown'}</td>
+                      <td className="px-3 py-2">{row.company || 'Unknown'}</td>
+                      <td className="px-3 py-2 font-mono">{row.driveNumber || '—'}</td>
+                      <td className="px-3 py-2">{row.statusSource || '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+      )}
+
+      {refreshPreview && (
+        <section className="space-y-3 rounded-xl border border-cyan-500/25 bg-cyan-500/[0.035] p-4 sm:p-5" data-testid="canonical-refresh-preview">
+          <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h2 className="text-sm font-semibold text-white">One-time archive refresh preview · batch results</h2>
+              <p className="mt-1 text-xs text-zinc-500">Source inbox: {refreshPreview.sourceInbox || 'No connected College inbox'}</p>
+              <p className="mt-1 text-xs text-zinc-500">Fixed cutoff date: before {refreshPreview.before}</p>
+            </div>
+              <span className="w-fit rounded-full border border-cyan-500/25 bg-cyan-500/10 px-2.5 py-1 font-mono text-[10px] font-semibold text-cyan-300">
+                GMAIL READ-ONLY · NO DB WRITES
+              </span>
+          </div>
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            {[
+              ['Scanned IDs', refreshPreview.scanned],
+              ['Existing rows reused', refreshPreview.reused],
+              ['New rows proposed', refreshPreview.wouldCreate],
+              ['Workbook attachments parseable', refreshPreview.attachmentsParsed],
+              ['Attachments reused', refreshPreview.attachmentsReused],
+              ['Attachment bytes to read', refreshPreview.attachmentBytes],
+              ['Message errors', refreshPreview.failed],
+              ['Attachment errors', refreshPreview.attachmentsFailed],
+            ].map(([label, value]) => (
+              <div key={label} className="rounded-lg border border-zinc-800/80 bg-zinc-950/65 p-3">
+                <div className="text-[10px] font-medium uppercase tracking-wide text-zinc-500">{label}</div>
+                <div className="mt-1.5 font-mono text-lg font-bold text-zinc-100">{Number(value).toLocaleString()}</div>
+              </div>
+            ))}
+          </div>
+          {refreshPreview.nextAfterId && (
+            <button
+              onClick={() => void handleRefreshPreview(refreshPreview.nextAfterId || undefined)}
+              disabled={auditing}
+              className="inline-flex items-center gap-2 rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-3 py-2 text-xs font-semibold text-cyan-200 hover:bg-cyan-500/15 disabled:opacity-50"
+            >
+              <RefreshCw className={cn('h-3.5 w-3.5', auditing && 'animate-spin')} />
+              Preview next batch
+            </button>
+          )}
+          {refreshPreview.errors.length > 0 && (
+            <div className="rounded-lg border border-amber-500/20 bg-amber-500/[0.04] p-3 text-xs text-amber-200">
+              <div className="mb-1 font-semibold">Preview notes</div>
+              <ul className="space-y-1">
+                {refreshPreview.errors.slice(0, 5).map((item, index) => (
+                  <li key={`${item.subject}-${index}`}>{item.subject}: {item.message}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </section>
       )}
 
       {/* Storage & Deduplication Stats Cards */}
@@ -235,7 +453,7 @@ export default function SystemClient() {
                 <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
                 <span className="font-medium text-white">Google Cloud Pub/Sub</span>
               </div>
-              <span className="font-mono text-[11px] text-emerald-400 font-semibold">Active Webhook Push</span>
+              <span className="font-mono text-[11px] text-emerald-400 font-semibold">Personal + central College</span>
             </div>
 
             <div className="p-3 rounded-lg bg-zinc-950/70 border border-zinc-800 flex items-center justify-between">
@@ -243,7 +461,7 @@ export default function SystemClient() {
                 <Clock className="w-3.5 h-3.5 text-purple-400" />
                 <span className="font-medium text-white">cron-job.org Safety Net</span>
               </div>
-              <span className="font-mono text-[11px] text-purple-300">Daily @ 00:00 IST</span>
+              <span className="font-mono text-[11px] text-purple-300">Users + shared College</span>
             </div>
 
             <div className="p-3 rounded-lg bg-zinc-950/70 border border-zinc-800 flex items-center justify-between">

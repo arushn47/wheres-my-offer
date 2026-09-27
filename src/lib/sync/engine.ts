@@ -30,10 +30,12 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { getCurrentMessageText } from '@/lib/sync/body';
 import { resolvePlacementDrive } from '@/lib/sync/drive-resolution';
 import { getLiveApplicationScope } from '@/lib/sync/application-scope';
+import { getMissingPersonalSyncSetup } from '@/lib/sync/participation-evidence';
 import { randomUUID } from 'node:crypto';
 import {
   APPROVED_COLLEGE_SENDER,
   CANONICAL_IDENTITY_VERSION,
+  CANONICAL_PARSER_VERSION,
   canonicalBodyFromEmail,
   canReuseCanonicalBody,
   computeCanonicalContentKey,
@@ -74,7 +76,7 @@ async function getCanonicalAttachments(
   try {
     const { data } = await supabase
       .from('college_attachments')
-      .select('attachment_id, filename, size_bytes')
+      .select('attachment_id, filename, size_bytes, extracted_rows, parse_status')
       .eq('college_email_id', canonicalId);
 
     return (data || []).map((att) => ({
@@ -82,6 +84,8 @@ async function getCanonicalAttachments(
       filename: att.filename || 'attachment.xlsx',
       mimeType: att.filename?.endsWith('.csv') ? 'text/csv' : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       size: att.size_bytes || 0,
+      extractedRows: att.extracted_rows || undefined,
+      parseStatus: att.parse_status,
     }));
   } catch {
     return [];
@@ -163,6 +167,7 @@ async function shadowWriteCanonical(
         body_text: bodyText,
         message_id: normalizedMessageId,
         identity_version: CANONICAL_IDENTITY_VERSION,
+        parser_version: CANONICAL_PARSER_VERSION,
         has_attachments: Boolean(parsedEmail.hasAttachments || parsedEmail.attachments?.length > 0),
         metadata_key: computeCanonicalMetadataKey(parsedEmail.senderEmail || parsedEmail.sender, parsedEmail.subject, parsedEmail.bodySnippet),
         classification_confidence:
@@ -174,6 +179,7 @@ async function shadowWriteCanonical(
             ? 0.4
             : null,
         parsed_company_name: companyName || null,
+        parsed_drive_numbers: extractAllDriveNumbers(`${parsedEmail.subject}\n${bodyText}`),
         parsed_job_details: extractJobDetails(bodyText),
         parsed_events: canonicalEvents,
         processing_status: 'complete' as const,
@@ -209,11 +215,17 @@ async function shadowWriteCanonical(
       if (bodyText && bodyText.length > 500) {
         const { data: existingCanon } = await supabase
           .from('college_emails')
-          .select('body_text')
+          .select('body_text, identity_version, parser_version, parsed_job_details, parsed_events')
           .eq('id', canonicalId)
           .maybeSingle();
 
-        if (!existingCanon?.body_text) {
+        if (
+          !existingCanon?.body_text ||
+          (existingCanon.identity_version || 0) < CANONICAL_IDENTITY_VERSION ||
+          (existingCanon.parser_version || 0) < CANONICAL_PARSER_VERSION ||
+          !existingCanon.parsed_job_details ||
+          !existingCanon.parsed_events
+        ) {
           await supabase
             .from('college_emails')
             .update({
@@ -221,7 +233,9 @@ async function shadowWriteCanonical(
               body_snippet: bodyText.slice(0, 50000),
               parsed_job_details: extractJobDetails(bodyText),
               parsed_events: canonicalEvents,
+              parsed_drive_numbers: extractAllDriveNumbers(`${parsedEmail.subject}\n${bodyText}`),
               identity_version: CANONICAL_IDENTITY_VERSION,
+              parser_version: CANONICAL_PARSER_VERSION,
               message_id: normalizedMessageId || undefined,
               updated_at: new Date().toISOString(),
             })
@@ -243,7 +257,19 @@ async function shadowWriteCanonical(
       }
 
       if (parsedEmail.attachments && parsedEmail.attachments.length > 0) {
+        // Gmail attachment_ids rotate between fetches, so the (college_email_id, attachment_id)
+        // conflict target cannot dedupe shadow writes. Skip files the canonical already
+        // records by filename+size — otherwise every user sync inserts another un-hashed
+        // 'pending' lookalike row for attachments the shared worker has already parsed.
+        const { data: existingShadowAttachments } = await supabase
+          .from('college_attachments')
+          .select('filename,size_bytes')
+          .eq('college_email_id', canonicalId);
+        const recordedFiles = new Set(
+          (existingShadowAttachments || []).map((row) => `${row.filename || ''}|${row.size_bytes || 0}`)
+        );
         for (const attachment of parsedEmail.attachments) {
+          if (recordedFiles.has(`${attachment.filename || ''}|${attachment.size || 0}`)) continue;
           await supabase.from('college_attachments').upsert({
             college_email_id: canonicalId,
             gmail_message_id: parsedEmail.gmailMessageId,
@@ -254,6 +280,7 @@ async function shadowWriteCanonical(
             parse_status: 'pending',
             updated_at: new Date().toISOString(),
           }, { onConflict: 'college_email_id,attachment_id', ignoreDuplicates: true });
+          recordedFiles.add(`${attachment.filename || ''}|${attachment.size || 0}`);
         }
       }
     }
@@ -277,7 +304,7 @@ async function findReusableCanonicalEmail(
 
   const { data, error } = await supabase
     .from('college_emails')
-    .select('id, content_key, message_id, sender_email, subject, body_text, body_snippet, classification, classification_confidence, parsed_company_name, parsed_drive_numbers, parsed_job_details, parsed_events, processing_status, identity_version, has_attachments, metadata_key')
+    .select('id, content_key, message_id, sender_email, subject, body_text, body_snippet, classification, classification_confidence, parsed_company_name, parsed_drive_numbers, parsed_job_details, parsed_events, processing_status, identity_version, parser_version, has_attachments, metadata_key')
     .eq('message_id', normalizedMessageId)
     .eq('identity_version', CANONICAL_IDENTITY_VERSION)
     .maybeSingle();
@@ -352,6 +379,7 @@ export interface SyncPageRow {
 
 export interface ProcessPageResult {
   completed: boolean;
+  paused?: boolean;
   emailsProcessed: number;
   newEmails: number;
   newCompanies: number;
@@ -391,6 +419,7 @@ export interface SyncResult {
   totalPagesCount?: number;
   isPage0Complete?: boolean;
   hasMorePagesPending?: boolean;
+  paused?: boolean;
   accounts: {
     email: string;
     accountType: string;
@@ -810,7 +839,7 @@ async function processSingleMessage(
         assignmentConfidence: driveAssignmentConfidence,
       });
 
-      if (applicationScope.kind === 'drive') {
+      if (applicationScope.kind === 'drive' && isPersonal) {
         const { count } = await supabase
           .from('personal_emails')
           .select('id', { count: 'exact', head: true })
@@ -822,10 +851,9 @@ async function processSingleMessage(
           ctx.liveTracker.newCompanies++;
         }
 
-        // DUAL-WRITE FIX: Baseline initialization only!
-        // Do NOT overwrite status with 'withdrawn' or keywords here.
-        // Leave all status evaluation, withdrawals, opt-outs, and promotions
-        // strictly to processEmailForEventsAndStatus!
+        // Only a user-specific Personal NeoPAT message may initialize this user's
+        // application. College circulars update the shared drive catalog; they do
+        // not prove this user was eligible or received the drive.
         const { data: currentApp } = await supabase
           .from('applications')
           .select('id')
@@ -842,7 +870,7 @@ async function processSingleMessage(
           const baseApp = {
             user_id: userId,
             status: 'not_applied',
-            status_source: isPersonal ? 'neopat_personal_email' : 'college_email_announcement',
+            status_source: 'neopat_personal_email',
             status_confidence: 'high',
             status_source_email_at: parsedEmail.receivedAt.toISOString(),
             last_updated: new Date().toISOString(),
@@ -1154,7 +1182,8 @@ export async function processPage(
   onProgress?: (progress: SyncProgress) => void,
   initialCounts?: { newEmails: number; newCompanies: number; skippedDuplicates: number },
   globalDeadline?: number,
-  totalPagesCount?: number
+  totalPagesCount?: number,
+  shouldPause?: () => boolean | Promise<boolean>
 ): Promise<ProcessPageResult> {
   const updateCheckpoint = async (nextOffset: number, status?: SyncPageRow['status']) => {
     if (page.id === 'ephemeral-page') return;
@@ -1383,6 +1412,19 @@ export async function processPage(
     // Persist checkpoint after each batch to survive sudden shutdowns
     await updateCheckpoint(currentIndex);
 
+    if (page.id !== 'ephemeral-page' && currentIndex < chronoSortedMsgIds.length && await shouldPause?.()) {
+      await updateCheckpoint(currentIndex, 'pending');
+      return {
+        completed: false,
+        paused: true,
+        emailsProcessed: emailsProcessedCount,
+        newEmails: newEmailsCount,
+        newCompanies: newCompaniesCount,
+        skippedDuplicates: skippedDuplicatesCount,
+        errors: errorsList,
+      };
+    }
+
     if (INTER_BATCH_DELAY_MS > 0 && i + batchSize < chronoSortedMsgIds.length) {
       await new Promise((r) => setTimeout(r, INTER_BATCH_DELAY_MS));
     }
@@ -1404,6 +1446,17 @@ export async function processPage(
 // In-memory active sync trackers (active within current Node.js server process)
 const activeSyncMap = new Map<string, SyncProgress>();
 const activeSyncLocks = new Set<string>();
+const syncPauseRequests = new Set<string>();
+
+async function isPauseRequested(supabase: ReturnType<typeof createAdminClient>, userId: string): Promise<boolean> {
+  const { data, error } = await supabase
+    .from('sync_state')
+    .select('pause_requested')
+    .eq('user_id', userId)
+    .maybeSingle();
+  if (error) throw error;
+  return Boolean(data?.pause_requested);
+}
 
 export function getActiveSyncProgress(userId: string): SyncProgress | null {
   return activeSyncMap.get(userId) || null;
@@ -1416,6 +1469,13 @@ export function isUserSyncActive(userId: string): boolean {
 export function resetActiveSyncLock(userId: string): void {
   activeSyncLocks.delete(userId);
   activeSyncMap.delete(userId);
+  syncPauseRequests.delete(userId);
+}
+
+export function requestUserSyncPause(userId: string): boolean {
+  if (!activeSyncLocks.has(userId)) return false;
+  syncPauseRequests.add(userId);
+  return true;
 }
 
 // ============================================
@@ -1447,9 +1507,9 @@ export async function runSync(
   if (options?.force) {
     resetActiveSyncLock(userId);
     try {
-      await supabase
-        .from('sync_state')
-        .update({
+        await supabase
+          .from('sync_state')
+          .update({
           is_syncing: false,
           lease_expires_at: null,
           updated_at: new Date().toISOString(),
@@ -1470,8 +1530,8 @@ export async function runSync(
   }
 
   const connectedAccounts = (accounts || []) as GmailAccount[];
-  const hasPersonal = connectedAccounts.some((a) => a.account_type === 'personal');
-  const hasCollege = connectedAccounts.some((a) => a.account_type === 'college');
+  const sortedAccounts = connectedAccounts.filter((account) => account.account_type === 'personal');
+  const hasPersonal = sortedAccounts.length > 0;
 
   // Fetch user's configured Neo ID and email
   const { data: userData } = await supabase
@@ -1482,13 +1542,8 @@ export async function runSync(
   const userNeoId = userData?.neo_id || null;
   const userEmail = userData?.email || '';
 
-  // RULE: Guard sync until user completes all 3 onboarding setup items
-  if (!hasPersonal || !hasCollege || !userNeoId) {
-    const missing: string[] = [];
-    if (!hasPersonal) missing.push('Personal Gmail (for NeoPAT drives)');
-    if (!hasCollege) missing.push('College Gmail (for CTC/JDs)');
-    if (!userNeoId) missing.push('NeoPAT Registration ID');
-
+  const missing = getMissingPersonalSyncSetup({ hasPersonal, userNeoId });
+  if (missing.length > 0) {
     throw new Error(
       `Complete setup to sync: Please add ${missing.join(', ')} in Settings.`
     );
@@ -1526,16 +1581,10 @@ export async function runSync(
   const globalDeadline = options?.globalDeadline ?? (Date.now() + totalBudgetMs);
 
   // Determine if this is an initial discovery sync across any connected account
-  const isInitialSync = connectedAccounts.some((a) => !a.last_history_id);
+  const isInitialSync = sortedAccounts.some((a) => !a.last_history_id);
 
   // Sort accounts so 'personal' is processed FIRST
   // This allows official NeoPAT emails to establish master company records first
-  const sortedAccounts = connectedAccounts.sort((a, b) => {
-    if (a.account_type === 'personal' && b.account_type !== 'personal') return -1;
-    if (a.account_type !== 'personal' && b.account_type === 'personal') return 1;
-    return 0;
-  });
-
   const result: SyncResult = {
     totalEmailsFetched: 0,
     totalEmailsProcessed: 0,
@@ -1654,6 +1703,10 @@ export async function runSync(
 
     // 2. Process each account using count-based, resumable pages
     for (const account of sortedAccounts) {
+      if (syncPauseRequests.has(userId)) {
+        result.paused = true;
+        break;
+      }
       if (leaseLost) throw new Error('Sync lease lost; stopping this run');
       if (Date.now() >= globalDeadline - 4000) {
         console.log(`[SyncEngine] Budget nearing expiry for user ${userId}. Pausing before account ${account.email}.`);
@@ -1889,6 +1942,10 @@ export async function runSync(
 
             for (const targetPage of remainingPages) {
               if (leaseLost) throw new Error('Sync lease lost; stopping this run');
+              if (syncPauseRequests.has(userId)) {
+                result.paused = true;
+                break;
+              }
               if (Date.now() >= globalDeadline) {
                 console.log(`[Cron Sync] Global deadline reached for account ${account.email}. Stopping page loop.`);
                 break;
@@ -1931,7 +1988,8 @@ export async function runSync(
                   skippedDuplicates: result.skippedDuplicates,
                 },
                 globalDeadline,
-                totalPagesCount
+                totalPagesCount,
+                () => syncPauseRequests.has(userId)
               );
 
               accountResult.emailsProcessed += pageRes.emailsProcessed;
@@ -1945,6 +2003,7 @@ export async function runSync(
               result.totalPagesCount = totalPagesCount;
 
               if (!pageRes.completed) {
+                if (pageRes.paused) result.paused = true;
                 // Page hit its own time budget mid-page; next_offset was persisted.
                 // Move to the next account — this page will resume on the next cron tick.
                 console.log(`[Cron Sync] Page ${targetIndex} paused mid-page for ${account.email}. Advancing to next account.`);
@@ -1980,6 +2039,7 @@ export async function runSync(
             }
             result.isPage0Complete = refreshedPages?.find((p: any) => p.page_index === 0)?.status === 'complete' || pages[0]?.id === 'ephemeral-page';
             result.hasMorePagesPending = !allDone;
+            if (result.paused) break;
 
           } else {
             // ── FOREGROUND / MANUAL SYNC PATH ────────────────────────────────────────────
@@ -2030,7 +2090,8 @@ export async function runSync(
                   skippedDuplicates: result.skippedDuplicates,
                 },
                 globalDeadline,
-                totalPagesCount
+                totalPagesCount,
+                () => syncPauseRequests.has(userId)
               );
 
               accountResult.emailsProcessed += pageRes.emailsProcessed;
@@ -2045,6 +2106,7 @@ export async function runSync(
 
               if (!pageRes.completed) {
                 // Mid-page budget consumed; next_offset persisted
+                if (pageRes.paused) result.paused = true;
                 break;
               }
             }
@@ -2098,21 +2160,28 @@ export async function runSync(
     }
 
     // Check whether any sync_pages across ANY accounts remain pending
+    const personalAccountIds = sortedAccounts.map((account) => account.id);
     const { data: allPendingPages } = await supabase
       .from('sync_pages')
       .select('status')
-      .eq('user_id', userId);
+      .eq('user_id', userId)
+      .in('gmail_account_id', personalAccountIds);
 
     const hasAnyPending = (allPendingPages || []).some((p) => p.status !== 'complete');
     const hadCompletedInitialPages = (allPendingPages || []).length > 0 && !hasAnyPending;
     result.hasMorePagesPending = hasAnyPending;
+    if (syncPauseRequests.has(userId)) {
+      result.paused = true;
+      result.hasMorePagesPending = true;
+      result.errors = result.errors.filter((message) => !message.toLowerCase().includes('sync lease'));
+    }
 
     // 5. Circular reconciliation: reconcile unlinked college circulars against user companies
     // IDLE & ARCHIVE GUARD: ONLY run heavy post-sync steps (reconciliation, dedup, status recalc, calendar)
     // when new emails were actually received or initial setup pages just completed.
     // This prevents idle cron runs from downloading thousands of email rows every 15 minutes and exhausting database egress!
     const hasNewData = (result.newEmails > 0 || result.newCompanies > 0 || hadCompletedInitialPages);
-    if (!result.hasMorePagesPending && hasNewData) {
+    if (!result.paused && !result.hasMorePagesPending && hasNewData) {
       try {
         const { data: unlinkedEmails } = await supabase
           .from('personal_emails')
@@ -2509,12 +2578,18 @@ export async function runSync(
       // For regular incremental syncs (1-3 emails), statuses and events are already updated incrementally
       // by processEmailForEventsAndStatus during page processing. Running full recalculation over all 1,500+ emails
       // on incremental syncs is what caused 1m 44s runtimes, lease loss, and hundreds of MBs in egress.
-      if (hadCompletedInitialPages) {
+      if (!result.paused && !result.hasMorePagesPending && (hadCompletedInitialPages || result.newEmails > 0 || result.newCompanies > 0)) {
         const remainingBudgetMs = options?.globalDeadline ? options.globalDeadline - Date.now() : Infinity;
         if (remainingBudgetMs > 30_000) {
           try {
-            const { scanAndPersistCandidateMatches } = await import('@/lib/sync/attachment-scanner');
-            await scanAndPersistCandidateMatches(supabase, userId);
+            const { scanSharedCollegeCandidateMatches } = await import('@/lib/sync/attachment-scanner');
+            const personalScanProgress: SyncProgress = {
+              phase: 'processing', accountEmail: '', accountType: 'shared', totalMessages: 0,
+              processedMessages: 0, newEmails: result.newEmails, newCompanies: result.newCompanies,
+              skippedDuplicates: result.skippedDuplicates, errors: [], currentSubject: 'Matching shared College shortlist archive…',
+            };
+            notifyProgress(personalScanProgress, true);
+            await scanSharedCollegeCandidateMatches(supabase, userId);
           } catch (scanErr) {
             console.warn('[Post-Sync Attachment Scan] Non-critical error:', scanErr);
           }
@@ -2562,18 +2637,21 @@ export async function runSync(
     clearInterval(heartbeatTimer);
     activeSyncLocks.delete(userId);
     activeSyncMap.delete(userId);
+    syncPauseRequests.delete(userId);
     try {
       await dbWriteChain.catch(() => {});
     } catch {}
     try {
       const isError = result.errors.length > 0 && result.totalEmailsProcessed === 0;
-      const isComplete = !result.hasMorePagesPending;
+      const isComplete = !result.hasMorePagesPending && !result.paused;
       try {
         await supabase.rpc('release_sync_lease', {
           p_user_id: userId,
           p_run_id: runId,
           p_phase: isError ? 'error' : (isComplete ? 'complete' : 'pending'),
-          p_last_error: result.errors.length > 0 ? result.errors[result.errors.length - 1] : null,
+          p_last_error: result.paused
+            ? 'Paused by user at a saved checkpoint'
+            : (result.errors.length > 0 ? result.errors[result.errors.length - 1] : null),
         });
       } catch {}
 
@@ -2582,7 +2660,9 @@ export async function runSync(
         .from('sync_state')
         .update({
           is_syncing: false,
-          phase: isError ? 'error' : (isComplete ? 'complete' : 'pending'),
+          pause_requested: false,
+            phase: isError ? 'error' : (isComplete ? 'complete' : 'pending'),
+            last_error: result.paused ? 'Paused by user at a saved checkpoint' : (result.errors.length > 0 ? result.errors[result.errors.length - 1] : null),
           completed_at: new Date().toISOString(),
           lease_expires_at: null,
           updated_at: new Date().toISOString(),

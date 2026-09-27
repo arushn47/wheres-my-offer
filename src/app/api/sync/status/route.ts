@@ -35,8 +35,12 @@ export async function GET() {
   // 3. Fetch latest sync timestamp across accounts
   const { data: accounts } = await supabase
     .from('gmail_accounts')
-    .select('last_sync_at')
+    .select('id, last_sync_at, account_type')
     .eq('user_id', session.userId);
+
+  const personalAccountIds = (accounts || [])
+    .filter((account) => account.account_type === 'personal')
+    .map((account) => account.id);
 
   const lastSyncAt =
     accounts
@@ -54,6 +58,29 @@ export async function GET() {
     });
   }
 
+  if (dbSyncState?.last_error?.startsWith('Paused by user')) {
+    return NextResponse.json({
+      isSyncing: false,
+      phase: 'paused',
+      progress: {
+        phase: 'pending',
+        accountEmail: dbSyncState.account_email || '',
+        accountType: 'personal',
+        totalMessages: dbSyncState.total_messages || 0,
+        processedMessages: dbSyncState.processed_messages || 0,
+        newEmails: dbSyncState.new_emails || 0,
+        newCompanies: dbSyncState.new_companies || 0,
+        skippedDuplicates: dbSyncState.skipped_duplicates || 0,
+        errors: [],
+        isInitialSync: dbSyncState.is_initial_sync,
+        currentPageIndex: dbSyncState.current_page_index ?? 0,
+        totalPagesCount: dbSyncState.total_pages ?? 1,
+        paused: true,
+      },
+      lastSyncAt,
+    });
+  }
+
   if (dbSyncState?.is_syncing) {
     const updatedAt = new Date(dbSyncState.updated_at || 0).getTime();
     // 90 seconds timeout: active syncs touch updated_at every <= 15s. If untouched for > 90s, the process was killed/interrupted
@@ -64,27 +91,69 @@ export async function GET() {
       const alreadyIndexed = dbSyncState.skipped_duplicates || 0;
       const remainingMessages = Math.max(0, totalMessages - processedMessages);
       const isResuming = alreadyIndexed > 0 && remainingMessages > 0;
+      let currentAccountEmail = dbSyncState.account_email || '';
+      let activePhase = dbSyncState.phase;
+      let activeTotal = totalMessages;
+      let activeProcessed = processedMessages;
+      let currentPageIndex = dbSyncState.current_page_index ?? 0;
+      let totalPagesCount = dbSyncState.total_pages ?? 1;
+      let accountType = dbSyncState.account_type || '';
+      let personalPagesExist = false;
+
+      if (personalAccountIds.length > 0) {
+        const { data: personalPages } = await supabase
+          .from('sync_pages')
+          .select('gmail_account_id, page_index, message_ids, next_offset')
+          .eq('user_id', session.userId)
+          .in('gmail_account_id', personalAccountIds)
+          .neq('status', 'complete')
+          .order('page_index', { ascending: true });
+        if (personalPages?.length) {
+          personalPagesExist = true;
+          const page = personalPages[0];
+          const account = accounts?.find((candidate) => candidate.id === page.gmail_account_id);
+          currentAccountEmail = account?.id === page.gmail_account_id ? (dbSyncState.account_email || '') : currentAccountEmail;
+          accountType = 'personal';
+          activePhase = 'processing';
+          activeTotal = Array.isArray(page.message_ids) ? page.message_ids.length : totalMessages;
+          activeProcessed = page.next_offset || 0;
+          currentPageIndex = page.page_index;
+          totalPagesCount = personalPages.length;
+        }
+      }
+
+      // The user-facing sync now scans only Personal Gmail. Legacy College
+      // locks/pages must not keep Campus Radar spinning after that path is retired.
+      if (dbSyncState.account_type === 'college' && !personalPagesExist) {
+        return NextResponse.json({
+          isSyncing: false,
+          phase: 'idle',
+          progress: null,
+          lastSyncAt,
+        });
+      }
 
       return NextResponse.json({
         isSyncing: true,
-        phase: dbSyncState.phase,
+        phase: activePhase,
         progress: {
-          phase: dbSyncState.phase,
-          accountEmail: dbSyncState.account_email || '',
-          accountType: dbSyncState.account_type || '',
-          totalMessages,
-          processedMessages,
+          phase: activePhase,
+          accountEmail: currentAccountEmail,
+          accountType,
+          totalMessages: activeTotal,
+          processedMessages: activeProcessed,
           alreadyIndexed,
           remainingMessages,
           isResuming,
           newEmails: dbSyncState.new_emails || 0,
           newCompanies: dbSyncState.new_companies || 0,
           skippedDuplicates: dbSyncState.skipped_duplicates || 0,
-          errors: dbSyncState.last_error ? [dbSyncState.last_error] : [],
           currentSubject: dbSyncState.current_subject,
           isInitialSync: dbSyncState.is_initial_sync,
-          currentPageIndex: dbSyncState.current_page_index ?? 0,
-          totalPagesCount: dbSyncState.total_pages ?? 1,
+          paused: Boolean(dbSyncState.last_error?.startsWith('Paused by user')),
+          errors: dbSyncState.last_error ? [dbSyncState.last_error] : [],
+          currentPageIndex,
+          totalPagesCount,
         },
         lastSyncAt,
       });

@@ -15,7 +15,7 @@ export const dynamic = 'force-dynamic';
  * 3. Deletes auth identity if present.
  * 4. Clears session cookie so they are signed out completely.
  */
-export async function DELETE(req: Request) {
+export async function DELETE() {
   const session = await getSession();
   if (!session?.userId) {
     return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
@@ -25,29 +25,54 @@ export async function DELETE(req: Request) {
   const supabase = createAdminClient();
 
   try {
+    const { data: syncState, error: syncStateError } = await supabase
+      .from('sync_state')
+      .select('is_syncing, lease_expires_at')
+      .eq('user_id', userId)
+      .maybeSingle();
+
+    if (syncStateError) throw new Error(`Failed to check sync status: ${syncStateError.message}`);
+    if (
+      syncState?.is_syncing &&
+      syncState.lease_expires_at &&
+      new Date(syncState.lease_expires_at).getTime() > Date.now()
+    ) {
+      return NextResponse.json(
+        { error: 'A sync is currently running. Wait for it to finish before terminating your account.' },
+        { status: 409 }
+      );
+    }
+
     // 1. Fetch connected Gmail accounts to revoke tokens with Google
-    const { data: accounts } = await supabase
+    const { data: accounts, error: accountsError } = await supabase
       .from('gmail_accounts')
-      .select('id, access_token_encrypted, refresh_token_encrypted')
+      .select('id, email, access_token_encrypted, refresh_token_encrypted')
       .eq('user_id', userId);
+    if (accountsError) throw new Error(`Failed to load connected Gmail accounts: ${accountsError.message}`);
 
     if (accounts && accounts.length > 0) {
       for (const acc of accounts) {
-        const tokenToRevoke = acc.refresh_token_encrypted
-          ? decrypt(acc.refresh_token_encrypted)
-          : acc.access_token_encrypted
-          ? decrypt(acc.access_token_encrypted)
-          : null;
+        try {
+          const tokenToRevoke = acc.refresh_token_encrypted
+            ? decrypt(acc.refresh_token_encrypted)
+            : acc.access_token_encrypted
+            ? decrypt(acc.access_token_encrypted)
+            : null;
 
-        if (tokenToRevoke) {
-          try {
-            await fetch(`https://oauth2.googleapis.com/revoke?token=${encodeURIComponent(tokenToRevoke)}`, {
+          if (tokenToRevoke) {
+            const revokeResponse = await fetch(`https://oauth2.googleapis.com/revoke?token=${encodeURIComponent(tokenToRevoke)}`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
             });
-          } catch (err) {
-            console.warn('[Account Deletion] Failed to revoke Google token:', err);
+            if (!revokeResponse.ok) {
+              console.warn(
+                `[Account Deletion] Google token revocation returned ${revokeResponse.status} for ${acc.email}`
+              );
+            }
           }
+        } catch (err) {
+          // Revocation failure must not prevent deleting local credentials and user data.
+          console.warn(`[Account Deletion] Failed to revoke Google token for ${acc.email}:`, err);
         }
       }
     }
@@ -57,6 +82,7 @@ export async function DELETE(req: Request) {
       supabase.from('events').delete().eq('user_id', userId),
       supabase.from('candidate_matches').delete().eq('user_id', userId),
       supabase.from('notifications').delete().eq('user_id', userId),
+      supabase.from('email_drive_links').delete().eq('user_id', userId),
       supabase.from('push_subscriptions').delete().eq('user_id', userId),
       supabase.from('notification_preferences').delete().eq('user_id', userId),
       supabase.from('applications').delete().eq('user_id', userId),
@@ -64,6 +90,9 @@ export async function DELETE(req: Request) {
       supabase.from('sync_pages').delete().eq('user_id', userId),
       supabase.from('sync_state').delete().eq('user_id', userId),
       supabase.from('gmail_accounts').delete().eq('user_id', userId),
+      ...(accounts?.length
+        ? [supabase.from('gmail_pubsub_inbox').delete().in('email_address', accounts.map((account) => account.email))]
+        : []),
     ]);
     const cleanupError = cleanupResults.find((result) => result.error)?.error;
     if (cleanupError) {
@@ -105,10 +134,10 @@ export async function DELETE(req: Request) {
       success: true,
       message: 'Account and all associated placement data deleted permanently.',
     });
-  } catch (err: any) {
+  } catch (err) {
     console.error('[Account Deletion Error]:', err);
     return NextResponse.json(
-      { error: err.message || 'Failed to terminate account cleanly' },
+      { error: err instanceof Error ? err.message : 'Failed to terminate account cleanly' },
       { status: 500 }
     );
   }

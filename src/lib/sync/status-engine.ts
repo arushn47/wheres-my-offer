@@ -1,9 +1,14 @@
 import type { ParsedEmail } from '@/lib/gmail/client';
-import { extractEvents, extractJobDetails, type ExtractedEvent } from '@/lib/sync/events';
+import { extractEvents, extractJobDetails, extractAllDriveNumbers, type ExtractedEvent } from '@/lib/sync/events';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { isInactiveStatus } from '@/lib/stages';
 import { deriveEventEndTime } from '@/lib/event-duration';
-import { isApprovedCanonicalSender } from '@/lib/sync/canonical-email';
+import { CANONICAL_IDENTITY_VERSION, CANONICAL_PARSER_VERSION, isApprovedCanonicalSender } from '@/lib/sync/canonical-email';
+import {
+  hasUserPlacementEvidence,
+  isConfirmedShortlistEvidence,
+  isShortlistMatchEvidence,
+} from '@/lib/sync/participation-evidence';
 
 /**
  * Converts HTML email content to clean plain text so table cells, divs, and paragraphs
@@ -186,6 +191,15 @@ export async function processEmailForEventsAndStatus(
         /shortlist|selection[_\s-]*list|test[_\s-]*shortlist|selected[_\s-]*student/i.test(a.filename)
       )
   );
+  const hasUncachedRelevantExcelAttachment = email.attachments.some((attachment) =>
+    /\.(xlsx|xls|csv)$/i.test(attachment.filename) &&
+    !(attachment.parseStatus === 'complete' && attachment.extractedRows?.length)
+  );
+  const hasCachedSharedAttachment = Boolean(
+    email.attachments.some((attachment) =>
+      Boolean(attachment.extractedRows?.length) && attachment.parseStatus === 'complete'
+    )
+  );
 
   const isSelectionOrResultNotice =
     emailClass === 'result' ||
@@ -208,7 +222,7 @@ export async function processEmailForEventsAndStatus(
     // "shortlisted students/candidates list" anywhere in body (e.g. Gmail snippet)
     /(?:shortlisted|selected)\s+(?:students?|candidates?)(?:\s+list)?/i.test(fullText);
 
-  const isShortlistEmail = (hasShortlistAttachment || isExplicitShortlistNotice) && !isAppliedOrOptInRoster;
+  const isShortlistEmail = (hasShortlistAttachment || hasCachedSharedAttachment || isExplicitShortlistNotice) && !isAppliedOrOptInRoster;
   const announcedRound = announcedShortlistRound(email.subject, fullText);
   const previousRound: ShortlistRound | null =
     announcedRound === 'interview' ? 'test' :
@@ -242,14 +256,17 @@ export async function processEmailForEventsAndStatus(
     !isNeoMatched &&
     gmail &&
     email.hasAttachments &&
-    email.attachments.length > 0 &&
+    hasUncachedRelevantExcelAttachment &&
     isAttachmentRelevant
   ) {
     const { scanExcelAttachmentsForNeoId } = await import('@/lib/sync/excel-parser');
     const excelMatch = await scanExcelAttachmentsForNeoId(
       gmail,
       email.gmailMessageId,
-      email.attachments,
+      email.attachments.filter((attachment) =>
+        /\.(xlsx|xls|csv)$/i.test(attachment.filename) &&
+        !(attachment.parseStatus === 'complete' && attachment.extractedRows?.length)
+      ),
       userNeoId,
       userEmail,
       isShortlistEmail  // Pass shortlist context so unnamed Excel files get correct classification
@@ -334,7 +351,63 @@ export async function processEmailForEventsAndStatus(
   }
   if (isEliminationEmail) isNeoMatched = false;
 
-  if (isNeoMatched) {
+  const hasConfirmedCollegeShortlistMatch = isConfirmedShortlistEvidence({
+    isCollegeBroadcast,
+    isNeoMatched,
+    isShortlistEmail,
+    isInAppliedList,
+    isEliminationEmail,
+  });
+
+  if (isCollegeBroadcast) {
+    const [
+      { count: personalDriveEmailCount, error: personalEvidenceError },
+      { data: existingEvidenceApp, error: applicationEvidenceError },
+      { data: existingCandidateMatches, error: candidateEvidenceError },
+    ] = await Promise.all([
+      supabase
+        .from('personal_emails')
+        .select('id', { count: 'exact', head: true })
+        .eq('user_id', userId)
+        .eq('placement_drive_id', targetDriveId),
+      supabase
+        .from('applications')
+        .select('status, manual_override')
+        .eq('user_id', userId)
+        .eq('placement_drive_id', targetDriveId)
+        .maybeSingle(),
+      supabase
+        .from('candidate_matches')
+        .select('match_type, matched_value, matched_round_type')
+        .eq('user_id', userId)
+        .eq('placement_drive_id', targetDriveId),
+    ]);
+
+    if (personalEvidenceError) throw personalEvidenceError;
+    if (applicationEvidenceError) throw applicationEvidenceError;
+    if (candidateEvidenceError) throw candidateEvidenceError;
+
+    const hasStoredShortlistMatch = (existingCandidateMatches || []).some((match) =>
+      isShortlistMatchEvidence({
+        matchType: match.match_type,
+        matchedValue: match.matched_value,
+        matchedRoundType: match.matched_round_type,
+      })
+    );
+
+    const hasUserEvidence = hasUserPlacementEvidence({
+      hasPersonalDriveEvidence: (personalDriveEmailCount || 0) > 0,
+      hasConfirmedShortlistMatch: hasConfirmedCollegeShortlistMatch || hasStoredShortlistMatch,
+      manualOverride: Boolean(existingApp?.manual_override),
+    }) || Boolean(existingEvidenceApp?.status && existingEvidenceApp.status !== 'not_applied');
+
+    // Shared College announcements enrich global catalog data only. Stop before
+    // any user-scoped matches, events, application writes, or notifications unless
+    // this student has Personal-email, actual shortlist, or manual evidence.
+    if (!hasUserEvidence) return;
+  }
+
+  if (isNeoMatched && (!isCollegeBroadcast || hasConfirmedCollegeShortlistMatch)) {
     // Only record genuine shortlist matches (never applied/opt-in rosters)
     const matchPayload: any = {
       user_id: userId,
@@ -370,6 +443,28 @@ export async function processEmailForEventsAndStatus(
       if (tagError) throw tagError;
     } else if (candidateMatchError) {
       throw candidateMatchError;
+    }
+  }
+
+  if (!isNeoMatched && email.hasAttachments && email.attachments.some((attachment) => attachment.extractedRows?.length)) {
+    const { scanSharedCollegeAttachmentsForNeoId } = await import('@/lib/sync/excel-parser');
+    const cachedResult = await scanSharedCollegeAttachmentsForNeoId(
+      supabase,
+      email.canonicalEmailId || emailDbId,
+      userNeoId,
+      userEmail,
+      isShortlistEmail
+    );
+    if (cachedResult?.matched) {
+      if (cachedResult.isActualShortlist) {
+        isNeoMatched = true;
+        matchType = 'xlsx_cell';
+        matchDetail = cachedResult.details;
+      } else {
+        isInAppliedList = true;
+        matchType = 'xlsx_applied_list';
+        matchDetail = cachedResult.details;
+      }
     }
   }
 
@@ -473,6 +568,8 @@ export async function processEmailForEventsAndStatus(
         eventQuery = eventQuery.gte('start_time', startOfDay).lte('start_time', endOfDay);
       } else if (startTimeIso) {
         eventQuery = eventQuery.eq('start_time', startTimeIso);
+      } else if (!event.startTime) {
+        eventQuery = eventQuery.is('start_time', null);
       }
 
       const { data: existingEvents } = await eventQuery.limit(1);

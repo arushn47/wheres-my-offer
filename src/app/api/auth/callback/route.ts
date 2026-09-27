@@ -129,7 +129,7 @@ export async function GET(request: Request) {
       if (!existingUser && !existingSecondary) {
         return NextResponse.redirect(
           `${appUrl}/login?error=${encodeURIComponent(
-            'Please sign in with your Personal Gmail address (where NeoPAT registration emails arrive). You can connect your official VIT College email in the next step.'
+            'Please sign in with your Personal Gmail address (where NeoPAT registration emails arrive). You will connect your official VIT College email in the next step.'
           )}`
         );
       }

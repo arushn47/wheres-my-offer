@@ -73,8 +73,9 @@ CREATE TABLE IF NOT EXISTS public.canonical_emails (
   sender_email TEXT NOT NULL,
   subject TEXT NOT NULL,
   body_snippet TEXT,
-  body_text TEXT,
-  message_id TEXT,
+   body_text TEXT,
+   received_at TIMESTAMPTZ,
+   message_id TEXT,
   metadata_key TEXT,
   has_attachments BOOLEAN,
   classification TEXT,
@@ -83,8 +84,8 @@ CREATE TABLE IF NOT EXISTS public.canonical_emails (
   parsed_drive_numbers JSONB,
   parsed_job_details JSONB,
   parsed_events JSONB,
-  parser_version INTEGER NOT NULL DEFAULT 1,
-  identity_version INTEGER NOT NULL DEFAULT 2,
+   parser_version INTEGER NOT NULL DEFAULT 1,
+   identity_version INTEGER NOT NULL DEFAULT 2,
   processing_status TEXT NOT NULL DEFAULT 'pending'::text
     CHECK (processing_status = ANY (ARRAY['pending'::text, 'processing'::text, 'complete'::text, 'error'::text])),
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -96,7 +97,8 @@ CREATE TABLE IF NOT EXISTS public.canonical_emails (
 -- 5. canonical_attachments (Global cross-tenant deduplicated attachments)
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS public.canonical_attachments (
-  id UUID NOT NULL DEFAULT gen_random_uuid(),
+   id UUID NOT NULL DEFAULT gen_random_uuid(),
+   content_key TEXT,
   canonical_email_id UUID NOT NULL,
   gmail_message_id TEXT NOT NULL,
   gmail_account_id UUID NOT NULL,
@@ -104,7 +106,8 @@ CREATE TABLE IF NOT EXISTS public.canonical_attachments (
   filename TEXT,
   size_bytes BIGINT,
   content_hash TEXT UNIQUE,
-  extracted_rows JSONB,
+   extracted_rows JSONB,
+   parse_error TEXT,
   parse_status TEXT NOT NULL DEFAULT 'pending'::text
     CHECK (parse_status = ANY (ARRAY['pending'::text, 'processing'::text, 'complete'::text, 'error'::text])),
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -507,6 +510,28 @@ CREATE INDEX IF NOT EXISTS idx_canonical_emails_status_identity ON public.canoni
 CREATE INDEX IF NOT EXISTS idx_canonical_emails_body_text_not_null ON public.canonical_emails(id) WHERE body_text IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_canonical_attachments_email_id ON public.canonical_attachments(canonical_email_id);
 CREATE INDEX IF NOT EXISTS idx_canonical_attachments_hash ON public.canonical_attachments(content_hash);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_canonical_attachments_email_attachment
+  ON public.canonical_attachments(canonical_email_id, attachment_id);
+CREATE INDEX IF NOT EXISTS idx_canonical_attachments_parse_status
+  ON public.canonical_attachments(parse_status, updated_at);
+
+-- Database-backed lock shared by admin refresh workers.
+-- Single shared College Gmail worker lease and resumable message/page checkpoint.
+CREATE TABLE IF NOT EXISTS public.shared_college_sync_state (
+  gmail_account_id UUID PRIMARY KEY REFERENCES public.gmail_accounts(id) ON DELETE CASCADE,
+  is_syncing BOOLEAN NOT NULL DEFAULT FALSE,
+  run_id UUID,
+  phase TEXT NOT NULL DEFAULT 'idle',
+  initial_scan_complete BOOLEAN NOT NULL DEFAULT FALSE,
+  next_page_token TEXT,
+  pending_message_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+  pending_offset INTEGER NOT NULL DEFAULT 0,
+  pending_next_page_token TEXT,
+  pending_history_id TEXT,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  lease_expires_at TIMESTAMPTZ,
+  last_error TEXT
+);
 
 -- Placement drives
 CREATE UNIQUE INDEX IF NOT EXISTS idx_placement_drives_user_drive_number
@@ -613,7 +638,7 @@ AS $$
   )
   ON CONFLICT (user_id) DO UPDATE
   SET run_id = EXCLUDED.run_id,
-      is_syncing = TRUE,
+       is_syncing = TRUE,
       phase = 'initializing',
       updated_at = NOW(),
       lease_expires_at = EXCLUDED.lease_expires_at
@@ -800,6 +825,43 @@ AS $$
   SET status = 'failed', locked_until = NOW(), updated_at = NOW(), last_error = LEFT(p_error, 2000)
   WHERE subscription = p_subscription AND message_id = p_message_id
     AND run_id = p_run_id AND status = 'processing'
+  RETURNING TRUE;
+$$;
+
+CREATE OR REPLACE FUNCTION public.acquire_college_archive_refresh_lease(
+  p_run_id UUID,
+  p_lease_seconds INTEGER DEFAULT 300
+)
+RETURNS BOOLEAN
+LANGUAGE SQL
+VOLATILE
+SET search_path = public, pg_temp
+AS $$
+  INSERT INTO public.college_archive_refresh_lease(singleton, run_id, locked_until, updated_at)
+  VALUES (TRUE, p_run_id, NOW() + make_interval(secs => GREATEST(30, LEAST(p_lease_seconds, 900))), NOW())
+  ON CONFLICT (singleton) DO UPDATE
+  SET run_id = EXCLUDED.run_id,
+      locked_until = EXCLUDED.locked_until,
+      updated_at = NOW()
+  WHERE public.college_archive_refresh_lease.locked_until IS NULL
+     OR public.college_archive_refresh_lease.locked_until <= NOW()
+  RETURNING TRUE;
+$$;
+
+CREATE OR REPLACE FUNCTION public.release_college_archive_refresh_lease(
+  p_run_id UUID,
+  p_error TEXT DEFAULT NULL
+)
+RETURNS BOOLEAN
+LANGUAGE SQL
+VOLATILE
+SET search_path = public, pg_temp
+AS $$
+  UPDATE public.college_archive_refresh_lease
+  SET run_id = NULL,
+      locked_until = NULL,
+      updated_at = NOW()
+  WHERE singleton IS TRUE AND run_id = p_run_id
   RETURNING TRUE;
 $$;
 

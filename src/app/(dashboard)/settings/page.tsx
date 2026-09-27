@@ -8,7 +8,7 @@ import { detectCampus, detectBranch, detectRegNo } from '@/lib/utils';
 
 export const metadata: Metadata = {
   title: 'Settings & Preferences',
-  description: "Manage connected Gmail accounts, Neo ID matching rules, and notification preferences in Where's My Offer?.",
+   description: "Manage connected Gmail accounts, Neo ID matching rules, and notification preferences in Where's My Offer?.",
 };
 
 export default async function SettingsPage() {

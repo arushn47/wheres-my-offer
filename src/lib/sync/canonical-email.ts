@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { htmlToCanonicalText } from '@/lib/sync/body';
 
 export const CANONICAL_IDENTITY_VERSION = 2;
+export const CANONICAL_PARSER_VERSION = 2;
 export const APPROVED_COLLEGE_SENDER = 'vitlions2027@vitbhopal.ac.in';
 
 export function extractSenderAddress(sender: string | null | undefined): string {
@@ -90,6 +91,7 @@ export interface CanonicalEmailCacheRow {
   parsed_job_details: Record<string, unknown> | null;
   parsed_events: unknown[] | null;
   processing_status: string;
+  parser_version: number;
   identity_version: number;
   has_attachments: boolean | null;
   metadata_key?: string | null;
@@ -105,6 +107,7 @@ export function canReuseCanonicalBody(row: CanonicalEmailCacheRow | null): row i
     row &&
     row.processing_status === 'complete' &&
     row.identity_version === CANONICAL_IDENTITY_VERSION &&
+    row.parser_version >= CANONICAL_PARSER_VERSION &&
     row.body_text
   );
 }

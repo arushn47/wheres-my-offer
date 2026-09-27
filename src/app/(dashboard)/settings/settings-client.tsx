@@ -319,9 +319,10 @@ export default function SettingsClient({
         );
         router.refresh();
       }
-    } catch (err: any) {
+    } catch (err) {
       if (!completedSuccessfully) {
-        const isNetworkErr = err?.message?.toLowerCase().includes('network') || err?.message?.toLowerCase().includes('fetch');
+        const errorMessage = err instanceof Error ? err.message : 'Re-indexing failed';
+        const isNetworkErr = errorMessage.toLowerCase().includes('network') || errorMessage.toLowerCase().includes('fetch');
         if (isNetworkErr) {
           appToast.info(
             'Re-index updated',
@@ -329,7 +330,7 @@ export default function SettingsClient({
           );
           router.refresh();
         } else {
-          appToast.error('Reprocess notice', err?.message || 'Re-indexing encountered an issue');
+          appToast.error('Reprocess notice', errorMessage || 'Re-indexing encountered an issue');
         }
       }
     } finally {
@@ -346,7 +347,10 @@ export default function SettingsClient({
       const res = await fetch('/api/user/reset', { method: 'POST' });
       const data = await res.json();
       if (res.ok) {
-        appToast.success('All placement data wiped', 'Account reset to fresh candidate state. Starting clean sync…');
+        appToast.success(
+          'Your placement data was cleared',
+          'Inbox rescan started. After it finishes, run Re-index Archive to rebuild tracking from shared College circulars.'
+        );
         setShowResetModal(false);
         setResetConfirmText('');
         handleTriggerSync();
@@ -372,7 +376,7 @@ export default function SettingsClient({
         appToast.success('Account terminated permanently');
         setShowDeleteModal(false);
         setDeleteConfirmText('');
-        window.location.href = '/login';
+        router.push('/login');
       } else {
         appToast.error('Termination failed', data.error);
         setIsDeleting(false);
@@ -580,7 +584,7 @@ export default function SettingsClient({
                         </span>
                       ) : (
                         <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-[9px] font-bold text-amber-300">
-                          Action Required
+                          Optional
                         </span>
                       )}
                     </div>
@@ -608,7 +612,7 @@ export default function SettingsClient({
                 )}
               </div>
               <div className="pt-2 border-t border-white/[0.04] flex items-center justify-between text-[10px] text-zinc-500">
-                <span>Must be official VIT ID · CDC circulars & shortlists</span>
+                <span>Shared archive matching when available</span>
                 <span className="font-mono text-zinc-400">{selectedCampus}</span>
               </div>
             </div>
@@ -622,7 +626,7 @@ export default function SettingsClient({
               </div>
               <div className="min-w-0">
                 <p className="text-xs font-semibold text-zinc-200 truncate">Manual Inbox Sync</p>
-                <p className="text-[10px] text-zinc-400 truncate">Check both Gmail accounts immediately</p>
+                <p className="text-[10px] text-zinc-400 truncate">Check your Personal inbox and match shared shortlists</p>
               </div>
             </div>
             <button
@@ -722,7 +726,7 @@ export default function SettingsClient({
                 <span>Reset Placement Data</span>
               </div>
               <p className="text-[11px] text-zinc-400 leading-snug">
-                Clears drives, applications & calendar. Keeps Google accounts & Candidate ID.
+                Clears your applications, events, shortlist matches & email receipts. Keeps shared catalog data, Google accounts & Candidate ID.
               </p>
             </div>
             <button
@@ -790,11 +794,12 @@ export default function SettingsClient({
 
               <div className="text-xs text-zinc-300 space-y-2 leading-relaxed">
                 <p>
-                  This permanently deletes stored companies, applications, emails & shortlists from the database.
+                  This clears your personal placement tracking and email receipts. Shared company, drive & College circular data stays available to other students.
                 </p>
                 <div className="p-2.5 rounded-lg bg-zinc-900 border border-zinc-800 font-mono text-[11px] text-zinc-400">
                   ✓ Preserved: Google login, Candidate Registration ID<br />
-                  ✗ Purged: Companies, circulars, shortlist matches
+                  ✓ Preserved: Shared companies, drives & College circular archive<br />
+                  ✗ Cleared: Your applications, events, shortlist matches & email receipts
                 </div>
                 <p className="text-zinc-400">
                   Type <strong className="text-amber-400 font-mono">RESET</strong> to confirm:
@@ -867,7 +872,8 @@ export default function SettingsClient({
                 </p>
                 <div className="p-2.5 rounded-lg bg-zinc-900 border border-zinc-800 font-mono text-[11px] text-zinc-400">
                   • Revokes Google OAuth permissions with Google<br />
-                  • Deletes user profile & all database rows from Supabase<br />
+                  • Deletes your profile, personal placement data & email receipts<br />
+                  • Keeps shared companies, drives & College circular archive<br />
                   • Destroys session cookies and signs you out
                 </div>
                 <p className="text-zinc-400">

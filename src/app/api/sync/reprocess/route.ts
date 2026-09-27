@@ -13,6 +13,7 @@ import { cleanRoleTitle, extractDriveNumber, extractEvents, extractJobDetails, e
 import { isFuzzyCompanyMatch } from '@/lib/sync/engine';
 import { recoverTruncatedEmailBodies } from '@/lib/sync/email-body-recovery';
 import { refreshTravelModeNote } from '@/lib/utils';
+import { isShortlistMatchEvidence } from '@/lib/sync/participation-evidence';
 import {
   buildCircularCatalog,
   loadAllDriveResolutions,
@@ -334,7 +335,11 @@ export async function recalculateApplicationStatuses(
 
   const candidateMatchesByDriveId = new Map<string, any[]>();
   for (const cm of (candidateMatches || [])) {
-    if (cm.placement_drive_id) {
+    if (cm.placement_drive_id && isShortlistMatchEvidence({
+      matchType: cm.match_type,
+      matchedValue: cm.matched_value,
+      matchedRoundType: cm.matched_round_type,
+    })) {
       const list = candidateMatchesByDriveId.get(cm.placement_drive_id) || [];
       list.push(cm);
       candidateMatchesByDriveId.set(cm.placement_drive_id, list);
@@ -1349,7 +1354,13 @@ export async function recalculateApplicationStatuses(
 
     const hasUserPersonalEmails = driveEmails.some((de) => userPersonalEmailIdSet.has(de.id));
     const userCandidateMatches = candidateMatchesByDriveId.get(drive.id) || [];
-    const hasCandidateMatch = userCandidateMatches.length > 0;
+    const hasCandidateMatch = userCandidateMatches.some((match) =>
+      isShortlistMatchEvidence({
+        matchType: match.match_type,
+        matchedValue: match.matched_value,
+        matchedRoundType: match.matched_round_type,
+      })
+    );
 
     // RULE: A user ONLY has an application for a placement drive if:
     // 1. The user received personal NeoPAT emails for it (eligibility, registration, test link, etc.), OR
@@ -1979,17 +1990,6 @@ export async function performReprocess(
     }
   }
 
-  // Preserve manually-linked, cross-user confirmed, or non-NeoPAT drives that have no source_email_id
-  // These are legitimate drives created without a NeoPAT registration email (e.g. KPMG, Rystad Energy)
-  for (const d of (initialDbDrives || [])) {
-    if (!validDriveIdSet.has(d.id) && !d.source_email_id) {
-      validDriveIdSet.add(d.id);
-      if (d.company_id) {
-        validCompanyIdSet.add(d.company_id);
-      }
-    }
-  }
-
   // Flush queued company updates in small parallel batches
   if (companiesToUpdate.size > 0) {
     const updateEntries = Array.from(companiesToUpdate.entries());
@@ -2036,12 +2036,21 @@ export async function performReprocess(
   // 2. From candidate_matches for this user
   const { data: userCandidateMatches } = await supabase
     .from('candidate_matches')
-    .select('placement_drive_id')
+    .select('placement_drive_id, match_type, matched_value, matched_round_type')
     .eq('user_id', userId);
 
   const userAllowedDriveIds = new Set<string>(validDriveIdSet);
   for (const cm of (userCandidateMatches || [])) {
-    if (cm.placement_drive_id) userAllowedDriveIds.add(cm.placement_drive_id);
+    if (
+      cm.placement_drive_id &&
+      isShortlistMatchEvidence({
+        matchType: cm.match_type,
+        matchedValue: cm.matched_value,
+        matchedRoundType: cm.matched_round_type,
+      })
+    ) {
+      userAllowedDriveIds.add(cm.placement_drive_id);
+    }
   }
 
   const orphanDriveIds = (userApps || [])

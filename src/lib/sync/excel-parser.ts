@@ -1,7 +1,8 @@
 import type { gmail_v1 } from 'googleapis';
 import * as XLSX from 'xlsx';
 import type { ParsedAttachment } from '@/lib/gmail/client';
-import { searchRollNumberInWorkbook } from './xlsx-matcher';
+import { searchRollNumberInWorkbook, searchRollNumberInWorkbookRows, type WorkbookSheetRows } from '@/lib/sync/xlsx-matcher';
+import type { createAdminClient } from '@/lib/supabase/admin';
 
 export interface ExcelMatchResult {
   matched: boolean;
@@ -213,4 +214,80 @@ export async function scanExcelAttachmentsForNeoId(
     venueOrRoom: null,
     isActualShortlist: false,
   };
+}
+
+export async function scanSharedCollegeAttachmentsForNeoId(
+  supabase: ReturnType<typeof createAdminClient>,
+  collegeEmailId: string,
+  userNeoId: string | null,
+  userEmail: string,
+  isShortlistContext = false
+): Promise<ExcelMatchResult | null> {
+  const searchTokens = [
+    ...(userNeoId && userNeoId.length >= 4 ? [userNeoId.toUpperCase().trim()] : []),
+  ];
+  const regMatch = userEmail.match(/([0-9]{2}[a-z]{3}[0-9]{4,5})/i);
+  if (regMatch?.[1]) searchTokens.push(regMatch[1].toUpperCase().trim());
+  if (userEmail.includes('@')) searchTokens.push(userEmail.toLowerCase().trim(), userEmail.toUpperCase().trim());
+  if (searchTokens.length === 0) return null;
+
+  const { data: attachmentRows, error } = await supabase
+    .from('college_attachments')
+    .select('filename, extracted_rows, parse_status')
+    .eq('college_email_id', collegeEmailId)
+    .eq('parse_status', 'complete');
+  if (error) throw error;
+  if (!attachmentRows?.length) return null;
+  let scannedWorkbookCount = 0;
+
+  const sorted = [...attachmentRows].sort((a, b) =>
+    classifyExcelFile(a.filename || '') === classifyExcelFile(b.filename || '')
+      ? 0
+      : classifyExcelFile(a.filename || '') === 'shortlist'
+      ? -1
+      : classifyExcelFile(b.filename || '') === 'shortlist'
+      ? 1
+      : 0
+  );
+  let appliedListMatch: ExcelMatchResult | null = null;
+
+  for (const attachment of sorted) {
+    if (!/\.(xlsx|xls|csv)$/i.test(attachment.filename || '') || !Array.isArray(attachment.extracted_rows)) continue;
+    scannedWorkbookCount++;
+    const sheets = attachment.extracted_rows as WorkbookSheetRows[];
+    for (const token of searchTokens) {
+      const match = searchRollNumberInWorkbookRows(sheets, token);
+      if (match.parseError) continue;
+      if (!match.isMatched) continue;
+
+      const fileType = classifyExcelFile(attachment.filename || '');
+      const isActualShortlist = fileType === 'shortlist' || (isShortlistContext && fileType !== 'applied_list');
+      const venueOrRoom = match.additionalData
+        ? Object.entries(match.additionalData).find(([key, value]) =>
+            /venue|room|hall|lab|place|location/i.test(key) || /prp|sjt|mb|tt|anna|channa|lc\s*\d+/i.test(value)
+          )
+        : undefined;
+      const result: ExcelMatchResult = {
+        matched: true,
+        scanStatus: 'matched',
+        filename: attachment.filename || 'shortlist.xlsx',
+        matchedNeoId: match.matchedValue || token,
+        details: `Matched in ${attachment.filename} (${match.matchedSheet}!${match.matchedCell})${match.detectedIdColumnName ? ` [${match.detectedIdColumnName}]` : ''}${venueOrRoom ? ` - ${venueOrRoom[0]}: ${venueOrRoom[1]}` : ''}`,
+        venueOrRoom: venueOrRoom ? `${venueOrRoom[0]}: ${venueOrRoom[1]}` : null,
+        isActualShortlist,
+      };
+      if (isActualShortlist) return result;
+      if (!appliedListMatch) appliedListMatch = result;
+    }
+  }
+
+  return appliedListMatch || (scannedWorkbookCount > 0 ? {
+    matched: false,
+    scanStatus: 'no_match',
+    filename: '',
+    matchedNeoId: null,
+    details: null,
+    venueOrRoom: null,
+    isActualShortlist: false,
+  } : null);
 }

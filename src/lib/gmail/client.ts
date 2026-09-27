@@ -46,6 +46,8 @@ export interface ParsedAttachment {
   filename: string;
   mimeType: string;
   size: number;
+  extractedRows?: Array<{ sheetName: string; rows: unknown[][] }>;
+  parseStatus?: 'pending' | 'complete' | 'error';
 }
 
 // ============================================

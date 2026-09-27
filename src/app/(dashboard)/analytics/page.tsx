@@ -18,7 +18,7 @@ export default async function AnalyticsPage() {
 
   // Fetch placement_drives, applications, events, companies, emails, candidate matches, accounts
   const [
-    { data: placementDrives },
+    { data: placementDrives, count: totalPlacementDrivesCount },
     { data: applications },
     { data: events },
     { data: companies },
@@ -29,7 +29,7 @@ export default async function AnalyticsPage() {
   ] = await Promise.all([
     supabase
       .from('placement_drives')
-      .select('id, company_id, drive_number, drive_name, role, category, ctc, stipend, location'),
+      .select('id, company_id, drive_number, drive_name, role, category, ctc, stipend, location', { count: 'exact' }),
     supabase
       .from('applications')
       .select('id, placement_drive_id, status, role, category, ctc, stipend, location, notes, manual_override, applied_at, last_updated, registration_deadline')
@@ -65,15 +65,17 @@ export default async function AnalyticsPage() {
   const compMap = new Map((companies || []).map((c) => [c.id, c.name]));
   const appMap = new Map((applications || []).map((a) => [a.placement_drive_id, a]));
 
-  const unifiedDrives = (placementDrives || []).map((drive) => {
+  // Funnel metrics should represent drives tracked for this user, while the headline
+  // catalog total below represents every placement drive available to all users.
+  const unifiedDrives = (placementDrives || []).flatMap((drive) => {
     const app = appMap.get(drive.id);
+    if (!app) return [];
     const companyName =
       compMap.get(drive.company_id) ||
-      ((drive as any).companies as { name?: string } | null)?.name ||
       drive.drive_name ||
       'Placement Drive';
 
-    return {
+    return [{
       id: app?.id || drive.id,
       placement_drive_id: drive.id,
       company_id: drive.company_id,
@@ -89,7 +91,7 @@ export default async function AnalyticsPage() {
       applied_at: app?.applied_at || null,
       last_updated: app?.last_updated || null,
       manual_override: app?.manual_override || false,
-    };
+    }];
   });
 
   // Also include any legacy applications that don't have placement_drive_id (if any)
@@ -117,32 +119,6 @@ export default async function AnalyticsPage() {
     }
   }
 
-  // Include any standalone company that doesn't have a placement drive yet
-  const companiesWithDrives = new Set((placementDrives || []).map((d: any) => d.company_id));
-  if (companies) {
-    for (const comp of companies) {
-      if (!companiesWithDrives.has(comp.id)) {
-        unifiedDrives.push({
-          id: comp.id,
-          placement_drive_id: null,
-          company_id: comp.id,
-          company_name: comp.name,
-          drive_number: null,
-          status: 'not_applied',
-          notes: null,
-          ctc: null,
-          stipend: null,
-          category: null,
-          role: null,
-          location: null,
-          applied_at: null,
-          last_updated: null,
-          manual_override: false,
-        });
-      }
-    }
-  }
-
   const collegeEmail = accounts?.find((a) => a.account_type === 'college')?.email;
   const personalEmail = accounts?.find((a) => a.account_type === 'personal')?.email || session.email;
   const campus = detectCampus(collegeEmail || personalEmail);
@@ -150,7 +126,9 @@ export default async function AnalyticsPage() {
 
   // Compute unique shortlisted drives from candidate_matches
   const uniqueMatchIds = new Set(
-    (candidateMatches || []).map((m: any) => m.placement_drive_id).filter(Boolean)
+    (candidateMatches || [])
+      .map((match) => match.placement_drive_id)
+      .filter((driveId): driveId is string => Boolean(driveId))
   );
 
   return (
@@ -160,7 +138,8 @@ export default async function AnalyticsPage() {
         applications={unifiedDrives}
         events={events || []}
         candidateMatches={candidateMatches || []}
-        companiesCount={unifiedDrives.length}
+        totalPlacementDrivesCount={totalPlacementDrivesCount || 0}
+        trackedDrivesCount={unifiedDrives.length}
         emailsCount={emailsCount || 0}
         matchesCount={candidateMatches?.length || 0}
         uniqueMatchesCount={uniqueMatchIds.size}

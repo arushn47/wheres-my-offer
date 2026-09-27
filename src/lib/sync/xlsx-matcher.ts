@@ -13,6 +13,11 @@ export interface MatchResult {
   additionalData?: Record<string, string>; // e.g. Name, Branch, CGPA, Section/Group
 }
 
+export interface WorkbookSheetRows {
+  sheetName: string;
+  rows: unknown[][];
+}
+
 /**
  * Normalizes roll numbers by stripping whitespace, hyphens, non-breaking spaces, and casing.
  * e.g., " 23 bce 10472 " -> "23BCE10472"
@@ -44,6 +49,74 @@ function getSheetPriority(sheetName: string): number {
   if (/waitlist|waiting|alternate|reserve/i.test(n)) return 2;
   if (/applied|eligible|opt[_\s-]*in|registered/i.test(n)) return 3;
   return 4;
+}
+
+/** Searches pre-extracted shared workbook rows without fetching Gmail attachments. */
+export function searchRollNumberInWorkbookRows(
+  sheets: WorkbookSheetRows[],
+  targetStudentId: string
+): MatchResult {
+  const normalizedTarget = normalizeStudentId(targetStudentId);
+  if (!normalizedTarget) {
+    return {
+      isMatched: false,
+      matchedSheet: null,
+      matchedCell: null,
+      matchedValue: null,
+      totalRowsScanned: 0,
+      detectedIdColumnName: null,
+      detectedHeaderRowIndex: null,
+      usedFastPath: true,
+    };
+  }
+
+  let totalRows = 0;
+  const orderedSheets = [...sheets].sort((a, b) => getSheetPriority(a.sheetName) - getSheetPriority(b.sheetName));
+  for (const sheet of orderedSheets) {
+    totalRows += sheet.rows.length;
+    for (let rowIndex = 0; rowIndex < sheet.rows.length; rowIndex++) {
+      const row = sheet.rows[rowIndex];
+      if (!Array.isArray(row)) continue;
+      for (let columnIndex = 0; columnIndex < row.length; columnIndex++) {
+        if (normalizeStudentId(row[columnIndex] as string | number) !== normalizedTarget) continue;
+        let headerRowIndex: number | null = null;
+        for (let candidate = rowIndex - 1; candidate >= 0; candidate--) {
+          const candidateRow = sheet.rows[candidate];
+          if (Array.isArray(candidateRow) && candidateRow.filter((cell) => cell !== '' && cell != null).length >= 2) {
+            headerRowIndex = candidate;
+            break;
+          }
+        }
+        const headerRow = headerRowIndex === null ? undefined : sheet.rows[headerRowIndex] as any[];
+        const matchedRow = row as any[];
+        const columnName = headerRow?.[columnIndex]
+          ? String(headerRow[columnIndex]).trim()
+          : `Col ${XLSX.utils.encode_col(columnIndex)}`;
+        return {
+          isMatched: true,
+          matchedSheet: sheet.sheetName,
+          matchedCell: `${XLSX.utils.encode_col(columnIndex)}${rowIndex + 1}`,
+          matchedValue: normalizedTarget,
+          totalRowsScanned: totalRows,
+          detectedIdColumnName: columnName,
+          detectedHeaderRowIndex: headerRowIndex,
+          usedFastPath: true,
+          additionalData: extractRowData(headerRow, matchedRow),
+        };
+      }
+    }
+  }
+
+  return {
+    isMatched: false,
+    matchedSheet: null,
+    matchedCell: null,
+    matchedValue: null,
+    totalRowsScanned: totalRows,
+    detectedIdColumnName: null,
+    detectedHeaderRowIndex: null,
+    usedFastPath: true,
+  };
 }
 
 /**

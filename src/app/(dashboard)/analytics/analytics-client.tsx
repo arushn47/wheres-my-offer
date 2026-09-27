@@ -56,7 +56,8 @@ interface AnalyticsClientProps {
   applications?: AnalyticsDrive[];
   events: AnalyticsEvent[];
   candidateMatches?: AnalyticsMatch[];
-  companiesCount: number;
+  totalPlacementDrivesCount: number;
+  trackedDrivesCount: number;
   emailsCount: number;
   matchesCount: number;
   uniqueMatchesCount?: number;
@@ -70,7 +71,8 @@ export default function AnalyticsClient({
   applications,
   events,
   candidateMatches = [],
-  companiesCount,
+  totalPlacementDrivesCount,
+  trackedDrivesCount,
   emailsCount,
   matchesCount,
   uniqueMatchesCount,
@@ -357,13 +359,13 @@ export default function AnalyticsClient({
           className="rounded-2xl border border-indigo-500/20 bg-indigo-500/[0.05] p-3.5 sm:p-5 min-w-0"
         >
           <div className="font-mono text-[9px] sm:text-[10px] uppercase tracking-widest text-indigo-300 truncate">
-            Drives Synced
+            Total Placement Drives
           </div>
           <div className="font-tabular mt-1.5 sm:mt-2 font-display text-2xl sm:text-3xl font-extrabold text-white">
-            {companiesCount || driveList.length}
+            {totalPlacementDrivesCount}
           </div>
           <div className="mt-1 font-mono text-[10px] sm:text-[11px] text-zinc-500 truncate">
-            {appliedCount} applied · {withdrawnCount} withdrawn{notAppliedCount > 0 ? ` · ${notAppliedCount} not applied` : ''}
+            {trackedDrivesCount} tracked for you · {appliedCount} applied
           </div>
         </motion.div>
 
@@ -568,7 +570,7 @@ export default function AnalyticsClient({
                   <Building2 className="h-4 w-4 text-emerald-400 shrink-0" />
                   <span className="text-xs text-zinc-300 font-medium truncate">Tracked Drives</span>
                 </div>
-                <span className="font-mono text-xs font-bold text-zinc-100 shrink-0 whitespace-nowrap">{(companiesCount || driveList.length || 0).toLocaleString()}</span>
+                <span className="font-mono text-xs font-bold text-zinc-100 shrink-0 whitespace-nowrap">{trackedDrivesCount.toLocaleString()}</span>
               </div>
 
               <div className="flex items-center justify-between gap-2 rounded-xl border border-zinc-800/80 bg-zinc-900/40 p-4">
@@ -600,7 +602,7 @@ export default function AnalyticsClient({
                   <span className="text-xs text-zinc-300 font-medium truncate">Sync Frequency</span>
                 </div>
                 <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-0.5 font-mono text-[11px] font-bold text-emerald-300 shrink-0 whitespace-nowrap">
-                  Instant Pub/Sub + Daily
+                  Personal sync + shared archive
                 </span>
               </div>
             </div>
@@ -612,7 +614,7 @@ export default function AnalyticsClient({
                 <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
                 <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-400" />
               </span>
-              <span className="text-xs font-semibold text-emerald-300 truncate">Dual Inbox Watch Active</span>
+              <span className="text-xs font-semibold text-emerald-300 truncate">Shared College Archive Matching</span>
             </div>
             <span className="font-mono text-[10px] text-zinc-500 shrink-0 whitespace-nowrap">AES-256 Vault</span>
           </div>
