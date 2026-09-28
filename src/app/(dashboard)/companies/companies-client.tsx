@@ -33,6 +33,12 @@ import {
 } from '@/components/companies/stage-stepper';
 import { cleanLocationString } from '@/lib/sync/locations';
 import { cleanRoleTitle } from '@/lib/sync/events';
+import { useSync } from '@/context/sync-context';
+import {
+  getProvisionalStatusLabel,
+  getVisibleApplicationStatus,
+  isShortlistVerificationPending,
+} from '@/lib/sync/status-display';
 
 export interface CompanyWithDetails {
   id: string;
@@ -59,6 +65,7 @@ export interface CompanyWithDetails {
     last_updated: string;
     registration_deadline?: string | null;
   } | null;
+  shortlistVerificationState?: string | null;
   latestEvent: {
     id: string;
     event_type: string;
@@ -96,9 +103,13 @@ const FILTERS = [
  * Detects if a placement drive represents an eliminated / rejected application
  * at any stage (interview, test, post-PPT, or screening).
  */
-export const isCompanyEliminated = (comp: CompanyWithDetails): boolean => {
+export const isCompanyEliminated = (comp: CompanyWithDetails, isSyncing = false, statusUpdatesPending = false): boolean => {
   const rawStatus = (comp.application?.status || '').toLowerCase().trim();
   const notes = (comp.application?.notes || '').toLowerCase();
+  if (
+    (isSyncing || statusUpdatesPending || isShortlistVerificationPending(comp.shortlistVerificationState)) &&
+    !comp.application?.manual_override && rawStatus === 'not_shortlisted'
+  ) return false;
 
   if (isEliminatedStatus(rawStatus)) return true;
   if (/eliminated|rejected|not\s*shortlisted|screened\s*out/i.test(notes)) return true;
@@ -141,8 +152,12 @@ export const isCompanyRegistrationOpen = (comp: CompanyWithDetails): boolean => 
  * Priority scoring for eliminated drives in "Not Shortlisted":
  * Priority: Eliminated in Interview (4) -> In Test (3) -> Not Shortlisted for Test after PPT (2) -> Screening only / for PPT (1)
  */
-export const getEliminationPriority = (comp: CompanyWithDetails): number => {
+export const getEliminationPriority = (comp: CompanyWithDetails, isSyncing = false, statusUpdatesPending = false): number => {
   const rawStatus = (comp.application?.status || '').toLowerCase().trim();
+  if (
+    (isSyncing || statusUpdatesPending || isShortlistVerificationPending(comp.shortlistVerificationState)) &&
+    !comp.application?.manual_override && rawStatus === 'not_shortlisted'
+  ) return 0;
   const notes = (comp.application?.notes || '').toLowerCase();
   const eff = getEffectiveStage(
     comp.application?.status || 'applied',
@@ -193,7 +208,7 @@ export const getEliminationPriority = (comp: CompanyWithDetails): number => {
 
   // Tier 1: Not Shortlisted at screening only / for PPT
   if (
-    isCompanyEliminated(comp) ||
+    isCompanyEliminated(comp, isSyncing, statusUpdatesPending) ||
     isEliminatedStatus(s) ||
     isEliminatedStatus(rawStatus) ||
     subtitle.includes('eligibility') ||
@@ -238,9 +253,13 @@ const formatDeadlineCountdown = (d: Date): string => {
   return `${mins}m`;
 };
 
-const matchFilter = (status: string, filter: string, company?: CompanyWithDetails) => {
+const matchFilter = (status: string, filter: string, company?: CompanyWithDetails, isSyncing = false, statusUpdatesPending = false) => {
   const s = status.toLowerCase();
-  const isElim = company ? isCompanyEliminated(company) : isEliminatedStatus(s);
+  const provisionalNegative = Boolean(
+    (isSyncing || statusUpdatesPending || isShortlistVerificationPending(company?.shortlistVerificationState)) &&
+    company?.application?.status === 'not_shortlisted' && !company.application.manual_override
+  );
+  const isElim = provisionalNegative ? false : company ? isCompanyEliminated(company, isSyncing, statusUpdatesPending) : isEliminatedStatus(s);
 
   if (filter === 'all') return true;
 
@@ -366,6 +385,7 @@ export default function CompaniesClient({
   companies,
   userCampus = 'VIT Bhopal',
 }: CompaniesClientProps) {
+  const { isSyncing, statusUpdatesPending, statusUpdatePhase, syncProgress } = useSync();
   // Pure local React state - NO URL search params or router updates to avoid lag, dropped keystrokes, and URL churning
   const [filter, setFilter] = useState<string>('active');
   const [q, setQ] = useState<string>('');
@@ -394,7 +414,9 @@ export default function CompaniesClient({
       .filter((c) => {
         const rawStatus = c.application?.status || 'applied';
         const { effectiveStatus } = getEffectiveStage(rawStatus, c.latestEvent, c.events, c.application?.notes, c.application?.manual_override);
-        return matchFilter(effectiveStatus, filter, c);
+        const driveVerificationPending = isShortlistVerificationPending(c.shortlistVerificationState);
+        const visibleStatus = getVisibleApplicationStatus(effectiveStatus, isSyncing, Boolean(c.application?.manual_override), statusUpdatesPending || driveVerificationPending);
+        return matchFilter(visibleStatus, filter, c, isSyncing, statusUpdatesPending || driveVerificationPending);
       })
       .filter((c) => {
         if (!q.trim()) return true;
@@ -524,8 +546,8 @@ export default function CompaniesClient({
       // Sort by elimination priority:
       // Priority: Eliminated in Interview (4) -> In Test (3) -> Not Shortlisted for Test after PPT (2) -> Screening only / for PPT (1)
       return [...list].sort((a, b) => {
-        const pA = getEliminationPriority(a);
-        const pB = getEliminationPriority(b);
+        const pA = getEliminationPriority(a, isSyncing, statusUpdatesPending || isShortlistVerificationPending(a.shortlistVerificationState));
+        const pB = getEliminationPriority(b, isSyncing, statusUpdatesPending || isShortlistVerificationPending(b.shortlistVerificationState));
         if (pB !== pA) return pB - pA;
 
         const numDiff = getDriveNum(b) - getDriveNum(a);
@@ -567,7 +589,7 @@ export default function CompaniesClient({
       const dateB = new Date(b.latestEmailDate || b.updated_at || 0).getTime();
       return dateB - dateA;
     });
-  }, [companies, filter, q]);
+  }, [companies, filter, q, isSyncing, statusUpdatesPending]);
 
   const filterCounts = useMemo(() => {
     const counts: Record<string, number> = {
@@ -580,14 +602,16 @@ export default function CompaniesClient({
     for (const c of companies) {
       const rawStatus = c.application?.status || 'applied';
       const eff = getEffectiveStage(rawStatus, c.latestEvent, c.events, c.application?.notes, c.application?.manual_override);
-      const st = eff.effectiveStatus;
-      if (matchFilter(st, 'active', c)) counts.active++;
-      if (matchFilter(st, 'not_shortlisted', c)) counts.not_shortlisted++;
-      if (matchFilter(st, 'withdrawn', c)) counts.withdrawn++;
-      if (matchFilter(st, 'not_applied', c)) counts.not_applied++;
+      const driveVerificationPending = isShortlistVerificationPending(c.shortlistVerificationState);
+      const st = getVisibleApplicationStatus(eff.effectiveStatus, isSyncing, Boolean(c.application?.manual_override), statusUpdatesPending || driveVerificationPending);
+      const pendingForDrive = statusUpdatesPending || isShortlistVerificationPending(c.shortlistVerificationState);
+      if (matchFilter(st, 'active', c, isSyncing, pendingForDrive)) counts.active++;
+      if (matchFilter(st, 'not_shortlisted', c, isSyncing, pendingForDrive)) counts.not_shortlisted++;
+      if (matchFilter(st, 'withdrawn', c, isSyncing, pendingForDrive)) counts.withdrawn++;
+      if (matchFilter(st, 'not_applied', c, isSyncing, pendingForDrive)) counts.not_applied++;
     }
     return counts;
-  }, [companies]);
+  }, [companies, isSyncing, statusUpdatesPending]);
 
   const companyCounts = useMemo(() => {
     const counts = new Map<string, number>();
@@ -679,7 +703,22 @@ export default function CompaniesClient({
           );
           const rawStatus = c.application?.status || 'applied';
           const effectiveResult = getEffectiveStage(rawStatus, nextEv, c.events, c.application?.notes, c.application?.manual_override);
-          const status = effectiveResult.effectiveStatus;
+          const provisionalStatus = getProvisionalStatusLabel({
+            status: effectiveResult.effectiveStatus,
+            isSyncing,
+            statusUpdatesPending,
+            updatePhase: statusUpdatePhase,
+            manualOverride: Boolean(c.application?.manual_override),
+            verificationPending: isShortlistVerificationPending(c.shortlistVerificationState),
+            syncSubject: syncProgress?.currentSubject,
+          });
+          const driveVerificationPending = isShortlistVerificationPending(c.shortlistVerificationState);
+          const status = getVisibleApplicationStatus(
+            effectiveResult.effectiveStatus,
+            isSyncing || driveVerificationPending,
+            Boolean(c.application?.manual_override),
+            statusUpdatesPending || driveVerificationPending
+          );
           const futureDeadline = getFutureRegistrationDeadline(c);
           const stageIndex = effectiveResult.stageIndex;
           const cleanedRole = cleanRoleTitle(c.application?.role);
@@ -808,15 +847,26 @@ export default function CompaniesClient({
                       );
 
                       return (
-                        <div className="mb-2 flex items-center justify-between min-w-0 gap-2">
-                          <span className="font-mono text-[10px] uppercase tracking-widest text-zinc-500 shrink-0">
+                        <div className="mb-2 flex min-w-0 items-center justify-between gap-2">
+                          <span className="shrink-0 font-mono text-[10px] uppercase tracking-widest text-zinc-500">
                             {status === 'registration_open'
                               ? 'Registration'
                               : ['withdrawn', 'declined', 'not_applied'].includes(status)
                                 ? 'Participation Status'
                                 : 'Recruitment Stage'}
                           </span>
-                          <div className="flex items-center gap-2 min-w-0 overflow-hidden">
+                          <div className="flex min-w-0 items-center justify-end gap-2 overflow-hidden">
+                            <span className={cn(
+                              'min-w-0 truncate text-right font-mono text-[10px]',
+                              hasUpcomingEvent && 'hidden sm:inline',
+                              status === 'registration_open' || provisionalStatus || effectiveResult.eliminatedStage === -1
+                                ? 'text-zinc-500'
+                                : 'font-semibold text-rose-400'
+                            )}>
+                              {status === 'registration_open'
+                                ? 'Awaiting Registration'
+                                : provisionalStatus || effectiveResult.statusSubtitle}
+                            </span>
                             {hasUpcomingEvent && (
                               <span
                                 suppressHydrationWarning
@@ -830,30 +880,12 @@ export default function CompaniesClient({
                                 <span>{formatEventTime(nextEv!.start_time)}</span>
                               </span>
                             )}
-                            {status !== 'registration_open' && (
-                              <span
-                                className={cn(
-                                  'font-mono text-[10px] truncate',
-                                  hasUpcomingEvent ? 'hidden sm:inline' : 'inline',
-                                  effectiveResult.eliminatedStage !== -1
-                                    ? 'text-rose-400 font-semibold'
-                                    : 'text-zinc-500'
-                                )}
-                              >
-                                {effectiveResult.statusSubtitle}
-                              </span>
-                            )}
-                            {status === 'registration_open' && (
-                              <span className="font-mono text-[10px] truncate text-zinc-500">
-                                Awaiting Registration
-                              </span>
-                            )}
                           </div>
                         </div>
                       );
                     })()}
                     <StageStepper
-                      status={rawStatus}
+                      status={status}
                       latestEvent={nextEv}
                       events={c.events}
                       notes={c.application?.notes}

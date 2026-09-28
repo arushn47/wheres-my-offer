@@ -26,4 +26,11 @@ describe('shared workbook row matching', () => {
     ], '23BCE10472');
     expect(result.isMatched).toBe(false);
   });
+
+  it('requires an exact normalized NeoID match and does not match a substring', () => {
+    const result = searchRollNumberInWorkbookRows([
+      { sheetName: 'Shortlist', rows: [['NeoID'], ['XI4W0P0K8A']] },
+    ], 'I4W0P0K8');
+    expect(result.isMatched).toBe(false);
+  });
 });

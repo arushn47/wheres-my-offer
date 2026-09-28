@@ -204,7 +204,7 @@ export default async function CompanyDetailPage(props: {
 
     supabase
       .from('personal_emails')
-      .select('id, subject, sender, received_at, body_snippet, college_email_id, canonical_email_id, classification, thread_id, gmail_message_id, gmail_account_id, placement_drive_id, assignment_source, is_relevant')
+      .select('id, subject, sender, received_at, body_snippet, college_email_id, canonical_email_id, classification, thread_id, gmail_message_id, rfc_message_id, gmail_account_id, placement_drive_id, assignment_source, is_relevant')
       .in('placement_drive_id', driveFilterIds)
       .eq('user_id', session.userId)
       .order('received_at', { ascending: false }),
@@ -212,7 +212,7 @@ export default async function CompanyDetailPage(props: {
     substantiveAliases.length > 0
       ? supabase
           .from('personal_emails')
-          .select('id, subject, sender, received_at, body_snippet, college_email_id, canonical_email_id, classification, thread_id, gmail_message_id, gmail_account_id, placement_drive_id, assignment_source, is_relevant')
+          .select('id, subject, sender, received_at, body_snippet, college_email_id, canonical_email_id, classification, thread_id, gmail_message_id, rfc_message_id, gmail_account_id, placement_drive_id, assignment_source, is_relevant')
           .eq('user_id', session.userId)
           .is('placement_drive_id', null)
           .or('assignment_source.is.null,assignment_source.neq.admin_unlinked')
@@ -245,6 +245,15 @@ export default async function CompanyDetailPage(props: {
       .select('id, email, account_type')
       .eq('user_id', session.userId),
   ]);
+
+  const { data: shortlistVerificationRows } = await supabase
+    .from('shortlist_verification_state')
+    .select('placement_drive_id,verification_state')
+    .eq('user_id', session.userId)
+    .in('placement_drive_id', driveFilterIds);
+  const shortlistVerificationByDrive = new Map(
+    (shortlistVerificationRows || []).map((row) => [row.placement_drive_id, row.verification_state])
+  );
 
   const sourceEmail = targetDrive?.source_email_id
     ? (assignedEmails || []).find((email: any) => email.id === targetDrive.source_email_id)
@@ -286,7 +295,7 @@ export default async function CompanyDetailPage(props: {
     const [{ data: extraPersonal }, { data: extraCollege }] = await Promise.all([
       supabase
         .from('personal_emails')
-        .select('id, subject, sender, received_at, body_snippet, canonical_email_id, college_email_id, classification, thread_id, gmail_message_id, gmail_account_id, placement_drive_id, assignment_source, is_relevant')
+        .select('id, subject, sender, received_at, body_snippet, canonical_email_id, college_email_id, classification, thread_id, gmail_message_id, rfc_message_id, gmail_account_id, placement_drive_id, assignment_source, is_relevant')
         .in('id', missingLinkedIds),
       supabase
         .from('college_emails')
@@ -482,6 +491,7 @@ export default async function CompanyDetailPage(props: {
             classification: ce.classification || 'general',
             thread_id: null,
             gmail_message_id: null,
+            rfc_message_id: null,
             gmail_account_id: null,
             placement_drive_id: placementDriveId,
           });
@@ -558,6 +568,7 @@ export default async function CompanyDetailPage(props: {
   (gmailAccounts || []).forEach((acc) => {
     accountMap.set(acc.id, acc.email);
   });
+  const collegeAccount = (gmailAccounts || []).find((acc) => acc.account_type === 'college');
 
   // Filter candidate matches to only those belonging to this company's emails
   const companyEmailIds = new Set([
@@ -572,6 +583,7 @@ export default async function CompanyDetailPage(props: {
   const detail: CompanyDetail = {
     id: company.id,
     placementDriveId,
+    shortlistVerificationState: placementDriveId ? shortlistVerificationByDrive.get(placementDriveId) || null : null,
     name: company.name,
     legalName: null,
     aliases: company.aliases,
@@ -651,7 +663,12 @@ export default async function CompanyDetailPage(props: {
         classification: em.classification || 'general',
         threadId: em.thread_id || null,
         gmailMessageId: em.gmail_message_id || null,
-        accountEmail: em.gmail_account_id ? accountMap.get(em.gmail_account_id) || null : null,
+        rfcMessageId: em.rfc_message_id || null,
+        accountEmail: em.gmail_account_id
+          ? accountMap.get(em.gmail_account_id) || null
+          : colId
+            ? collegeAccount?.email || null
+            : null,
         attachmentName: colId ? attachmentByCollegeEmailId.get(colId) || null : null,
       };
     }),
@@ -667,7 +684,6 @@ export default async function CompanyDetailPage(props: {
     })),
   };
 
-  const collegeAccount = (gmailAccounts || []).find((acc) => acc.account_type === 'college');
   const userCampus = detectCampus(collegeAccount?.email);
   const userRegNo = detectRegNo(collegeAccount?.email) || userProfile?.neo_id || null;
   const userBranch = detectBranch(collegeAccount?.email) || (userRegNo ? detectBranch(userRegNo) : null);

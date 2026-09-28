@@ -206,6 +206,7 @@ export async function recalculateApplicationStatuses(
     { data: driveLinks },
     { data: allUserApps },
     { data: allManualEvents },
+    { data: shortlistVerificationRows, error: shortlistVerificationError },
   ] = await Promise.all([
     supabase
       .from('companies')
@@ -225,7 +226,15 @@ export async function recalculateApplicationStatuses(
       .select('*')
       .eq('user_id', userId)
       .eq('manual_override', true),
+    supabase
+      .from('shortlist_verification_state')
+      .select('placement_drive_id,verification_state')
+      .eq('user_id', userId),
   ]);
+  if (shortlistVerificationError) throw shortlistVerificationError;
+  const shortlistVerificationByDrive = new Map(
+    (shortlistVerificationRows || []).map((row) => [row.placement_drive_id, row.verification_state])
+  );
 
   if (!remainingCompanies || remainingCompanies.length === 0) return { updatedCount: 0, results: [] };
 
@@ -1171,6 +1180,25 @@ export async function recalculateApplicationStatuses(
 
     const existingApp = appsByDriveId.get(drive.id) || null;
 
+    // Statuses in Personal emails are provisional until the corresponding
+    // canonical College shortlist roster has actually been parsed and checked.
+    // Missing/deferred verification must never be interpreted as candidate absence.
+    if (computedStatus === 'not_shortlisted' && !existingApp?.manual_override) {
+      const verificationState = shortlistVerificationByDrive.get(drive.id);
+      if (verificationState !== 'verified_absent') {
+        computedStatus = existingApp?.status && existingApp.status !== 'not_shortlisted'
+          ? existingApp.status
+          : 'applied';
+      }
+    }
+    const verificationStateForDrive = shortlistVerificationByDrive.get(drive.id);
+    const preventProvisionalNegative = !existingApp?.manual_override &&
+      verificationStateForDrive !== 'verified_absent' &&
+      (computedStatus === 'not_shortlisted' || existingApp?.status === 'not_shortlisted');
+    if (preventProvisionalNegative && existingApp?.status === 'not_shortlisted') {
+      computedStatus = 'applied';
+    }
+
     // GUARD: Reprocess only has access to email subjects + body snippets â€” it cannot
     // re-scan Excel attachments. The live sync (status-engine) CAN scan attachments and
     // correctly marks candidates as not_shortlisted when their ID is absent from a
@@ -1181,6 +1209,7 @@ export async function recalculateApplicationStatuses(
       !existingApp?.manual_override &&
       !options?.recalculateStatusesFromRemainingEvidence &&
       existingApp?.status === 'not_shortlisted' &&
+      verificationStateForDrive === 'verified_absent' &&
       ['test_scheduled', 'ppt_scheduled', 'applied'].includes(computedStatus) &&
       !isMatchedInTest &&
       !isMatchedInNextRound &&
@@ -1218,11 +1247,13 @@ export async function recalculateApplicationStatuses(
     const isEvidenceBackedTerminal =
       ['rejected', 'selected', 'offer_received'].includes(computedStatus) &&
       hasPriorCandidateEvidence;
-    const monotonicStatus =
-      existingApp?.manual_override ||
-      (!options?.recalculateStatusesFromRemainingEvidence && !isPhantomRejection && existingApp?.status && computedPriority < existingPriority && !isEvidenceBackedTerminal)
-        ? existingApp.status
-        : computedStatus;
+    const monotonicStatus = existingApp?.manual_override
+      ? existingApp.status
+      : preventProvisionalNegative && existingApp?.status === 'not_shortlisted'
+        ? 'applied'
+        : (!options?.recalculateStatusesFromRemainingEvidence && !isPhantomRejection && existingApp?.status && computedPriority < existingPriority && !isEvidenceBackedTerminal)
+          ? existingApp.status
+          : computedStatus;
 
     const finalStatus = monotonicStatus;
 
@@ -2342,25 +2373,20 @@ export async function performReprocess(
     }
   }
 
-  // Scan Excel shortlist attachments only if candidate matches haven't been resolved yet
-  const { count: existingCandidateMatchesCount } = await supabase
-    .from('candidate_matches')
-    .select('id', { count: 'exact', head: true })
-    .eq('user_id', userId);
-
-  if (!existingCandidateMatchesCount || existingCandidateMatchesCount === 0) {
-    try {
-      const { scanAndPersistCandidateMatches } = await import('@/lib/sync/attachment-scanner');
-      await scanAndPersistCandidateMatches(supabase, userId);
-    } catch (scanErr) {
-      console.warn('[performReprocess] Attachment scan non-critical error:', scanErr);
-    }
+  // Reuse parsed canonical College attachments for only this user's evidenced
+  // drives. Never rescan an individual College Gmail inbox during user reprocess.
+  try {
+    const { scanSharedCollegeCandidateMatches } = await import('@/lib/sync/attachment-scanner');
+    await scanSharedCollegeCandidateMatches(supabase, userId);
+  } catch (scanErr) {
+    console.warn('[performReprocess] Shared shortlist scan non-critical error:', scanErr);
   }
 
   // 6. Phase 4: Recalculate Stage Progression & Events for Official NeoPAT Drives
   const phase4Res = await recalculateApplicationStatuses(userId, onProgress);
   const updatedAppsCount = phase4Res.updatedCount;
   const applicationResults = phase4Res.results || [];
+  onProgress?.({ step: 5, totalSteps: 5, message: 'Drive statuses updated' });
 
   return {
     success: true,

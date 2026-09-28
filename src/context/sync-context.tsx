@@ -4,6 +4,7 @@ import React, { createContext, useContext, useState, useEffect, useRef, useCallb
 import { useRouter } from 'next/navigation';
 import { appToast } from '@/components/ui/toast';
 import { createClient } from '@/lib/supabase/client';
+import { getStatusUpdatePhase } from '@/lib/sync/status-display';
 
 export interface SyncProgress {
   phase: 'initializing' | 'fetching' | 'processing' | 'complete' | 'error';
@@ -19,6 +20,7 @@ export interface SyncProgress {
   skippedDuplicates: number;
   errors: string[];
   currentSubject?: string;
+  statusUpdatesPending?: boolean;
   isInitialSync?: boolean;
   currentPageIndex?: number;
   totalPagesCount?: number;
@@ -31,10 +33,15 @@ export interface SyncResult {
   message: string;
   newEmails: number;
   newCompanies: number;
+  statusUpdatesCompleted?: boolean;
+  statusUpdatesPending?: boolean;
 }
 
 interface SyncContextValue {
   isSyncing: boolean;
+  statusUpdatesPending: boolean;
+  statusUpdatePhase: 'personal' | 'personal_scan' | 'college' | 'college_matching' | 'recalculate' | 'status_recalculation' | 'complete';
+  statusChecksComplete: boolean;
   syncProgress: SyncProgress | null;
   progressPercent: number;
   lastSyncAt: string | null;
@@ -57,11 +64,16 @@ export function SyncProvider({
 }) {
   const router = useRouter();
   const [isSyncing, setIsSyncing] = useState(false);
+  const [statusUpdatesPending, setStatusUpdatesPending] = useState(false);
+  const [statusUpdatePhase, setStatusUpdatePhase] = useState<'personal' | 'personal_scan' | 'college' | 'college_matching' | 'recalculate' | 'status_recalculation' | 'complete'>('personal');
+  const [statusChecksComplete, setStatusChecksComplete] = useState(false);
   const [isPausing, setIsPausing] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [syncProgress, setSyncProgress] = useState<SyncProgress | null>(null);
   const [syncResult, setSyncResult] = useState<SyncResult | null>(null);
   const [lastSyncAt, setLastSyncAt] = useState<string | null>(initialLastSyncAt || null);
+  const visibleStatusUpdatePhase = getStatusUpdatePhase(syncProgress?.currentSubject) ||
+    (statusUpdatesPending && !isSyncing ? 'recalculate' : statusUpdatePhase);
   const lastSyncAtRef = useRef<string | null>(initialLastSyncAt || null);
 
   const isSyncingRef = useRef(false);
@@ -103,6 +115,7 @@ export function SyncProvider({
         }
 
         if (data.isSyncing) {
+          setStatusUpdatesPending(Boolean(data.statusUpdatesPending));
           setIsSyncing(true);
           isSyncingRef.current = true;
           if (data.progress) {
@@ -129,26 +142,30 @@ export function SyncProvider({
           stopPolling();
           isSyncingRef.current = false;
           setIsSyncing(false);
-          setSyncProgress(null);
+          setStatusUpdatesPending(Boolean(data.statusUpdatesPending));
+          setSyncProgress(data.statusUpdatesPending && data.progress ? data.progress : null);
 
           if (data.phase === 'complete') {
             const resultData = {
               show: true,
               success: true,
-              message: 'Placement sync complete',
+              message: data.statusUpdatesPending ? 'Status checks still updating' : 'Placement sync complete',
               newEmails: data.progress?.newEmails || 0,
               newCompanies: data.progress?.newCompanies || 0,
+              statusUpdatesPending: Boolean(data.statusUpdatesPending),
             };
             setSyncResult(resultData);
             appToast.sync(
-              'Placement sync complete',
-              `${resultData.newEmails} new updates · ${resultData.newCompanies} companies indexed`
+              resultData.message,
+              resultData.statusUpdatesPending
+                ? 'Shortlist checks were deferred; provisional statuses are still being held back.'
+                : `${resultData.newEmails} new updates · ${resultData.newCompanies} companies indexed`
             );
             if (typeof window !== 'undefined') {
               window.dispatchEvent(new CustomEvent('wmo:refresh_notifications'));
             }
             router.refresh();
-            setTimeout(() => setSyncResult(null), 5000);
+            if (!resultData.statusUpdatesPending) setTimeout(() => setSyncResult(null), 5000);
           }
         }
       } catch {
@@ -183,6 +200,9 @@ export function SyncProvider({
       if (isSyncingRef.current && !isChained) return;
       setIsPaused(false);
       setIsPausing(false);
+      setStatusUpdatesPending(true);
+      setStatusChecksComplete(false);
+      setStatusUpdatePhase('personal');
       isSyncingRef.current = true;
       setIsSyncing(true);
       setSyncResult(null);
@@ -304,28 +324,49 @@ export function SyncProvider({
                       return;
                     }
 
-                    isSyncingRef.current = false;
-                    setIsSyncing(false);
-                    setSyncProgress(null);
-
                     const newEmails = parsed.newEmails ?? parsed.result?.newEmails ?? 0;
                     const newCompanies = parsed.newCompanies ?? parsed.result?.newCompanies ?? 0;
+                    const statusesUpdated = Boolean(
+                      parsed.result?.statusUpdatesCompleted ||
+                      /drive statuses updated/i.test(syncProgress?.currentSubject || '')
+                    );
+                    const statusUpdatesPending = Boolean(parsed.result?.statusUpdatesPending);
+                    const observedPhase = getStatusUpdatePhase(syncProgress?.currentSubject);
+                    if (statusesUpdated || observedPhase === 'complete') setStatusUpdatePhase('complete');
+                    else if (observedPhase === 'college_matching') setStatusUpdatePhase('college_matching');
+                    else if (observedPhase === 'status_recalculation') setStatusUpdatePhase('status_recalculation');
+                    else if (observedPhase === 'personal_scan') setStatusUpdatePhase('personal_scan');
+                    setStatusChecksComplete(statusesUpdated);
+                    setStatusUpdatesPending(statusUpdatesPending);
+                    isSyncingRef.current = false;
+                    setIsSyncing(false);
+                    setSyncProgress(statusUpdatesPending && syncProgress
+                      ? { ...syncProgress, currentSubject: 'Status checks pending' }
+                      : null);
                     const resultData: SyncResult = {
                       show: true,
                       success: true,
-                      message: syncProgress?.isInitialSync
-                        ? 'Sync complete! All placement drives are up to date.'
-                        : 'Placement sync complete',
+                      message: statusesUpdated
+                        ? 'Drive statuses updated'
+                        : statusUpdatesPending
+                          ? 'Personal sync complete · status checks pending'
+                          : 'Personal sync complete',
                       newEmails,
                       newCompanies,
+                      statusUpdatesCompleted: statusesUpdated,
+                      statusUpdatesPending,
                     };
                     setSyncResult(resultData);
                     appToast.sync(
                       resultData.message,
-                      `${newEmails} new updates · ${newCompanies} companies indexed`
+                      statusesUpdated
+                        ? `${newEmails} new updates · shortlist results refreshed`
+                        : statusUpdatesPending
+                          ? `${newEmails} new updates · shortlist status checks are still pending`
+                          : `${newEmails} new updates · ${newCompanies} companies indexed`
                     );
                     router.refresh();
-                    setTimeout(() => setSyncResult(null), 4000);
+                    if (!statusUpdatesPending) setTimeout(() => setSyncResult(null), 5000);
                   } else if (currentEvent === 'error' || currentEvent === 'sync_error') {
                     stopPolling();
                     setSyncProgress(null);
@@ -369,8 +410,13 @@ export function SyncProvider({
                 setLastSyncAt(data.lastSyncAt);
               }
               if (data.isSyncing) {
+                setStatusUpdatesPending(Boolean(data.statusUpdatesPending));
                 startPolling(true);
                 return;
+              }
+              if (data.statusUpdatesPending && data.progress) {
+                setStatusUpdatesPending(true);
+                setSyncProgress(data.progress);
               }
               if (data.phase === 'pending' && (data.progress?.paused || data.progress?.errors?.some((error: string) => error.startsWith('Paused by user')))) {
                 stopPolling();
@@ -405,6 +451,7 @@ export function SyncProvider({
                 stopPolling();
                 setIsSyncing(false);
                 isSyncingRef.current = false;
+                setStatusUpdatesPending(Boolean(data.statusUpdatesPending));
                 setSyncProgress(null);
                 const resultData = {
                   show: true,
@@ -460,25 +507,29 @@ export function SyncProvider({
               }, 800);
               return;
             }
-            if (data.phase === 'complete') {
-              stopPolling();
-              setIsSyncing(false);
-              isSyncingRef.current = false;
-              setSyncProgress(null);
-              const resultData = {
-                show: true,
-                success: true,
-                message: 'Placement sync complete',
-                newEmails: data.progress?.newEmails || 0,
-                newCompanies: data.progress?.newCompanies || 0,
-              };
-              setSyncResult(resultData);
-              appToast.sync(
-                'Placement sync complete',
-                `${resultData.newEmails} new updates · ${resultData.newCompanies} companies indexed`
-              );
-              router.refresh();
-              setTimeout(() => setSyncResult(null), 5000);
+              if (data.phase === 'complete') {
+                stopPolling();
+                setIsSyncing(false);
+                isSyncingRef.current = false;
+                setStatusUpdatesPending(Boolean(data.statusUpdatesPending));
+                setSyncProgress(data.statusUpdatesPending ? data.progress || null : null);
+                const resultData = {
+                  show: true,
+                  success: true,
+                  message: data.statusUpdatesPending ? 'Status checks still updating' : 'Placement sync complete',
+                  newEmails: data.progress?.newEmails || 0,
+                  newCompanies: data.progress?.newCompanies || 0,
+                  statusUpdatesPending: Boolean(data.statusUpdatesPending),
+                };
+                setSyncResult(resultData);
+                appToast.sync(
+                  resultData.message,
+                  resultData.statusUpdatesPending
+                    ? 'Shortlist checks were deferred; provisional statuses are still being held back.'
+                    : `${resultData.newEmails} new updates · ${resultData.newCompanies} companies indexed`
+                );
+                router.refresh();
+                if (!resultData.statusUpdatesPending) setTimeout(() => setSyncResult(null), 5000);
               return;
             }
           }
@@ -520,13 +571,17 @@ export function SyncProvider({
         if (data.lastSyncAt) {
           setLastSyncAt(data.lastSyncAt);
         }
-        if (data.isSyncing) {
-          setIsSyncing(true);
-          isSyncingRef.current = true;
+            if (data.isSyncing) {
+              setIsSyncing(true);
+              setStatusUpdatesPending(Boolean(data.statusUpdatesPending));
+              isSyncingRef.current = true;
           if (data.progress) {
             setSyncProgress(data.progress);
           }
           startPolling();
+        } else if (data.statusUpdatesPending && data.progress) {
+          setStatusUpdatesPending(true);
+          setSyncProgress(data.progress);
         }
       })
       .catch(() => {});
@@ -552,20 +607,23 @@ export function SyncProvider({
 
           if (data.isSyncing) {
             setIsSyncing(true);
+            setStatusUpdatesPending(Boolean(data.statusUpdatesPending));
             isSyncingRef.current = true;
             if (data.progress) {
               setSyncProgress(data.progress);
             }
             startPolling();
-          } else {
-            stopPolling();
+            } else {
+              stopPolling();
+              setStatusUpdatesPending(Boolean(data.statusUpdatesPending));
             if (isSyncingRef.current) {
               isSyncingRef.current = false;
               setIsSyncing(false);
-              setSyncProgress(null);
               router.refresh();
             }
-          }
+              if (data.statusUpdatesPending && data.progress) setSyncProgress(data.progress);
+              else if (!data.statusUpdatesPending) setSyncProgress(null);
+            }
         } catch {}
       }
     };
@@ -655,6 +713,9 @@ export function SyncProvider({
     <SyncContext.Provider
       value={{
         isSyncing,
+        statusUpdatesPending,
+        statusUpdatePhase: visibleStatusUpdatePhase,
+        statusChecksComplete,
         syncProgress,
         progressPercent,
         lastSyncAt,

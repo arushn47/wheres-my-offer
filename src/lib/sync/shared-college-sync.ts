@@ -3,6 +3,7 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { createGmailClient, type GmailAccount } from '@/lib/gmail/client';
 import { fetchHistoryChanges, getProfileHistoryId } from '@/lib/gmail/history';
 import { ingestSharedCollegeCircular, fanOutSharedCollegeArchiveToUser } from '@/lib/sync/shared-college-ingest';
+import { getInitialArchivePageState } from '@/lib/sync/shared-college-state';
 
 const DEFAULT_SHARED_COLLEGE_EMAIL = 'arush.23bce10472@vitbhopal.ac.in';
 const MAX_BATCH_SIZE = 40;
@@ -81,9 +82,21 @@ export async function runSharedCollegeSync(options: { limit?: number } = {}) {
       pending_next_page_token: rawState.pending_next_page_token,
       pending_history_id: rawState.pending_history_id,
     };
+    // A run that dies right after consuming its last pending message never commits
+    // the end-of-run transition. Resuming with that fully consumed batch made the
+    // worker skip the listing branch, declare the initial scan complete, and drop a
+    // still-valid page cursor (or a history cursor) on the floor. Clear the spent
+    // batch up front so the normal listing/history pass owns the next decision.
+    if (state.pending_message_ids.length > 0 && state.pending_offset >= state.pending_message_ids.length) {
+      state.pending_message_ids = [];
+      state.pending_offset = 0;
+      state.pending_next_page_token = null;
+    }
+
+    const { isInitialArchiveScan } = getInitialArchivePageState(state);
 
     // Resume a previously fetched batch before asking Gmail for more IDs.
-    if (state.pending_message_ids.length === 0 && state.pending_history_id) {
+    if (state.pending_message_ids.length === 0 && state.pending_history_id && !isInitialArchiveScan) {
       // The prior history batch completed; only now advance the mailbox history cursor.
       const { error: historyCheckpointError } = await supabase
         .from('gmail_accounts')
@@ -93,10 +106,13 @@ export async function runSharedCollegeSync(options: { limit?: number } = {}) {
       state.pending_history_id = null;
     }
 
-    const completingPendingInitialPage = state.pending_message_ids.length > 0 && Boolean(state.pending_next_page_token);
-    const completingLastInitialPage = state.pending_message_ids.length > 0 && !state.pending_next_page_token && !state.initial_scan_complete;
-
-    if (state.pending_message_ids.length === 0 && !state.initial_scan_complete) {
+    if (state.pending_message_ids.length === 0 && isInitialArchiveScan) {
+      // Snapshot the mailbox cursor before listing the initial archive. Any mail
+      // arriving during the paginated scan is then visible to the subsequent
+      // history pass rather than being skipped by a cursor captured afterward.
+      if (!state.pending_history_id) {
+        state.pending_history_id = await getProfileHistoryId(gmail);
+      }
       const listed = await gmail.users.messages.list({
         userId: 'me',
         q: 'from:vitlions2027@vitbhopal.ac.in after:2026/06/30',
@@ -106,8 +122,7 @@ export async function runSharedCollegeSync(options: { limit?: number } = {}) {
       state.pending_message_ids = (listed.data.messages || []).map((message) => message.id).filter((id): id is string => Boolean(id));
       state.pending_offset = 0;
       state.pending_next_page_token = listed.data.nextPageToken || null;
-      state.pending_history_id = await getProfileHistoryId(gmail);
-      } else if (state.pending_message_ids.length === 0 && state.initial_scan_complete && account.last_history_id) {
+    } else if (state.pending_message_ids.length === 0 && state.initial_scan_complete && account.last_history_id) {
       const history = await fetchHistoryChanges(gmail, account.last_history_id);
       if (history.historyExpired) {
         state.initial_scan_complete = false;
@@ -127,6 +142,8 @@ export async function runSharedCollegeSync(options: { limit?: number } = {}) {
     } else if (state.pending_message_ids.length === 0 && state.initial_scan_complete && !account.last_history_id) {
       state.pending_history_id = await getProfileHistoryId(gmail);
     }
+
+    const { completingPendingInitialPage, completingLastInitialPage } = getInitialArchivePageState(state);
 
     const limit = Math.max(1, Math.min(options.limit || MAX_BATCH_SIZE, 100));
     const batch = state.pending_message_ids.slice(state.pending_offset, state.pending_offset + limit);
@@ -154,12 +171,12 @@ export async function runSharedCollegeSync(options: { limit?: number } = {}) {
       state.pending_offset = 0;
       state.next_page_token = state.pending_next_page_token;
       state.pending_next_page_token = null;
-      state.pending_history_id = null;
       state.initial_scan_complete = false;
       hasMore = true;
     } else if (batchFinished && completingLastInitialPage) {
       state.pending_message_ids = [];
       state.pending_offset = 0;
+      state.next_page_token = null;
       state.pending_next_page_token = null;
       state.initial_scan_complete = true;
       fanOutNeeded = true;
@@ -185,13 +202,34 @@ export async function runSharedCollegeSync(options: { limit?: number } = {}) {
         await fanOutSharedCollegeArchiveToUser(user.id);
         fannedOutUsers++;
       }
-      const latestHistory = await getProfileHistoryId(gmail);
+      // Persist the cursor associated with this exact Gmail list/history read.
+      // Advancing to a newer profile cursor here can skip messages that arrive
+      // after the listed batch but before this checkpoint.
+      const latestHistory = state.pending_history_id;
       const { error: accountCheckpointError } = await supabase
         .from('gmail_accounts')
         .update({ last_history_id: latestHistory || account.last_history_id, last_sync_at: new Date().toISOString() })
         .eq('id', account.id);
       if (accountCheckpointError) throw accountCheckpointError;
+      state.pending_history_id = null;
       state.initial_scan_complete = true;
+    }
+
+    // History can advance for non-message changes (for example deletes or label
+    // updates). Commit that cursor even when there are no message IDs to fan out,
+    // otherwise every worker pass rereads the same empty history range forever.
+    if (
+      batchFinished &&
+      failed === 0 &&
+      state.pending_history_id &&
+      (!isInitialArchiveScan || completingLastInitialPage)
+    ) {
+      const { error: historyCheckpointError } = await supabase
+        .from('gmail_accounts')
+        .update({ last_history_id: state.pending_history_id, last_sync_at: new Date().toISOString() })
+        .eq('id', account.id);
+      if (historyCheckpointError) throw historyCheckpointError;
+      state.pending_history_id = null;
     }
 
     await checkpoint(supabase, account.id, runId, state);

@@ -6,7 +6,7 @@ import { CANONICAL_IDENTITY_VERSION, CANONICAL_PARSER_VERSION, canonicalBodyFrom
 import { classifyEmail } from '@/lib/sync/classifier';
 import { extractAllDriveNumbers, extractEvents, extractJobDetails } from '@/lib/sync/events';
 import { processEmailForEventsAndStatus } from '@/lib/sync/status-engine';
-import { isShortlistMatchEvidence } from '@/lib/sync/participation-evidence';
+import { hasSharedDriveFanOutEvidence, isShortlistMatchEvidence } from '@/lib/sync/participation-evidence';
 import { normalizeDriveNumber } from '@/lib/drive-number';
 
 interface SharedDriveRow {
@@ -21,6 +21,12 @@ interface SharedCompanyRow {
   id: string;
   name: string;
   aliases: string[] | null;
+}
+
+const UNSUPPORTED_ATTACHMENT_ERROR = 'Unsupported attachment format; deferred.';
+
+function isSupportedWorkbookAttachment(filename: string): boolean {
+  return /\.(xlsx|xls|csv)$/i.test(filename);
 }
 
 interface SharedCircularRow {
@@ -205,6 +211,30 @@ export async function ingestSharedCollegeCircular(params: {
         && (row.size_bytes || 0) === (attachment.size || 0));
   };
   for (const attachment of parsedEmail.attachments) {
+    if (!isSupportedWorkbookAttachment(attachment.filename)) {
+      const prior = findPriorRow(attachment, null);
+      if (prior?.parse_status === 'error' && /unsupported attachment format; deferred/i.test(prior.parse_error || '')) continue;
+      const unsupportedPayload = {
+        college_email_id: canonicalId,
+        content_key: `${canonicalId}:${attachment.attachmentId}`,
+        gmail_message_id: parsedEmail.gmailMessageId,
+        gmail_account_id: params.account.id,
+        attachment_id: attachment.attachmentId,
+        filename: attachment.filename,
+        size_bytes: attachment.size,
+        content_hash: null,
+        extracted_rows: null,
+        parse_status: 'error' as const,
+        parse_error: UNSUPPORTED_ATTACHMENT_ERROR,
+        updated_at: new Date().toISOString(),
+      };
+      const write = prior
+        ? await supabase.from('college_attachments').update(unsupportedPayload).eq('id', prior.id)
+        : await supabase.from('college_attachments').upsert(unsupportedPayload, { onConflict: 'college_email_id,attachment_id' });
+      if (write.error) throw write.error;
+      continue;
+    }
+
     const parsedAttachment = await scanSharedAttachment(gmail, parsedEmail, attachment).catch((error) => {
       attachmentErrors++;
       console.warn(`[Shared College Ingest] Deferred ${attachment.filename}:`, error);
@@ -279,8 +309,20 @@ export async function ingestSharedCollegeCircular(params: {
     .select('user_id,match_type,matched_value,matched_round_type')
     .eq('placement_drive_id', drive.id);
 
-  const { data: users } = await supabase.from('users').select('id,neo_id,email').in('id', userIds);
+  const { data: manualApplications, error: manualApplicationsError } = await supabase
+    .from('applications')
+    .select('user_id')
+    .eq('placement_drive_id', drive.id)
+    .eq('manual_override', true);
+  if (manualApplicationsError) throw manualApplicationsError;
+
+  const targetUserIds = Array.from(new Set([
+    ...userIds,
+    ...(manualApplications || []).map((application) => application.user_id),
+  ]));
+  const { data: users } = await supabase.from('users').select('id,neo_id,email').in('id', targetUserIds);
   const eligibleUserIds = new Set(userIds);
+  for (const application of manualApplications || []) eligibleUserIds.add(application.user_id);
   for (const match of userMatches || []) {
     if (isShortlistMatchEvidence({ matchType: match.match_type, matchedValue: match.matched_value, matchedRoundType: match.matched_round_type })) {
       eligibleUserIds.add(match.user_id);
@@ -298,7 +340,12 @@ export async function ingestSharedCollegeCircular(params: {
     }
     const userEvidence = (userMatches || []).filter((match) => match.user_id === targetUserId)
       .some((match) => isShortlistMatchEvidence({ matchType: match.match_type, matchedValue: match.matched_value, matchedRoundType: match.matched_round_type }));
-    if (!eligibleReceipts?.some((receipt) => receipt.user_id === targetUserId) && !userEvidence) {
+    const hasManualOverride = (manualApplications || []).some((application) => application.user_id === targetUserId);
+    if (!hasSharedDriveFanOutEvidence({
+      hasPersonalDriveEvidence: Boolean(eligibleReceipts?.some((receipt) => receipt.user_id === targetUserId)),
+      hasConfirmedShortlistMatch: userEvidence,
+      manualOverride: hasManualOverride,
+    }) || !user) {
       skippedUsers++;
       continue;
     }
@@ -326,7 +373,7 @@ export async function fanOutSharedCollegeArchiveToUser(userId: string): Promise<
   if (!userResult.data) throw new Error(`User ${userId} was not found for shared circular fan-out.`);
   const eligible = new Set<string>();
   for (const app of appsResult.data || []) {
-    if (app.placement_drive_id && (app.manual_override || app.status !== 'not_applied')) eligible.add(app.placement_drive_id);
+    if (app.placement_drive_id && app.manual_override) eligible.add(app.placement_drive_id);
   }
   for (const email of personalResult.data || []) if (email.placement_drive_id) eligible.add(email.placement_drive_id);
   for (const match of matchesResult.data || []) {
@@ -377,11 +424,11 @@ export async function fanOutSharedCollegeArchiveToUser(userId: string): Promise<
   // per-pair applications query turned the drive×circular loop into ~20k sequential
   // round-trips per user, stalling the completion fan-out for tens of minutes.
   const candidateDriveIds = Array.from(new Set(drives.map((drive) => drive.id)));
-  const currentUserApps = new Map<string, { status: string | null; manual_override: boolean | null }>();
+  const currentUserApps = new Map<string, { manual_override: boolean | null }>();
   for (let from = 0; from < candidateDriveIds.length; from += 200) {
     const { data: appRows, error: appRowsError } = await supabase
       .from('applications')
-      .select('placement_drive_id,status,manual_override')
+      .select('placement_drive_id,manual_override')
       .eq('user_id', userId)
       .in('placement_drive_id', candidateDriveIds.slice(from, from + 200));
     if (appRowsError) throw appRowsError;
@@ -396,7 +443,7 @@ export async function fanOutSharedCollegeArchiveToUser(userId: string): Promise<
       const normalizedDriveNumber = normalizeDriveNumber(drive.normalized_drive_number || drive.drive_number || '');
       const numberMatch = Boolean(normalizedDriveNumber && driveNumbers.includes(normalizedDriveNumber));
       const companyMatch = Boolean(circular.parsed_company_name && circular.parsed_company_name.toLowerCase().trim() === company.name.toLowerCase().trim());
-      const sameCompanyDrives = drives.filter((candidate) => candidate.company_id === drive.company_id);
+      const sameCompanyDrives = (drivesResult.data || []).filter((candidate) => candidate.company_id === drive.company_id);
       if (!direct && !numberMatch && !(companyMatch && sameCompanyDrives.length === 1)) continue;
       if (!seen.add(`${drive.id}|${circular.id}`)) continue;
       examined++;
@@ -425,7 +472,11 @@ export async function fanOutSharedCollegeArchiveToUser(userId: string): Promise<
           match.placement_drive_id === drive.id &&
           isShortlistMatchEvidence({ matchType: match.match_type, matchedValue: match.matched_value, matchedRoundType: match.matched_round_type })
         );
-        if (!personalEvidence && !positiveShortlist && !currentApplication?.manual_override && (!currentApplication?.status || currentApplication.status === 'not_applied')) {
+        if (!hasSharedDriveFanOutEvidence({
+          hasPersonalDriveEvidence: personalEvidence,
+          hasConfirmedShortlistMatch: positiveShortlist,
+          manualOverride: Boolean(currentApplication?.manual_override),
+        })) {
           skipped++;
           continue;
         }

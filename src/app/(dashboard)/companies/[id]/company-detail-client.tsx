@@ -16,14 +16,18 @@ import {
   Building2,
   Globe,
   GraduationCap,
-  Check,
-  X,
 } from 'lucide-react';
 import { cn, timeAgo, getDriveMode } from '@/lib/utils';
 import { CategoryBadge, STATUS_META } from '@/components/ui/status-chip';
 import { StageStepper, getStageIndex, getEffectiveStage, isEliminatedStatus } from '@/components/companies/stage-stepper';
 import { cleanLocationString } from '@/lib/sync/locations';
 import { cleanRoleTitle } from '@/lib/sync/events';
+import { useSync } from '@/context/sync-context';
+import {
+  getProvisionalStatusLabel,
+  getVisibleApplicationStatus,
+  isShortlistVerificationPending,
+} from '@/lib/sync/status-display';
 
 export interface CompanyDetail {
   id: string;
@@ -33,6 +37,7 @@ export interface CompanyDetail {
   driveNumber?: string | null;
   driveName?: string | null;
   placementDriveId?: string | null;
+  shortlistVerificationState?: string | null;
   candidateName?: string | null;
   candidateRegId?: string | null;
   application: {
@@ -72,6 +77,7 @@ export interface CompanyDetail {
     classification: string;
     threadId?: string | null;
     gmailMessageId?: string | null;
+    rfcMessageId?: string | null;
     accountEmail?: string | null;
     attachmentName?: string | null;
   }[];
@@ -131,50 +137,6 @@ function parseCandidateMatchDetails(matchedValue: string | null, neoId?: string 
   };
 }
 
-function getNotShortlistedDetails(
-  email: { subject: string; snippet?: string; classification?: string; attachmentName?: string | null },
-  candidateRegId?: string | null,
-  companyName?: string
-) {
-  const sub = email.subject.toLowerCase();
-  let roundName = 'Next Round Shortlist';
-  if (sub.includes('interview') || sub.includes('gd') || sub.includes('discussion')) {
-    roundName = 'Interview Shortlist';
-  } else if (sub.includes('offer') || sub.includes('congratulations') || sub.includes('final') || sub.includes('selection list')) {
-    roundName = 'Final Selection List';
-  } else if (sub.includes('test') || sub.includes('assessment') || sub.includes('exam')) {
-    roundName = 'Test Shortlist';
-  } else if (sub.includes('ppt')) {
-    roundName = 'Pre-Placement Shortlist';
-  }
-
-  let filename = email.attachmentName;
-  if (!filename) {
-    const fileMatch = (email.subject + ' ' + (email.snippet || '')).match(/([\w\s\-–\(\)\.]+\.(?:xlsx|xls|pdf|csv))/i);
-    if (fileMatch) {
-      filename = fileMatch[1].trim();
-    } else {
-      let cleanTitle = email.subject
-        .replace(/^(?:(?:re|fw|fwd|update)\s*:\s*)+/i, '')
-        .replace(/^(?:congratulations\s*!*)\s*/i, '')
-        .replace(/\s*is\s+scheduled.*$/i, '')
-        .replace(/\s*-\s*2027\s*batch.*$/i, '')
-        .trim();
-      if (!cleanTitle.toLowerCase().includes('shortlist') && !cleanTitle.toLowerCase().includes('selection')) {
-        cleanTitle += ' Shortlist';
-      }
-      filename = `${cleanTitle}.xlsx`;
-    }
-  }
-
-  return {
-    filename,
-    roundName,
-    identifier: candidateRegId ? `Neo ID: ${candidateRegId}` : 'Candidate ID Scanned',
-    rosterType: email.attachmentName ? 'Attachment Roster' : 'Verified Roster',
-  };
-}
-
 interface CompanyDetailClientProps {
   company: CompanyDetail;
   userCampus?: 'VIT Bhopal' | 'VIT Vellore' | 'VIT Chennai' | 'VIT AP';
@@ -227,7 +189,7 @@ function getCleanEmailSummary(
 ): string {
   if (!rawSnippet || rawSnippet.trim().length === 0) {
     const subLower = subject.toLowerCase();
-    if (
+  if (
       classification === 'shortlist' ||
       classification === 'selected' ||
       subLower.includes('shortlist') ||
@@ -236,7 +198,7 @@ function getCleanEmailSummary(
       subLower.includes('selected candidates')
     ) {
       if (isMatched === false) {
-        return `Selection roster announced for ${companyName}. Registration ID was not found in the verified shortlist for this round.`;
+        return `Official ${companyName} round details and shortlist roster.`;
       }
       return `Registrations screened and shortlist confirmed for ${companyName}. Candidate matches verified in attachment.`;
     }
@@ -284,20 +246,36 @@ function getCleanEmailSummary(
 function getGmailLink(email: {
   threadId?: string | null;
   gmailMessageId?: string | null;
+  rfcMessageId?: string | null;
   subject?: string | null;
   accountEmail?: string | null;
 }) {
-  const authParam = email.accountEmail ? `?authuser=${encodeURIComponent(email.accountEmail)}` : '';
+  // /u/{n} is Gmail's account index, not an email address. Keep a valid
+  // account path and use authuser to open the exact connected inbox.
+  const accountPath = `https://mail.google.com/mail/u/0/${email.accountEmail ? `?authuser=${encodeURIComponent(email.accountEmail)}` : ''}`;
   if (email.threadId) {
-    return `https://mail.google.com/mail/u/${authParam}#all/${email.threadId}`;
+    return `${accountPath}#all/${encodeURIComponent(email.threadId)}`;
   }
-  if (email.gmailMessageId) {
-    return `https://mail.google.com/mail/u/${authParam}#search/rfc822msgid:${email.gmailMessageId}`;
+  if (email.rfcMessageId) {
+    return `${accountPath}#search/${encodeURIComponent(`rfc822msgid:${email.rfcMessageId}`)}`;
   }
   if (email.subject) {
-    return `https://mail.google.com/mail/u/${authParam}#search/${encodeURIComponent(email.subject)}`;
+    return `${accountPath}#search/${encodeURIComponent(email.subject)}`;
   }
-  return `https://mail.google.com/mail/u/0/#inbox`;
+  if (email.gmailMessageId) {
+    return `${accountPath}#all/${encodeURIComponent(email.gmailMessageId)}`;
+  }
+  return `${accountPath}#inbox`;
+}
+
+function isAppliedOrOptInRoster(email: { subject: string; attachmentName?: string | null }): boolean {
+  const text = `${email.subject} ${email.attachmentName || ''}`;
+  return /applied[_\s-]*list|opt[_\s-]*in(?:[_\s-]*list)?|registered[_\s-]*(?:student|candidate|list)|registration[_\s-]*list|eligible[_\s-]*(?:student|candidate|list)/i.test(text);
+}
+
+function isShortlistRosterAttachment(filename?: string | null): boolean {
+  if (!filename || isAppliedOrOptInRoster({ subject: '', attachmentName: filename })) return false;
+  return /shortlist|selection[_\s-]*list|selected[_\s-]*student|shortlisted/i.test(filename);
 }
 
 export default function CompanyDetailClient({
@@ -307,6 +285,7 @@ export default function CompanyDetailClient({
   userRegNo,
 }: CompanyDetailClientProps) {
   const router = useRouter();
+  const { isSyncing, statusUpdatesPending, statusUpdatePhase, syncProgress } = useSync();
   const rawStatus = company.application?.status || 'applied';
   const notesStr = company.application?.notes || '';
   const isManual = company.application?.manualOverride ?? false;
@@ -344,7 +323,18 @@ export default function CompanyDetailClient({
 
   // The canonical status string to display in the chip — always use the effective
   // status so the detail page matches exactly what the company card shows.
-  const displayStatus = effective.effectiveStatus;
+  const provisionalStatus = getProvisionalStatusLabel({
+    status: effective.effectiveStatus,
+    isSyncing,
+    statusUpdatesPending,
+    verificationPending: isShortlistVerificationPending(company.shortlistVerificationState),
+    updatePhase: statusUpdatePhase,
+    manualOverride: isManual,
+    syncSubject: syncProgress?.currentSubject,
+  });
+  const isVerificationPending = isShortlistVerificationPending(company.shortlistVerificationState);
+  const displayStatus = getVisibleApplicationStatus(effective.effectiveStatus, isSyncing, isManual, statusUpdatesPending || isVerificationPending);
+  const statusDropdownStatus = getVisibleApplicationStatus(status, isSyncing, isManual, statusUpdatesPending || isVerificationPending);
 
   const stage = effective.stageIndex;
   const isWithdrawn =
@@ -354,9 +344,12 @@ export default function CompanyDetailClient({
     status === 'declined';
   const isEliminated =
     isEliminatedStatus(displayStatus) ||
-    isEliminatedStatus(status) ||
-    effective.eliminatedStage !== -1;
+    isEliminatedStatus(statusDropdownStatus) ||
+    (effective.eliminatedStage !== -1 && !provisionalStatus);
   const terminal = isWithdrawn || isEliminated;
+  const shortlistVerificationPending = Boolean(
+    (isSyncing || statusUpdatesPending || isVerificationPending) && !isManual
+  );
   const hue = useMemo(() => getHue(company.name), [company.name]);
   const initials = company.name.slice(0, 2).toUpperCase();
 
@@ -710,7 +703,7 @@ export default function CompanyDetailClient({
                     title="Click to manually update hiring status"
                   >
                     <span className={cn('h-2 w-2 rounded-full shrink-0', m.dot, m.isPulse ? 'pulse-dot' : '')} />
-                    <span>{m.label}</span>
+                    <span>{provisionalStatus || m.label}</span>
                     <ChevronDown className="h-3.5 w-3.5 opacity-60 transition-transform" />
                   </button>
                 );
@@ -864,7 +857,7 @@ export default function CompanyDetailClient({
               ? 'Eliminated in the test round. This drive is archived — the radar stays on the next ones.'
               : displayStatus === 'rejected_interview' || status === 'rejected_interview' || effective.eliminatedStage === 4
               ? 'Interview completed · Not selected. This drive is archived — the radar stays on the next ones.'
-              : displayStatus === 'not_shortlisted' || status === 'not_shortlisted' || effective.eliminatedStage === 2
+              : !provisionalStatus && (displayStatus === 'not_shortlisted' || statusDropdownStatus === 'not_shortlisted' || effective.eliminatedStage === 2)
               ? "Your ID wasn't in the shortlist. This drive is archived — the radar stays on the next ones."
               : "Your ID wasn't in the final selection sheet. This drive is archived — the radar stays on the next ones."}
           </div>
@@ -889,11 +882,11 @@ export default function CompanyDetailClient({
                 effective.eliminatedStage !== -1 ? 'text-rose-400 font-semibold' : 'text-zinc-500'
               )}
             >
-              {effective.statusSubtitle}
+              {provisionalStatus || effective.statusSubtitle}
             </span>
           )}
         </div>
-        <StageStepper status={status} events={company.events} notes={notesStr} manualOverride={isManual} />
+        <StageStepper status={displayStatus} events={company.events} notes={notesStr} manualOverride={isManual} />
       </motion.div>
 
       {/* Circular & Email Timeline */}
@@ -929,13 +922,6 @@ export default function CompanyDetailClient({
                 (cm.collegeEmailId && (cm.collegeEmailId === email.id || cm.collegeEmailId === email.collegeEmailId))
               );
 
-              const isShortlistOrSelection =
-                email.classification === 'shortlist' ||
-                email.classification === 'selected' ||
-                /(?:shortlist|selection\s*list|selected\s*candidates|shortlisted\s*candidates|next\s*round\s*of\s*selection|selection\s*process|offer\s*selection)/i.test(email.subject) ||
-                /(?:shortlist|candidates\s+shortlisted|shortlisted\s+candidates|selection\s+list|selected\s+candidates)/i.test(email.snippet) ||
-                Boolean(email.attachmentName && /shortlist|selection|roster|eligible/i.test(email.attachmentName));
-
               // "Not Shortlisted" should ONLY appear when:
               // 1. The student actually applied / registered for this drive (NOT unregistered/not_applied/unknown)
               // 2. There's an actual shortlist/roster that was checked (explicit shortlist classification or roster attachment)
@@ -945,9 +931,10 @@ export default function CompanyDetailClient({
                 company.application.status !== 'not_applied' &&
                 company.application.status !== 'unknown'
               );
-              const hasRosterAttachment = Boolean(email.attachmentName && /shortlist|selection|roster|eligible|shortlisted/i.test(email.attachmentName));
-              const isExplicitShortlistEmail = email.classification === 'shortlist' || email.classification === 'selected';
-              const isNotShortlisted = isUserAppliedOrRegistered && !matchedCandidate && (isExplicitShortlistEmail || hasRosterAttachment);
+              const hasRosterAttachment = isShortlistRosterAttachment(email.attachmentName);
+              const isExplicitShortlistEmail = !isAppliedOrOptInRoster(email) &&
+                (email.classification === 'shortlist' || email.classification === 'selected');
+              const isNotShortlisted = !shortlistVerificationPending && isUserAppliedOrRegistered && !matchedCandidate && (isExplicitShortlistEmail || hasRosterAttachment);
 
               const Icon = matchedCandidate
                 ? FileSpreadsheet
@@ -966,7 +953,7 @@ export default function CompanyDetailClient({
               const iconCls = matchedCandidate
                 ? 'border-emerald-500/50 bg-[#121218] text-emerald-400'
                 : isNotShortlisted
-                ? 'border-rose-500/50 bg-[#121218] text-rose-400'
+                ? 'border-zinc-700 bg-[#121218] text-zinc-500'
                 : isOffer
                 ? 'border-emerald-500/50 bg-[#121218] text-emerald-400'
                 : isInterview
@@ -1000,22 +987,6 @@ export default function CompanyDetailClient({
                           <span suppressHydrationWarning>{timeAgo(email.receivedAt)}</span>
                           <span>·</span>
                           <span>{isPersonal ? 'personal gmail' : 'college gmail'}</span>
-                          {matchedCandidate && (
-                            <>
-                              <span>·</span>
-                              <span className="inline-flex items-center gap-1 rounded bg-emerald-500/10 border border-emerald-500/20 px-1.5 py-0.5 font-mono text-[9px] font-semibold text-emerald-400">
-                                <Check className="h-2.5 w-2.5" /> Shortlist Verified
-                              </span>
-                            </>
-                          )}
-                          {isNotShortlisted && (
-                            <>
-                              <span>·</span>
-                              <span className="inline-flex items-center gap-1 rounded bg-rose-500/10 border border-rose-500/20 px-1.5 py-0.5 font-mono text-[9px] font-semibold text-rose-400">
-                                <X className="h-2.5 w-2.5" /> Not Shortlisted
-                              </span>
-                            </>
-                          )}
                         </div>
                       </div>
                       <ChevronDown
@@ -1046,7 +1017,7 @@ export default function CompanyDetailClient({
                               )}
                             </p>
 
-                            {/* Candidate Match Evidence ONLY if verified on THIS specific email */}
+                            {/* Compact positive shortlist evidence */}
                             {matchedCandidate && (() => {
                               const matchInfo = parseCandidateMatchDetails(matchedCandidate.matchedValue, matchedCandidate.neoId || company.candidateRegId);
                               if (!matchInfo) return null;
@@ -1054,89 +1025,27 @@ export default function CompanyDetailClient({
                               return (
                                 <div
                                   data-testid={`excel-evidence-${idx}`}
-                                  className="mt-3 overflow-hidden rounded-lg border border-violet-500/25 bg-[#0e0e14]"
+                                  className="mt-2 flex min-w-0 items-center gap-2 rounded-lg border border-emerald-500/15 bg-emerald-500/[0.035] px-2.5 py-2 text-[10px]"
                                 >
-                                  <div className="flex items-center justify-between border-b border-zinc-800 bg-violet-500/[0.07] px-3 py-2">
-                                    <span className="flex items-center gap-2 font-mono text-[10px] text-violet-300 font-medium truncate" title={matchInfo.filename}>
-                                      <FileSpreadsheet className="h-3.5 w-3.5 shrink-0 text-violet-400" />
-                                      <span className="truncate">{matchInfo.filename}</span>
-                                    </span>
-                                    <span className="font-mono text-[9px] font-semibold text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 rounded shrink-0">
-                                      shortlist verified
-                                    </span>
-                                  </div>
-                                  <div className="overflow-x-auto">
-                                    <div className="min-w-75 grid grid-cols-4 gap-px bg-zinc-800/70 font-mono text-[10px]">
-                                      <div className="bg-[#0b0d11] px-2.5 sm:px-3 py-2 text-violet-300 truncate font-semibold">
-                                        {matchInfo.identifier}
-                                      </div>
-                                      <div className="bg-[#0b0d11] px-2.5 sm:px-3 py-2 text-zinc-300 truncate">
-                                        {matchInfo.location}
-                                      </div>
-                                      <div className="bg-[#0b0d11] px-2.5 sm:px-3 py-2 text-zinc-400 truncate">
-                                        {matchInfo.column}
-                                      </div>
-                                      <div className="bg-[#0b0d11] px-2.5 sm:px-3 py-2 font-bold text-emerald-300 whitespace-nowrap text-center">
-                                        MATCH ✓
-                                      </div>
-                                    </div>
-                                  </div>
-                                  {matchInfo.venue && (
-                                    <div className="border-t border-zinc-800/60 bg-zinc-900/40 px-3 py-1.5 text-[10px] font-mono text-zinc-400">
-                                      Venue / Reporting: <span className="text-zinc-200">{matchInfo.venue}</span>
-                                    </div>
-                                  )}
+                                  <FileSpreadsheet className="h-3.5 w-3.5 shrink-0 text-emerald-400" />
+                                  <span className="truncate text-zinc-300" title={matchInfo.filename}>Shortlist match · {matchInfo.filename}</span>
+                                  {matchInfo.venue && <span className="hidden shrink-0 text-zinc-500 sm:inline">{matchInfo.venue}</span>}
                                 </div>
                               );
                             })()}
 
-                            {/* Not Shortlisted Evidence Card */}
-                            {isNotShortlisted && (() => {
-                              const notShortlistedInfo = getNotShortlistedDetails(
-                                email,
-                                company.candidateRegId || userRegNo,
-                                company.name
-                              );
-                              return (
+                            {/* A single quiet absence-of-match note, only for actual shortlist rosters. */}
+                            {isNotShortlisted && (
                                 <div
                                   data-testid={`not-shortlisted-evidence-${idx}`}
-                                  className="mt-3 overflow-hidden rounded-lg border border-rose-500/25 bg-[#0e0e14]"
+                                  className="mt-2 flex min-w-0 items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-950/40 px-2.5 py-2 text-[10px] text-zinc-400"
                                 >
-                                  <div className="flex items-center justify-between border-b border-zinc-800 bg-rose-500/[0.06] px-3 py-2">
-                                    <span
-                                      className="flex items-center gap-2 font-mono text-[10px] text-rose-300 font-medium truncate"
-                                      title={notShortlistedInfo.filename}
-                                    >
-                                      <FileSpreadsheet className="h-3.5 w-3.5 shrink-0 text-rose-400" />
-                                      <span className="truncate">{notShortlistedInfo.filename}</span>
-                                    </span>
-                                    <span className="font-mono text-[9px] font-semibold text-rose-400 bg-rose-500/10 border border-rose-500/20 px-2 py-0.5 rounded shrink-0 uppercase tracking-wider">
-                                      not shortlisted
-                                    </span>
-                                  </div>
-                                  <div className="overflow-x-auto">
-                                    <div className="min-w-75 grid grid-cols-4 gap-px bg-zinc-800/70 font-mono text-[10px]">
-                                      <div className="bg-[#0b0d11] px-2.5 sm:px-3 py-2 text-zinc-300 truncate font-semibold">
-                                        {notShortlistedInfo.identifier}
-                                      </div>
-                                      <div className="bg-[#0b0d11] px-2.5 sm:px-3 py-2 text-zinc-400 truncate">
-                                        {notShortlistedInfo.roundName}
-                                      </div>
-                                      <div className="bg-[#0b0d11] px-2.5 sm:px-3 py-2 text-zinc-500 truncate">
-                                        {notShortlistedInfo.rosterType}
-                                      </div>
-                                      <div className="bg-[#0b0d11] px-2.5 sm:px-3 py-2 font-bold text-rose-400 whitespace-nowrap text-center">
-                                        NO MATCH ✗
-                                      </div>
-                                    </div>
-                                  </div>
-                                  <div className="border-t border-zinc-800/60 bg-zinc-900/40 px-3 py-1.5 text-[10px] font-mono text-zinc-400 flex items-center gap-1.5">
-                                    <span className="text-rose-400/90 font-bold">ℹ</span>
-                                    <span>Official shortlist roster · Candidate registration ID was not selected for this round</span>
-                                  </div>
+                                  <FileSpreadsheet className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
+                                  <span className="truncate" title={email.attachmentName || email.subject}>
+                                    Not listed in {email.attachmentName || 'the shortlist'}
+                                  </span>
                                 </div>
-                              );
-                            })()}
+                            )}
 
                             {/* Action links row: Direct link to original Gmail thread */}
                             <div className="mt-3.5 flex flex-col xs:flex-row xs:items-center justify-between gap-2 pt-2.5 border-t border-zinc-800/60">

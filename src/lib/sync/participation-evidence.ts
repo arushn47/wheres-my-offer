@@ -54,3 +54,11 @@ export function isConfirmedShortlistEvidence(params: {
     !params.isEliminationEmail
   );
 }
+
+export function hasSharedDriveFanOutEvidence(params: {
+  hasPersonalDriveEvidence: boolean;
+  hasConfirmedShortlistMatch: boolean;
+  manualOverride?: boolean;
+}): boolean {
+  return hasUserPlacementEvidence(params);
+}

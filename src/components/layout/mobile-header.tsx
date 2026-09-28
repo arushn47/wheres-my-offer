@@ -111,6 +111,10 @@ export default function MobileHeader({ userName, userAvatar, isAdmin }: MobileHe
                   <span className="font-mono text-[11px] text-emerald-300 font-medium">
                     {syncProgress?.totalPagesCount && syncProgress.totalPagesCount > 1
                       ? `P${(syncProgress.currentPageIndex ?? 0) + 1}/${syncProgress.totalPagesCount} · ${syncProgress.processedMessages}/${syncProgress.totalMessages}`
+                      : syncProgress?.phase === 'fetching' && syncProgress.totalMessages > 0
+                      ? `${syncProgress.totalMessages} matches · checking saved mail`
+                      : syncProgress?.skippedDuplicates
+                      ? `${syncProgress.skippedDuplicates} saved · skipped`
                       : syncProgress?.totalMessages
                       ? `${syncProgress.processedMessages}/${syncProgress.totalMessages}`
                       : 'Syncing…'}

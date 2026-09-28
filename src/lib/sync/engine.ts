@@ -256,33 +256,13 @@ async function shadowWriteCanonical(
           .eq('id', emailId);
       }
 
-      if (parsedEmail.attachments && parsedEmail.attachments.length > 0) {
-        // Gmail attachment_ids rotate between fetches, so the (college_email_id, attachment_id)
-        // conflict target cannot dedupe shadow writes. Skip files the canonical already
-        // records by filename+size — otherwise every user sync inserts another un-hashed
-        // 'pending' lookalike row for attachments the shared worker has already parsed.
-        const { data: existingShadowAttachments } = await supabase
-          .from('college_attachments')
-          .select('filename,size_bytes')
-          .eq('college_email_id', canonicalId);
-        const recordedFiles = new Set(
-          (existingShadowAttachments || []).map((row) => `${row.filename || ''}|${row.size_bytes || 0}`)
-        );
-        for (const attachment of parsedEmail.attachments) {
-          if (recordedFiles.has(`${attachment.filename || ''}|${attachment.size || 0}`)) continue;
-          await supabase.from('college_attachments').upsert({
-            college_email_id: canonicalId,
-            gmail_message_id: parsedEmail.gmailMessageId,
-            gmail_account_id: account.id,
-            attachment_id: attachment.attachmentId,
-            filename: attachment.filename,
-            size_bytes: attachment.size,
-            parse_status: 'pending',
-            updated_at: new Date().toISOString(),
-          }, { onConflict: 'college_email_id,attachment_id', ignoreDuplicates: true });
-          recordedFiles.add(`${attachment.filename || ''}|${attachment.size || 0}`);
-        }
-      }
+      // `college_attachments` is owned by the shared College worker, which downloads
+      // and parses every canonical workbook exactly once. The per-user sync must not
+      // shadow-write `pending` stubs here: nothing ever parsed them, and because
+      // shortlist verification counts any unparsed relevant roster as "cannot verify",
+      // one stub parked the whole drive at `deferred` (status stuck on Applied)
+      // forever. Per-user shortlist scanning reads Gmail directly and the canonical
+      // rows, so no attachment write is needed on this path.
     }
     return canonicalId;
   } catch (err) {
@@ -405,6 +385,7 @@ export interface SyncProgress {
   currentPageIndex?: number;
   totalPagesCount?: number;
   isPage0Complete?: boolean;
+  statusUpdatesPending?: boolean;
 }
 
 export interface SyncResult {
@@ -420,6 +401,8 @@ export interface SyncResult {
   isPage0Complete?: boolean;
   hasMorePagesPending?: boolean;
   paused?: boolean;
+  statusUpdatesCompleted?: boolean;
+  statusUpdatesPending?: boolean;
   accounts: {
     email: string;
     accountType: string;
@@ -892,10 +875,26 @@ async function processSingleMessage(
                 ...baseApp,
                 placement_drive_id: applicationScope.placementDriveId,
               });
-            if (applicationInsertError && applicationInsertError.code !== '23505') {
-              throw applicationInsertError;
-            }
-        }
+      if (applicationInsertError && applicationInsertError.code !== '23505') {
+        throw applicationInsertError;
+      }
+
+      // A newly discovered drive starts with shortlist verification pending.
+      // Keep the opportunity visible, but do not allow an absence-based negative
+      // until canonical College rosters have been parsed and checked.
+      const { error: verificationPendingError } = await supabase
+        .from('shortlist_verification_state')
+        .upsert({
+          user_id: userId,
+          placement_drive_id: applicationScope.placementDriveId,
+          verification_state: 'pending',
+          checked_roster_count: 0,
+          last_error: null,
+          checked_at: null,
+          updated_at: new Date().toISOString(),
+        }, { onConflict: 'user_id,placement_drive_id', ignoreDuplicates: true });
+      if (verificationPendingError) throw verificationPendingError;
+    }
       }
     }
     const t4 = Date.now();
@@ -1592,6 +1591,8 @@ export async function runSync(
     newCompanies: 0,
     skippedDuplicates: 0,
     errors: [],
+    statusUpdatesCompleted: false,
+    statusUpdatesPending: false,
     accounts: [],
   };
 
@@ -1637,6 +1638,7 @@ export async function runSync(
             isInitialSync,
             currentPageIndex: p.currentPageIndex ?? 0,
             totalPagesCount: p.totalPagesCount ?? 1,
+            statusUpdatesPending: result.statusUpdatesPending ?? false,
             lastError: p.errors.length > 0 ? p.errors[p.errors.length - 1] : null,
           },
         });
@@ -2181,7 +2183,44 @@ export async function runSync(
     // when new emails were actually received or initial setup pages just completed.
     // This prevents idle cron runs from downloading thousands of email rows every 15 minutes and exhausting database egress!
     const hasNewData = (result.newEmails > 0 || result.newCompanies > 0 || hadCompletedInitialPages);
-    if (!result.paused && !result.hasMorePagesPending && hasNewData) {
+    if (hasNewData) {
+      const [{ data: userAppsForVerification, error: appStateError }, { data: userVerificationRows, error: verifyStateError }] = await Promise.all([
+        supabase.from('applications').select('placement_drive_id,manual_override').eq('user_id', userId).not('placement_drive_id', 'is', null),
+        supabase.from('shortlist_verification_state').select('placement_drive_id').eq('user_id', userId),
+      ]);
+      if (appStateError) throw appStateError;
+      if (verifyStateError) throw verifyStateError;
+      const verifiedDriveIds = new Set((userVerificationRows || []).map((row) => row.placement_drive_id));
+      const pendingDriveRows = (userAppsForVerification || [])
+        .filter((app) => app.placement_drive_id && !app.manual_override && !verifiedDriveIds.has(app.placement_drive_id))
+        .map((app) => ({
+          user_id: userId,
+          placement_drive_id: app.placement_drive_id,
+          verification_state: 'pending',
+          checked_roster_count: 0,
+          last_error: null,
+          checked_at: null,
+          updated_at: new Date().toISOString(),
+        }));
+      if (pendingDriveRows.length) {
+        const { error: pendingSeedError } = await supabase
+          .from('shortlist_verification_state')
+          .upsert(pendingDriveRows, { onConflict: 'user_id,placement_drive_id', ignoreDuplicates: true });
+        if (pendingSeedError) throw pendingSeedError;
+      }
+    }
+    // Only 'pending' is outstanding work. 'deferred' is terminal (archive incomplete or an
+    // unparsable roster) and counting it here made every sync report statusUpdatesPending
+    // forever, which held real not_shortlisted statuses back as "applied".
+    const { count: pendingBeforeStatusScan, error: pendingBeforeError } = await supabase
+      .from('shortlist_verification_state')
+      .select('placement_drive_id', { count: 'exact', head: true })
+      .eq('user_id', userId)
+      .eq('verification_state', 'pending');
+    if (pendingBeforeError) throw pendingBeforeError;
+    const shouldRunStatusChecks = hasNewData || (pendingBeforeStatusScan || 0) > 0;
+    result.statusUpdatesPending = shouldRunStatusChecks;
+    if (!result.paused && !result.hasMorePagesPending && shouldRunStatusChecks) {
       try {
         const { data: unlinkedEmails } = await supabase
           .from('personal_emails')
@@ -2579,6 +2618,7 @@ export async function runSync(
       // by processEmailForEventsAndStatus during page processing. Running full recalculation over all 1,500+ emails
       // on incremental syncs is what caused 1m 44s runtimes, lease loss, and hundreds of MBs in egress.
       if (!result.paused && !result.hasMorePagesPending && (hadCompletedInitialPages || result.newEmails > 0 || result.newCompanies > 0)) {
+        result.statusUpdatesCompleted = false;
         const remainingBudgetMs = options?.globalDeadline ? options.globalDeadline - Date.now() : Infinity;
         if (remainingBudgetMs > 30_000) {
           try {
@@ -2590,20 +2630,54 @@ export async function runSync(
             };
             notifyProgress(personalScanProgress, true);
             await scanSharedCollegeCandidateMatches(supabase, userId);
-          } catch (scanErr) {
-            console.warn('[Post-Sync Attachment Scan] Non-critical error:', scanErr);
-          }
 
-          try {
+            const statusProgress: SyncProgress = {
+              ...personalScanProgress,
+              currentSubject: 'Updating drive statuses…',
+            };
+            notifyProgress(statusProgress, true);
             const { recalculateApplicationStatuses } = await import('@/app/api/sync/reprocess/route');
             await recalculateApplicationStatuses(userId);
-          } catch (statusRecalcErr) {
-            console.warn('[Post-Sync Status Recalc] Non-critical error:', statusRecalcErr);
+            // Anything still 'pending' after the pass means the pass did not finish.
+            const { count: pendingAfterStatusScan, error: pendingAfterError } = await supabase
+              .from('shortlist_verification_state')
+              .select('placement_drive_id', { count: 'exact', head: true })
+              .eq('user_id', userId)
+              .eq('verification_state', 'pending');
+            if (pendingAfterError) throw pendingAfterError;
+            result.statusUpdatesPending = (pendingAfterStatusScan || 0) > 0;
+            result.statusUpdatesCompleted = !result.statusUpdatesPending;
+            notifyProgress({
+              ...statusProgress,
+              currentSubject: result.statusUpdatesCompleted ? 'Drive statuses updated' : 'Shortlist/status checks pending',
+              statusUpdatesPending: result.statusUpdatesPending,
+            }, true);
+          } catch (scanErr) {
+            console.warn('[Post-Sync Shortlist/Status Update] Non-critical error:', scanErr);
+            const { error: deferVerificationError } = await supabase
+              .from('shortlist_verification_state')
+              .update({
+                verification_state: 'deferred',
+                last_error: 'Shortlist/status pass did not finish; retry on next Personal sync.',
+                checked_at: null,
+                updated_at: new Date().toISOString(),
+              })
+              .eq('user_id', userId)
+              .in('verification_state', ['pending', 'deferred', 'verified_absent']);
+            if (deferVerificationError) console.error('[Post-Sync] Could not persist deferred shortlist work:', deferVerificationError.message);
+            result.statusUpdatesPending = true;
+            result.statusUpdatesCompleted = false;
+            notifyProgress({ ...latestProgress, phase: 'processing', currentSubject: 'Shortlist/status checks pending', statusUpdatesPending: true }, true);
           }
         } else {
           console.log('[Post-Sync] Skipping heavy post-sync recalculation to respect time budget');
+          result.statusUpdatesPending = true;
+          result.statusUpdatesCompleted = false;
+          notifyProgress({ ...latestProgress, phase: 'processing', currentSubject: 'Shortlist/status checks pending', statusUpdatesPending: true }, true);
         }
-      }
+    } else if (!shouldRunStatusChecks) {
+      result.statusUpdatesPending = false;
+    }
 
       // 6. Automatic Google Calendar reconciliation:
       // Run in background fire-and-forget so it NEVER blocks returning the sync response

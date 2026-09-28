@@ -168,6 +168,9 @@ export function getEffectiveStage(
   const notesText = notes || '';
   const isNotesInterview = /eliminated.*interview|interview.*eliminated|interviewed.*not\s*selected|rejected.*interview/i.test(notesText);
   const isNotesTest = /eliminated.*test|test.*eliminated|rejected.*test|test.*rejected/i.test(notesText);
+  const notShortlistedSubtitle = isPptCompleted
+    ? 'Not Shortlisted · Post-PPT'
+    : 'Not Shortlisted · In Screening';
 
   // ─── MANUAL OVERRIDE FAST PATH ──────────────────────────────────────────
   // If the application status was manually set by the user, honor it strictly!
@@ -178,8 +181,8 @@ export function getEffectiveStage(
         stageIndex: 2,
         effectiveStatus: 'not_shortlisted',
         eliminatedStage: 2,
-        furthestPassedStage: hasPpt ? 1 : 0,
-        statusSubtitle: hasPpt ? 'Not Shortlisted for Test (Post-PPT)' : 'Screened Out · Eligibility / PPT',
+        furthestPassedStage: isPptCompleted ? 1 : 0,
+        statusSubtitle: notShortlistedSubtitle,
         hasPpt,
         hasTest,
         hasInterview,
@@ -226,8 +229,8 @@ export function getEffectiveStage(
         stageIndex: 2,
         effectiveStatus: 'not_shortlisted',
         eliminatedStage: 2,
-        furthestPassedStage: hasPpt ? 1 : 0,
-        statusSubtitle: hasPpt ? 'Not Shortlisted for Test (Post-PPT)' : 'Screened Out · Eligibility / PPT',
+        furthestPassedStage: isPptCompleted ? 1 : 0,
+        statusSubtitle: notShortlistedSubtitle,
         hasPpt,
         hasTest,
         hasInterview,
@@ -490,8 +493,8 @@ export function getEffectiveStage(
       stageIndex: 2,
       effectiveStatus: 'not_shortlisted',
       eliminatedStage: 2,
-      furthestPassedStage: hasPpt ? 1 : 0, // Passed Applied (0) and PPT (1 if attended)
-      statusSubtitle: hasPpt ? 'Not Shortlisted for Test (Post-PPT)' : 'Screened Out · Eligibility / PPT',
+      furthestPassedStage: isPptCompleted ? 1 : 0,
+      statusSubtitle: notShortlistedSubtitle,
       hasPpt,
       hasTest,
       hasInterview,
@@ -575,8 +578,8 @@ export function getEffectiveStage(
       stageIndex: 2,
       effectiveStatus: 'not_shortlisted',
       eliminatedStage: 2,
-      furthestPassedStage: hasPpt ? 1 : 0,
-      statusSubtitle: hasPpt ? 'Not Shortlisted for Test (Post-PPT)' : 'Screened Out · Eligibility / PPT',
+      furthestPassedStage: isPptCompleted ? 1 : 0,
+      statusSubtitle: notShortlistedSubtitle,
       hasPpt,
       hasTest,
       hasInterview,

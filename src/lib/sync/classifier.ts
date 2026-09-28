@@ -44,6 +44,14 @@ interface ClassificationRule {
 }
 
 const CLASSIFICATION_RULES: ClassificationRule[] = [
+  // Combined schedules often announce a PPT followed by an online test in one
+  // subject. Classify by the first round so status evaluation sees the PPT.
+  {
+    classification: 'ppt',
+    confidence: 'high',
+    match: (s) => /(?:ppt|pre[\s-]*placement\s*talk).*(?:online\s+test|coding\s+test|assessment)/i.test(s),
+    reason: 'Subject announces PPT followed by a test/assessment schedule',
+  },
   // --- NON-PLACEMENT / PROMOTIONAL SENDER FILTER ---
   {
     classification: 'irrelevant',
@@ -111,7 +119,8 @@ const CLASSIFICATION_RULES: ClassificationRule[] = [
     classification: 'test',
     confidence: 'high',
     match: (s) =>
-      /(online\s+test|coding\s+test|online\s+assessment|aptitude\s+test|test\s+schedule|test\s+link|assessment\s+(?:test|link|scheduled|window)|thanks\s+for\s+taking\s+(?:the\s+)?assessment)/i.test(s),
+      /(online\s+test|coding\s+test|online\s+assessment|aptitude\s+test|test\s+schedule|test\s+link|assessment\s+(?:test|link|scheduled|window)|thanks\s+for\s+taking\s+(?:the\s+)?assessment)/i.test(s) &&
+      !/(?:ppt|pre[\s-]*placement\s*talk).*(?:online\s+test|coding\s+test|assessment)/i.test(s),
     reason: 'Subject mentions online test or assessment',
   },
   {

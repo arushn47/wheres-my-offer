@@ -21,6 +21,8 @@ import { formatStipend, cn, getDriveMode } from '@/lib/utils';
 import { cleanLocationString } from '@/lib/sync/locations';
 import { cleanRoleTitle, cleanEventTitle } from '@/lib/sync/events';
 import { isInactiveStatus } from '@/lib/stages';
+import { useSync } from '@/context/sync-context';
+import { getProvisionalStatusLabel, getVisibleApplicationStatus } from '@/lib/sync/status-display';
 import type { DashboardStats } from '@/types';
 
 export interface ActiveApplicationItem {
@@ -124,10 +126,11 @@ export default function DashboardClient({
   campus,
   branch,
 }: DashboardClientProps) {
+  const { isSyncing, statusUpdatesPending, statusUpdatePhase, syncProgress, syncResult } = useSync();
   // Top 4 active drives: Scheduled rounds first, then Completed rounds, then Applied drives
   const spotlightDrives = useMemo(() => {
     const active = activeApplications.filter(
-      (a) => !isInactiveStatus(a.status)
+      (a) => !isInactiveStatus(getVisibleApplicationStatus(a.status, isSyncing))
     );
 
     const now = Date.now();
@@ -201,7 +204,7 @@ export default function DashboardClient({
         return new Date(b.lastUpdated || 0).getTime() - new Date(a.lastUpdated || 0).getTime();
       })
       .slice(0, 4);
-  }, [activeApplications, upcomingEvents]);
+  }, [activeApplications, upcomingEvents, isSyncing]);
 
   const next24hEvents = useMemo(() => {
     const now = Date.now();
@@ -492,15 +495,23 @@ export default function DashboardClient({
           </Link>
         </div>
 
-        {spotlightDrives.length === 0 ? (
+      {spotlightDrives.length === 0 ? (
           <div className="relative overflow-hidden rounded-2xl border border-zinc-800/80 bg-linear-to-b from-[#121218] to-[#0a0a0e] p-6 sm:p-8 text-center shadow-lg">
             <Zap className="mx-auto h-8 w-8 text-zinc-600 mb-2" />
             <p className="font-display text-sm font-bold text-zinc-300">No active applications in the spotlight</p>
             <p className="mt-1 font-mono text-xs text-zinc-500">Apply to campus circulars or explore all tracked drives.</p>
           </div>
-        ) : (
+      ) : (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 w-full min-w-0 max-w-full">
             {spotlightDrives.map((c) => {
+              const provisionalStatus = getProvisionalStatusLabel({
+                status: c.status,
+                isSyncing,
+                statusUpdatesPending,
+                updatePhase: statusUpdatePhase,
+                syncSubject: syncProgress?.currentSubject,
+              });
+              const visibleStatus = getVisibleApplicationStatus(c.status, isSyncing, false, statusUpdatesPending);
               const rawCategory = c.category || (/1[0-9]\s*lpa|[2-9][0-9]\s*lpa/i.test(c.ctc || '') ? 'Super Dream' : 'Dream');
               const category = rawCategory.replace(/\b(internship|offer|placement|drive)\b/gi, '').replace(/\s*\/\s*/g, ' ').replace(/\s+/g, ' ').trim() || rawCategory.trim();
               const initials = c.companyName.slice(0, 2).toUpperCase();
@@ -522,7 +533,7 @@ export default function DashboardClient({
                         <h3 className="truncate min-w-0 flex-1 font-display text-sm sm:text-base font-bold tracking-tight text-zinc-100 group-hover:text-emerald-300 transition-colors">
                           {c.companyName}
                         </h3>
-                        <StatusChip status={c.status} className="shrink-0" />
+                        <StatusChip status={visibleStatus} label={provisionalStatus || undefined} className="shrink-0" />
                       </div>
                       <div className="mt-1 flex items-center gap-1.5 min-w-0 text-[11px] sm:text-xs text-zinc-400">
                         <span className="truncate">{cleanRoleTitle(c.role) || 'Campus Placement Drive'}</span>
@@ -563,8 +574,20 @@ export default function DashboardClient({
                 </Link>
               );
             })}
-          </div>
-        )}
+      </div>
+      )}
+      {syncResult?.show && syncResult.success && (
+        <div className="fixed bottom-24 right-4 z-40 max-w-sm rounded-xl border border-emerald-500/25 bg-zinc-950/95 px-4 py-3 shadow-xl lg:bottom-6" role="status">
+          <p className="text-xs font-semibold text-emerald-200">{syncResult.message}</p>
+          <p className="mt-1 text-[11px] text-zinc-400">
+            {syncResult.statusUpdatesCompleted
+              ? 'Cached shortlist evidence checked and drive statuses refreshed.'
+              : syncResult.statusUpdatesPending
+                ? 'Some shortlist checks were deferred; negative statuses remain provisional.'
+                : `${syncResult.newEmails} updates · ${syncResult.newCompanies} drives indexed.`}
+          </p>
+        </div>
+      )}
       </div>
     </div>
   );

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { getMissingPersonalSyncSetup, hasUserPlacementEvidence, isConfirmedShortlistEvidence, isShortlistMatchEvidence } from './participation-evidence';
+import { getMissingPersonalSyncSetup, hasSharedDriveFanOutEvidence, hasUserPlacementEvidence, isConfirmedShortlistEvidence, isShortlistMatchEvidence } from './participation-evidence';
 
 describe('user placement evidence', () => {
   it('requires Personal Gmail and NeoPAT ID, not an individual College inbox', () => {
@@ -18,6 +18,13 @@ describe('user placement evidence', () => {
     expect(hasUserPlacementEvidence({ hasPersonalDriveEvidence: true, hasConfirmedShortlistMatch: false })).toBe(true);
     expect(hasUserPlacementEvidence({ hasPersonalDriveEvidence: false, hasConfirmedShortlistMatch: true })).toBe(true);
     expect(hasUserPlacementEvidence({ hasPersonalDriveEvidence: false, hasConfirmedShortlistMatch: false, manualOverride: true })).toBe(true);
+  });
+
+  it('only fans shared College data to personally evidenced, shortlisted, or manually tracked drives', () => {
+    expect(hasSharedDriveFanOutEvidence({ hasPersonalDriveEvidence: false, hasConfirmedShortlistMatch: false })).toBe(false);
+    expect(hasSharedDriveFanOutEvidence({ hasPersonalDriveEvidence: true, hasConfirmedShortlistMatch: false })).toBe(true);
+    expect(hasSharedDriveFanOutEvidence({ hasPersonalDriveEvidence: false, hasConfirmedShortlistMatch: true })).toBe(true);
+    expect(hasSharedDriveFanOutEvidence({ hasPersonalDriveEvidence: false, hasConfirmedShortlistMatch: false, manualOverride: true })).toBe(true);
   });
 
   it('only treats a matched genuine College shortlist as shortlist evidence', () => {

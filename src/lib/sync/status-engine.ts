@@ -9,6 +9,7 @@ import {
   isConfirmedShortlistEvidence,
   isShortlistMatchEvidence,
 } from '@/lib/sync/participation-evidence';
+import { evaluateCachedShortlistRosters } from '@/lib/sync/shortlist-verification';
 
 /**
  * Converts HTML email content to clean plain text so table cells, divs, and paragraphs
@@ -185,22 +186,19 @@ export async function processEmailForEventsAndStatus(
     /attached\s+(?:(?:final|updated|revised)\s+)?(?:applied|opt[\s-]*in|registered)\s+(?:students?|candidates?)\s+list|opt[\s-]*in\s+list/i.test(fullText) &&
     !/shortlist|shortlisted/i.test(subjLower);
 
+  const isAppliedRosterFilename = (filename: string) =>
+    /applied[_\s-]*list|opt[_\s-]*in[_\s-]*list|opt_in|eligible[_\s-]*student|registered[_\s-]*student|registration[_\s-]*list|applied[_\s-]*(?:student|candidate)/i.test(filename);
   const hasShortlistAttachment = Boolean(
     email.hasAttachments &&
-      email.attachments.some((a) =>
-        /shortlist|selection[_\s-]*list|test[_\s-]*shortlist|selected[_\s-]*student/i.test(a.filename)
+      email.attachments.some((attachment) =>
+        /shortlist|selection[_\s-]*list|test[_\s-]*shortlist|selected[_\s-]*student|shortlisted/i.test(attachment.filename) &&
+        !isAppliedRosterFilename(attachment.filename)
       )
   );
   const hasUncachedRelevantExcelAttachment = email.attachments.some((attachment) =>
     /\.(xlsx|xls|csv)$/i.test(attachment.filename) &&
     !(attachment.parseStatus === 'complete' && attachment.extractedRows?.length)
   );
-  const hasCachedSharedAttachment = Boolean(
-    email.attachments.some((attachment) =>
-      Boolean(attachment.extractedRows?.length) && attachment.parseStatus === 'complete'
-    )
-  );
-
   const isSelectionOrResultNotice =
     emailClass === 'result' ||
     /selection\s*list|selected\s*candidates|final\s*selection|results?\s+announced|declared\s+the\s+results?/i.test(subjLower);
@@ -222,7 +220,33 @@ export async function processEmailForEventsAndStatus(
     // "shortlisted students/candidates list" anywhere in body (e.g. Gmail snippet)
     /(?:shortlisted|selected)\s+(?:students?|candidates?)(?:\s+list)?/i.test(fullText);
 
-  const isShortlistEmail = (hasShortlistAttachment || hasCachedSharedAttachment || isExplicitShortlistNotice) && !isAppliedOrOptInRoster;
+  const hasCachedRelevantAttachment = email.attachments.some((attachment) => {
+    if (!attachment.extractedRows?.length || attachment.parseStatus !== 'complete') return false;
+    if (!/\.(xlsx|xls|csv)$/i.test(attachment.filename) || isAppliedRosterFilename(attachment.filename)) return false;
+    return hasShortlistAttachment || isExplicitShortlistNotice ||
+      /(?:online\s+)?(?:test|assessment|exam)\s+(?:is\s+)?(?:scheduled|shortlist|list)|interview\s+(?:is\s+)?(?:scheduled|shortlist|list)/i.test(subjLower);
+  });
+  const isShortlistEmail =
+    (hasShortlistAttachment || isExplicitShortlistNotice || hasCachedRelevantAttachment) &&
+    !isAppliedOrOptInRoster;
+  const identityTokens = [
+    userNeoId || '',
+    userEmail.match(/([0-9]{2}[a-z]{3}[0-9]{4,5})/i)?.[1] || '',
+    userEmail,
+  ].filter(Boolean);
+  const cachedRosterEvaluation = isCollegeBroadcast
+    ? evaluateCachedShortlistRosters({
+      rosters: email.attachments.map((attachment) => ({
+        filename: attachment.filename,
+        collegeEmailId: email.canonicalEmailId || emailDbId,
+        parseStatus: attachment.parseStatus,
+          extractedRows: attachment.extractedRows,
+        })),
+        shortlistContext: isShortlistEmail,
+        identityTokens,
+      })
+    : null;
+  let shortlistVerificationResult: 'verified_present' | 'pending' | null = null;
   const announcedRound = announcedShortlistRound(email.subject, fullText);
   const previousRound: ShortlistRound | null =
     announcedRound === 'interview' ? 'test' :
@@ -351,6 +375,52 @@ export async function processEmailForEventsAndStatus(
   }
   if (isEliminationEmail) isNeoMatched = false;
 
+  // Resolve cached shared workbooks before the evidence gate and match insert.
+  // Otherwise the first fan-out pass sees only an empty body match, returns, and
+  // never persists the exact NeoID match found in the canonical attachment.
+  if (!isNeoMatched && isCollegeBroadcast && cachedRosterEvaluation?.state === 'verified_present' && cachedRosterEvaluation.matchingRoster) {
+    const filename = cachedRosterEvaluation.matchingRoster.filename;
+    isNeoMatched = true;
+    isInAppliedList = false;
+    matchType = 'xlsx_cell';
+    matchDetail = `Matched in ${filename}`;
+    shortlistVerificationResult = 'verified_present';
+  } else if (isCollegeBroadcast && cachedRosterEvaluation?.state === 'verified_absent') {
+    // This circular's own roster excludes the candidate. That is not pending news:
+    // writing `pending` here retracted an already-verified `not_shortlisted`
+    // application back to `applied` on every later pass. Absence for the whole
+    // drive is owned by the archive-wide scanner, which evaluates every relevant
+    // roster of the drive (including this one) and writes verified_absent itself.
+    shortlistVerificationResult = null;
+  } else if (
+    isCollegeBroadcast && isShortlistEmail &&
+    (!cachedRosterEvaluation || cachedRosterEvaluation.state === 'deferred')
+  ) {
+    shortlistVerificationResult = 'pending';
+  }
+
+  if (!isCollegeBroadcast && !isNeoMatched && email.hasAttachments && email.attachments.some((attachment) => attachment.extractedRows?.length)) {
+    const { scanSharedCollegeAttachmentsForNeoId } = await import('@/lib/sync/excel-parser');
+    const cachedResult = await scanSharedCollegeAttachmentsForNeoId(
+      supabase,
+      email.canonicalEmailId || emailDbId,
+      userNeoId,
+      userEmail,
+      isShortlistEmail
+    );
+    if (cachedResult?.matched) {
+      if (cachedResult.isActualShortlist) {
+        isNeoMatched = true;
+        matchType = 'xlsx_cell';
+        matchDetail = cachedResult.details;
+      } else {
+        isInAppliedList = true;
+        matchType = 'xlsx_applied_list';
+        matchDetail = cachedResult.details;
+      }
+    }
+  }
+
   const hasConfirmedCollegeShortlistMatch = isConfirmedShortlistEvidence({
     isCollegeBroadcast,
     isNeoMatched,
@@ -358,6 +428,9 @@ export async function processEmailForEventsAndStatus(
     isInAppliedList,
     isEliminationEmail,
   });
+  if (isCollegeBroadcast && hasConfirmedCollegeShortlistMatch) {
+    shortlistVerificationResult = 'verified_present';
+  }
 
   if (isCollegeBroadcast) {
     const [
@@ -398,13 +471,42 @@ export async function processEmailForEventsAndStatus(
     const hasUserEvidence = hasUserPlacementEvidence({
       hasPersonalDriveEvidence: (personalDriveEmailCount || 0) > 0,
       hasConfirmedShortlistMatch: hasConfirmedCollegeShortlistMatch || hasStoredShortlistMatch,
-      manualOverride: Boolean(existingApp?.manual_override),
-    }) || Boolean(existingEvidenceApp?.status && existingEvidenceApp.status !== 'not_applied');
+      manualOverride: Boolean(existingApp?.manual_override || existingEvidenceApp?.manual_override),
+    });
 
     // Shared College announcements enrich global catalog data only. Stop before
     // any user-scoped matches, events, application writes, or notifications unless
     // this student has Personal-email, actual shortlist, or manual evidence.
     if (!hasUserEvidence) return;
+  }
+
+  if (isCollegeBroadcast && shortlistVerificationResult) {
+    const { error: verificationWriteError } = await supabase
+      .from('shortlist_verification_state')
+      .upsert({
+        user_id: userId,
+        placement_drive_id: targetDriveId,
+        verification_state: shortlistVerificationResult,
+        checked_roster_count: cachedRosterEvaluation?.checkedRosterCount || 0,
+        last_error: shortlistVerificationResult === 'pending' ? 'Relevant shortlist roster is not fully parsed.' : null,
+        checked_at: shortlistVerificationResult === 'pending' ? null : new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      }, { onConflict: 'user_id,placement_drive_id' });
+    if (verificationWriteError) throw verificationWriteError;
+
+    if (
+      shortlistVerificationResult === 'pending' &&
+      !existingApp?.manual_override &&
+      existingApp?.status === 'not_shortlisted'
+    ) {
+      const { error: provisionalStatusError } = await supabase
+        .from('applications')
+        .update({ status: 'applied', status_source: 'shortlist_verification_pending', last_updated: new Date().toISOString() })
+        .eq('user_id', userId)
+        .eq('placement_drive_id', targetDriveId);
+      if (provisionalStatusError) throw provisionalStatusError;
+      existingApp.status = 'applied';
+    }
   }
 
   if (isNeoMatched && (!isCollegeBroadcast || hasConfirmedCollegeShortlistMatch)) {
@@ -443,28 +545,6 @@ export async function processEmailForEventsAndStatus(
       if (tagError) throw tagError;
     } else if (candidateMatchError) {
       throw candidateMatchError;
-    }
-  }
-
-  if (!isNeoMatched && email.hasAttachments && email.attachments.some((attachment) => attachment.extractedRows?.length)) {
-    const { scanSharedCollegeAttachmentsForNeoId } = await import('@/lib/sync/excel-parser');
-    const cachedResult = await scanSharedCollegeAttachmentsForNeoId(
-      supabase,
-      email.canonicalEmailId || emailDbId,
-      userNeoId,
-      userEmail,
-      isShortlistEmail
-    );
-    if (cachedResult?.matched) {
-      if (cachedResult.isActualShortlist) {
-        isNeoMatched = true;
-        matchType = 'xlsx_cell';
-        matchDetail = cachedResult.details;
-      } else {
-        isInAppliedList = true;
-        matchType = 'xlsx_applied_list';
-        matchDetail = cachedResult.details;
-      }
     }
   }
 
@@ -920,6 +1000,13 @@ export async function processEmailForEventsAndStatus(
     })
   ) {
     newStatus = 'test_completed';
+  }
+
+  // College absence is only a valid negative when the matching cached roster
+  // was successfully parsed and checked for this exact user's identifiers.
+  // Missing/unparsed/deferred rosters leave the current status untouched.
+  if (isCollegeBroadcast && newStatus === 'not_shortlisted') {
+    newStatus = null;
   }
 
 

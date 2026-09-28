@@ -42,6 +42,19 @@ export async function GET() {
     .filter((account) => account.account_type === 'personal')
     .map((account) => account.id);
 
+  const { count: pendingVerificationCount, error: verificationStateError } = await supabase
+    .from('shortlist_verification_state')
+    .select('placement_drive_id', { count: 'exact', head: true })
+    .eq('user_id', session.userId)
+    // 'deferred' is a terminal "could not verify" verdict, not outstanding work. Counting it
+    // as pending kept statusUpdatesPending true forever, which masked every real
+    // not_shortlisted status in the UI as "applied".
+    .eq('verification_state', 'pending');
+  if (verificationStateError) {
+    console.warn('[Sync Status] Failed to load shortlist verification state:', verificationStateError.message);
+  }
+  const hasPendingShortlistVerification = (pendingVerificationCount || 0) > 0;
+
   const lastSyncAt =
     accounts
       ?.map((a) => a.last_sync_at)
@@ -53,7 +66,8 @@ export async function GET() {
     return NextResponse.json({
       isSyncing: true,
       phase: memoryProgress.phase,
-      progress: memoryProgress,
+      progress: { ...memoryProgress, statusUpdatesPending: true },
+      statusUpdatesPending: true,
       lastSyncAt,
     });
   }
@@ -77,6 +91,7 @@ export async function GET() {
         totalPagesCount: dbSyncState.total_pages ?? 1,
         paused: true,
       },
+      statusUpdatesPending: hasPendingShortlistVerification,
       lastSyncAt,
     });
   }
@@ -154,7 +169,9 @@ export async function GET() {
           errors: dbSyncState.last_error ? [dbSyncState.last_error] : [],
           currentPageIndex,
           totalPagesCount,
+          statusUpdatesPending: hasPendingShortlistVerification,
         },
+        statusUpdatesPending: hasPendingShortlistVerification,
         lastSyncAt,
       });
     } else {
@@ -165,6 +182,7 @@ export async function GET() {
         isSyncing: false,
         phase: 'idle',
         progress: null,
+        statusUpdatesPending: hasPendingShortlistVerification,
         lastSyncAt,
       });
     }
@@ -173,7 +191,23 @@ export async function GET() {
   return NextResponse.json({
     isSyncing: false,
     phase: dbSyncState?.phase || 'idle',
-    progress: null,
+    progress: hasPendingShortlistVerification ? {
+      phase: 'complete',
+      accountEmail: '',
+      accountType: 'shared',
+      totalMessages: 0,
+      processedMessages: 0,
+      newEmails: dbSyncState?.new_emails || 0,
+      newCompanies: dbSyncState?.new_companies || 0,
+      skippedDuplicates: dbSyncState?.skipped_duplicates || 0,
+      errors: [],
+      currentSubject: 'Shortlist/status checks pending',
+      isInitialSync: dbSyncState?.is_initial_sync || false,
+      currentPageIndex: 0,
+      totalPagesCount: 1,
+      statusUpdatesPending: true,
+    } : null,
+    statusUpdatesPending: hasPendingShortlistVerification,
     lastSyncAt,
   });
 }
