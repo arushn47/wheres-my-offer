@@ -106,10 +106,7 @@ const FILTERS = [
 export const isCompanyEliminated = (comp: CompanyWithDetails, isSyncing = false, statusUpdatesPending = false): boolean => {
   const rawStatus = (comp.application?.status || '').toLowerCase().trim();
   const notes = (comp.application?.notes || '').toLowerCase();
-  if (
-    (isSyncing || statusUpdatesPending || isShortlistVerificationPending(comp.shortlistVerificationState)) &&
-    !comp.application?.manual_override && rawStatus === 'not_shortlisted'
-  ) return false;
+
 
   if (isEliminatedStatus(rawStatus)) return true;
   if (/eliminated|rejected|not\s*shortlisted|screened\s*out/i.test(notes)) return true;
@@ -255,11 +252,7 @@ const formatDeadlineCountdown = (d: Date): string => {
 
 const matchFilter = (status: string, filter: string, company?: CompanyWithDetails, isSyncing = false, statusUpdatesPending = false) => {
   const s = status.toLowerCase();
-  const provisionalNegative = Boolean(
-    (isSyncing || statusUpdatesPending || isShortlistVerificationPending(company?.shortlistVerificationState)) &&
-    company?.application?.status === 'not_shortlisted' && !company.application.manual_override
-  );
-  const isElim = provisionalNegative ? false : company ? isCompanyEliminated(company, isSyncing, statusUpdatesPending) : isEliminatedStatus(s);
+  const isElim = company ? isCompanyEliminated(company, isSyncing, statusUpdatesPending) : isEliminatedStatus(s);
 
   if (filter === 'all') return true;
 

@@ -1170,7 +1170,8 @@ export async function recalculateApplicationStatuses(
             computedRejectionNote = 'Eliminated in Test Round';
           } else if (!hasUpcomingTestEvent && selectionEmails.some((e) =>
             Boolean(e.received_at && new Date(e.received_at).getTime() > testMatchTime + 30 * 60 * 1000))) {
-            computedStatus = 'not_shortlisted';
+            computedStatus = 'rejected';
+            computedRejectionNote = 'Eliminated in Test Round';
           } else if (!hasUpcomingTestEvent && testTime > 0 && testTime < Date.now()) {
             // A completed test is not a rejection. Only an explicit result or a
             // later shortlist/selection round can establish elimination.
