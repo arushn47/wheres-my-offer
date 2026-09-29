@@ -2,6 +2,18 @@ import { google, gmail_v1 } from 'googleapis';
 import { decrypt } from '@/lib/crypto/tokens';
 import { createAdminClient } from '@/lib/supabase/admin';
 
+/** Decodes common HTML entities that some email clients encode into subject headers. */
+function decodeHtmlEntities(str: string): string {
+  return str
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/&apos;/gi, "'")
+    .replace(/&nbsp;/gi, ' ');
+}
+
 /**
  * Represents a connected Gmail account's credentials and metadata.
  */
@@ -275,7 +287,7 @@ export async function fetchMessageMetadata(
   const sender = getHeader('From');
   const senderEmail = extractEmailAddress(sender);
   const headerMessageId = getHeader('Message-ID') || getHeader('Message-Id') || null;
-  const subject = getHeader('Subject');
+  const subject = decodeHtmlEntities(getHeader('Subject'));
   const dateStr = getHeader('Date');
   const { receivedAt, dateHeader, internalDate } = resolveReceivedAt(message.internalDate, dateStr);
 
@@ -319,7 +331,7 @@ export async function fetchMessageDetail(
   const sender = getHeader('From');
   const senderEmail = extractEmailAddress(sender);
   const headerMessageId = getHeader('Message-ID') || getHeader('Message-Id') || null;
-  const subject = getHeader('Subject');
+  const subject = decodeHtmlEntities(getHeader('Subject'));
   const dateStr = getHeader('Date');
   const { receivedAt, dateHeader, internalDate } = resolveReceivedAt(message.internalDate, dateStr);
 

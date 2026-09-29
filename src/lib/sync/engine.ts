@@ -1060,10 +1060,7 @@ async function processSingleMessage(
       }
     }
 
-    const t5 = Date.now();
-    console.log(
-      `[msg ${msgId}] metadata: ${t1 - t0}ms | detail: ${t2 - t1}ms | classify: ${t3 - t2}ms | upsert: ${t4 - t3}ms | status-engine: ${t5 - t4}ms | total: ${t5 - t0}ms`
-    );
+
 
     result.emailsProcessed++;
     ctx.liveTracker.processedMessages++;
@@ -1945,8 +1942,7 @@ export async function runSync(
                 break;
               }
               if (Date.now() >= globalDeadline) {
-                console.log(`[Cron Sync] Global deadline reached for account ${account.email}. Stopping page loop.`);
-                break;
+              break;
               }
 
               const targetIndex = targetPage.page_index;
@@ -2004,11 +2000,9 @@ export async function runSync(
                 if (pageRes.paused) result.paused = true;
                 // Page hit its own time budget mid-page; next_offset was persisted.
                 // Move to the next account — this page will resume on the next cron tick.
-                console.log(`[Cron Sync] Page ${targetIndex} paused mid-page for ${account.email}. Advancing to next account.`);
                 break;
               }
 
-              console.log(`[Cron Sync] Page ${targetIndex} complete for ${account.email} (${pageRes.emailsProcessed} msgs).`);
             }
 
             // Update history ID if all pages are now done
@@ -2047,7 +2041,6 @@ export async function runSync(
             for (const targetPage of remainingPages) {
               if (leaseLost) throw new Error('Sync lease lost; stopping this run');
               if (Date.now() >= globalDeadline - 4000) {
-                console.log(`[Manual Sync] Time budget nearing limit for ${account.email}. Pausing page loop.`);
                 break;
               }
 
@@ -2421,7 +2414,6 @@ export async function runSync(
                       const hasMatchingDrive = emailDriveNums.some((d) => existingDriveNums.includes(d));
                       if (!hasMatchingDrive) {
                         timingMatchOk = false;
-                        console.log(`[Timing Correlation] Skipped attach for email "${email.subject}" → company ${candidateCompanyId}: established drive nums [${existingDriveNums.join(',')}] not found in email.`);
                       }
                     }
                   }

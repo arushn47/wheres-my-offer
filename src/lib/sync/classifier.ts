@@ -77,6 +77,31 @@ const CLASSIFICATION_RULES: ClassificationRule[] = [
     match: (s) => /new learning contents?|practice.*tests?\s+added/i.test(s),
     reason: 'Generic LMS / NeoPAT practice course update (non-placement drive)',
   },
+  {
+    classification: 'irrelevant',
+    confidence: 'high',
+    match: (s) =>
+      /\bmock\s+(?:practice\s+)?test\b|\bpractice\s+(?:mock\s+)?test\b|\bNeoPAT\s+(?:mock|practice)\b/i.test(s) &&
+      !/placement\s+drive|online\s+test\s+(?:scheduled|is\s+scheduled)|assessment\s+(?:scheduled|window)/i.test(s),
+    reason: 'Mock / practice test notification — not a live placement round',
+  },
+  {
+    classification: 'irrelevant',
+    confidence: 'high',
+    // "Updated Optional Form Available" / "Optional Form Available" — just a Google Form link, no structured data
+    match: (s) => /optional\s+form\s+(?:available|link|updated|now\s+open)/i.test(s),
+    reason: 'Optional form notification — no structured drive data, just a Google Form link',
+  },
+  {
+    classification: 'irrelevant',
+    confidence: 'high',
+    // "Important: Date Change for X Drive" with NO actual new date/time in subject
+    // Subjects that DO carry the new date look like: "Date change to 15 Oct..." → let venue_update rule handle them
+    match: (s) =>
+      /\bdate\s+change\b/i.test(s) &&
+      !/(?:\d{1,2}[\s\-\/]\w+[\s\-\/]\d{2,4}|\d{1,2}(?:st|nd|rd|th)?\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)|\bto\s+\d{1,2}\b|new\s+date|rescheduled\s+to)/i.test(s),
+    reason: 'Date-change notice with no new date in subject — contains no actionable schedule info',
+  },
 
   // --- HIGH CONFIDENCE ---
   {

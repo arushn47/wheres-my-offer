@@ -10,11 +10,13 @@ export async function GET() {
 
   const supabase = createAdminClient();
   try {
-    const { data: state, error: stateError } = await supabase
+    const { data: stateRows, error: stateError } = await supabase
       .from('shared_college_sync_state')
       .select('gmail_account_id,is_syncing,phase,initial_scan_complete,next_page_token,pending_message_ids,pending_offset,updated_at,lease_expires_at,last_error')
-      .maybeSingle();
+      .order('updated_at', { ascending: false })
+      .limit(1);
     if (stateError) throw stateError;
+    const state = stateRows?.[0] ?? null;
     if (!state) return NextResponse.json({ status: null }, { headers: { 'Cache-Control': 'no-store' } });
 
     const [accountResult, archiveResult] = await Promise.all([

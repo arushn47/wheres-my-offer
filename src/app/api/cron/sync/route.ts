@@ -71,17 +71,11 @@ async function executeBackgroundSync(userIds: string[], includeSharedCollege = f
 
   for (const userId of userIds) {
     if (Date.now() >= globalDeadline) {
-      console.log(`[Cron Sync] Global deadline reached. Skipping remaining ${userIds.length - userIds.indexOf(userId)} user(s) — they will be picked up on the next tick.`);
       break;
     }
 
     try {
       const res = await runSync(userId, undefined, { isBackgroundCron: true, globalDeadline });
-      if (res?.alreadyRunning) {
-        console.log(`[Cron Sync] User ${userId} is currently syncing. Skipped concurrent run.`);
-      } else {
-        console.log(`[Cron Sync] Successfully synced user ${userId}`);
-      }
 
       // These checks are time-based and must run even when Gmail had no new mail.
       if (!res?.alreadyRunning) {
