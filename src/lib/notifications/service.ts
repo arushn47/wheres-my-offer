@@ -57,7 +57,7 @@ export async function sendNotification(
     type,
     title,
     body,
-    
+
     placementDriveId,
     applicationId,
     eventId,
@@ -263,6 +263,27 @@ export async function notifyShortlistMatch(params: {
 }
 
 /**
+ * Notifies user when their Neo ID was not found in a verified shortlist.
+ */
+export async function notifyShortlistAbsent(params: {
+  userId: string;
+  placementDriveId: string;
+  companyName: string;
+}) {
+  const { userId, placementDriveId, companyName } = params;
+
+  return sendNotification({
+    userId,
+    type: 'status_change',
+    title: companyName,
+    body: 'Not shortlisted for the next round.',
+    placementDriveId,
+    link: `/companies/${placementDriveId}`,
+    dedupeKey: `shortlist_absent:${userId}:${placementDriveId}`,
+  });
+}
+
+/**
  * Notifies user when a new placement drive / JD is scanned and created.
  */
 export async function notifyNewDrive(params: {
@@ -361,6 +382,8 @@ export async function notifyEventScheduled(params: {
     .maybeSingle();
 
   const appStatus = (app?.status || '').toLowerCase();
+  // A verified-absent candidate has status not_shortlisted — suppress their
+  // event notifications the same way as other eliminated statuses.
   const isEliminated = ['not_shortlisted', 'rejected', 'rejected_test', 'rejected_interview', 'withdrawn', 'declined'].includes(appStatus);
   const isTestOrInterview = ['online_test', 'coding_test', 'technical_interview', 'hr_interview', 'final_interview'].includes(eventType);
   const hasEligibleStage = eventType === 'ppt'
@@ -373,6 +396,7 @@ export async function notifyEventScheduled(params: {
 
   const dateStr = startTime
     ? startTime.toLocaleString('en-IN', {
+        timeZone: 'Asia/Kolkata',
         month: 'short',
         day: 'numeric',
         hour: 'numeric',
@@ -479,18 +503,18 @@ export async function checkAndNotifyRegistrationDeadlines(userId: string) {
 
       for (const leadMinutes of sortedLeadTimes) {
         if (remainingMins <= leadMinutes) {
-           const dedupeKey = buildDeadlineNotificationDedupeKey({
-             userId,
-             placementDriveId: event.placement_drive_id,
-             deadline: event.start_time,
-             leadMinutes,
-           });
+          const dedupeKey = buildDeadlineNotificationDedupeKey({
+            userId,
+            placementDriveId: event.placement_drive_id,
+            deadline: event.start_time,
+            leadMinutes,
+          });
           const approxTimeStr =
             remainingMins < 60
               ? `${Math.max(1, Math.round(remainingMins))} min`
               : remainingMins < 120
-              ? `~1 hour`
-              : `~${Math.round(remainingMins / 60)} hours`;
+                ? `~1 hour`
+                : `~${Math.round(remainingMins / 60)} hours`;
 
           const dateStr = new Date(event.start_time).toLocaleDateString('en-IN', {
             timeZone: 'Asia/Kolkata',
@@ -606,8 +630,8 @@ export async function checkAndNotifyLiveEvents(userId: string) {
       const hasEligibleStage = isTestEvent
         ? ['shortlisted', 'test_scheduled', 'test_ongoing', 'test_completed'].includes(appStatus)
         : isInterviewEvent
-        ? ['interview_scheduled', 'interview_completed', 'selected', 'offer_received'].includes(appStatus)
-        : true;
+          ? ['interview_scheduled', 'interview_completed', 'selected', 'offer_received'].includes(appStatus)
+          : true;
 
       if (!hasEligibleStage) {
         continue;

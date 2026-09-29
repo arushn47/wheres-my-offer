@@ -33,14 +33,12 @@ CREATE TABLE public.gmail_accounts (
 );
 CREATE TABLE public.companies (
   id uuid NOT NULL DEFAULT uuid_generate_v4(),
-  user_id uuid NOT NULL,
   name text NOT NULL,
   aliases ARRAY DEFAULT '{}'::text[],
   created_at timestamp with time zone DEFAULT now(),
   updated_at timestamp with time zone DEFAULT now(),
   legal_name text,
-  CONSTRAINT companies_pkey PRIMARY KEY (id),
-  CONSTRAINT companies_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id)
+  CONSTRAINT companies_pkey PRIMARY KEY (id)
 );
 CREATE TABLE public.applications (
   id uuid NOT NULL DEFAULT uuid_generate_v4(),
@@ -71,7 +69,7 @@ CREATE TABLE public.applications (
   CONSTRAINT applications_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id),
   CONSTRAINT applications_placement_drive_id_fkey FOREIGN KEY (placement_drive_id) REFERENCES public.placement_drives(id)
 );
-CREATE TABLE public.emails (
+CREATE TABLE public.personal_emails (
   id uuid NOT NULL DEFAULT uuid_generate_v4(),
   gmail_account_id uuid NOT NULL,
   user_id uuid NOT NULL,
@@ -92,11 +90,12 @@ CREATE TABLE public.emails (
   assignment_source text,
   canonical_email_id uuid,
   rfc_message_id text,
-  CONSTRAINT emails_pkey PRIMARY KEY (id),
+  college_email_id uuid,
+  CONSTRAINT personal_emails_pkey PRIMARY KEY (id),
   CONSTRAINT emails_gmail_account_id_fkey FOREIGN KEY (gmail_account_id) REFERENCES public.gmail_accounts(id),
   CONSTRAINT emails_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id),
   CONSTRAINT emails_placement_drive_id_fkey FOREIGN KEY (placement_drive_id) REFERENCES public.placement_drives(id),
-  CONSTRAINT emails_canonical_email_id_fkey FOREIGN KEY (canonical_email_id) REFERENCES public.canonical_emails(id)
+  CONSTRAINT personal_emails_college_email_id_fkey FOREIGN KEY (college_email_id) REFERENCES public.college_emails(id)
 );
 CREATE TABLE public.candidate_matches (
   id uuid NOT NULL DEFAULT uuid_generate_v4(),
@@ -111,10 +110,12 @@ CREATE TABLE public.candidate_matches (
   placement_drive_id uuid NOT NULL,
   attachment_id uuid,
   matched_round_type text CHECK (matched_round_type IS NULL OR (matched_round_type = ANY (ARRAY['test'::text, 'interview'::text, 'selected'::text]))),
+  college_email_id uuid,
   CONSTRAINT candidate_matches_pkey PRIMARY KEY (id),
   CONSTRAINT candidate_matches_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id),
-  CONSTRAINT candidate_matches_email_id_fkey FOREIGN KEY (email_id) REFERENCES public.emails(id),
-  CONSTRAINT candidate_matches_placement_drive_id_fkey FOREIGN KEY (placement_drive_id) REFERENCES public.placement_drives(id)
+  CONSTRAINT candidate_matches_email_id_fkey FOREIGN KEY (email_id) REFERENCES public.personal_emails(id),
+  CONSTRAINT candidate_matches_placement_drive_id_fkey FOREIGN KEY (placement_drive_id) REFERENCES public.placement_drives(id),
+  CONSTRAINT candidate_matches_college_email_id_fkey FOREIGN KEY (college_email_id) REFERENCES public.college_emails(id)
 );
 CREATE TABLE public.events (
   id uuid NOT NULL DEFAULT uuid_generate_v4(),
@@ -132,10 +133,12 @@ CREATE TABLE public.events (
   updated_at timestamp with time zone DEFAULT now(),
   gcal_event_id text,
   placement_drive_id uuid NOT NULL,
+  college_email_id uuid,
   CONSTRAINT events_pkey PRIMARY KEY (id),
   CONSTRAINT events_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id),
-  CONSTRAINT events_source_email_id_fkey FOREIGN KEY (source_email_id) REFERENCES public.emails(id),
-  CONSTRAINT events_placement_drive_id_fkey FOREIGN KEY (placement_drive_id) REFERENCES public.placement_drives(id)
+  CONSTRAINT events_source_email_id_fkey FOREIGN KEY (source_email_id) REFERENCES public.personal_emails(id),
+  CONSTRAINT events_placement_drive_id_fkey FOREIGN KEY (placement_drive_id) REFERENCES public.placement_drives(id),
+  CONSTRAINT events_college_email_id_fkey FOREIGN KEY (college_email_id) REFERENCES public.college_emails(id)
 );
 CREATE TABLE public.notifications (
   id uuid NOT NULL DEFAULT uuid_generate_v4(),
@@ -199,7 +202,7 @@ CREATE TABLE public.drive_resolutions (
   created_at timestamp with time zone DEFAULT now(),
   updated_at timestamp with time zone DEFAULT now(),
   CONSTRAINT drive_resolutions_pkey PRIMARY KEY (id),
-  CONSTRAINT drive_resolutions_candidate_circular_id_fkey FOREIGN KEY (candidate_circular_id) REFERENCES public.emails(id)
+  CONSTRAINT drive_resolutions_candidate_circular_id_fkey FOREIGN KEY (candidate_circular_id) REFERENCES public.personal_emails(id)
 );
 CREATE TABLE public.sync_state (
   user_id uuid NOT NULL,
@@ -257,7 +260,6 @@ CREATE TABLE public.feedback_reports (
 );
 CREATE TABLE public.placement_drives (
   id uuid NOT NULL DEFAULT uuid_generate_v4(),
-  user_id uuid NOT NULL,
   company_id uuid NOT NULL,
   drive_number text,
   normalized_drive_number text,
@@ -278,9 +280,11 @@ CREATE TABLE public.placement_drives (
   source_email_id uuid,
   created_at timestamp with time zone DEFAULT now(),
   updated_at timestamp with time zone DEFAULT now(),
+  source_college_email_id uuid,
+  excluded_email_ids ARRAY DEFAULT '{}'::text[],
   CONSTRAINT placement_drives_pkey PRIMARY KEY (id),
-  CONSTRAINT placement_drives_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id),
-  CONSTRAINT placement_drives_company_id_fkey FOREIGN KEY (company_id) REFERENCES public.companies(id)
+  CONSTRAINT placement_drives_company_id_fkey FOREIGN KEY (company_id) REFERENCES public.companies(id),
+  CONSTRAINT placement_drives_source_college_email_id_fkey FOREIGN KEY (source_college_email_id) REFERENCES public.college_emails(id)
 );
 CREATE TABLE public.email_drive_links (
   id uuid NOT NULL DEFAULT uuid_generate_v4(),
@@ -295,7 +299,7 @@ CREATE TABLE public.email_drive_links (
   updated_at timestamp with time zone DEFAULT now(),
   CONSTRAINT email_drive_links_pkey PRIMARY KEY (id),
   CONSTRAINT email_drive_links_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id),
-  CONSTRAINT email_drive_links_email_id_fkey FOREIGN KEY (email_id) REFERENCES public.emails(id),
+  CONSTRAINT email_drive_links_email_id_fkey FOREIGN KEY (email_id) REFERENCES public.personal_emails(id),
   CONSTRAINT email_drive_links_drive_id_fkey FOREIGN KEY (placement_drive_id) REFERENCES public.placement_drives(id)
 );
 CREATE TABLE public.gmail_pubsub_inbox (
@@ -314,7 +318,7 @@ CREATE TABLE public.gmail_pubsub_inbox (
   updated_at timestamp with time zone NOT NULL DEFAULT now(),
   CONSTRAINT gmail_pubsub_inbox_pkey PRIMARY KEY (id)
 );
-CREATE TABLE public.canonical_emails (
+CREATE TABLE public.college_emails (
   id uuid NOT NULL DEFAULT gen_random_uuid(),
   content_key text NOT NULL UNIQUE,
   sender_email text NOT NULL,
@@ -335,21 +339,49 @@ CREATE TABLE public.canonical_emails (
   identity_version integer NOT NULL DEFAULT 2,
   has_attachments boolean,
   metadata_key text,
-  CONSTRAINT canonical_emails_pkey PRIMARY KEY (id)
+  received_at timestamp with time zone,
+  CONSTRAINT college_emails_pkey PRIMARY KEY (id)
 );
-CREATE TABLE public.canonical_attachments (
+CREATE TABLE public.college_attachments (
   id uuid NOT NULL DEFAULT gen_random_uuid(),
-  canonical_email_id uuid NOT NULL,
+  college_email_id uuid NOT NULL,
   gmail_message_id text NOT NULL,
   gmail_account_id uuid NOT NULL,
   attachment_id text NOT NULL,
   filename text,
   size_bytes bigint,
-  content_hash text UNIQUE,
+  content_hash text,
   extracted_rows jsonb,
-  parse_status text NOT NULL DEFAULT 'pending'::text CHECK (parse_status = ANY (ARRAY['pending'::text, 'processing'::text, 'complete'::text, 'error'::text])),
+  parse_status text NOT NULL DEFAULT 'pending'::text CHECK (parse_status = ANY (ARRAY['pending'::text, 'processing'::text, 'complete'::text, 'error'::text, 'deferred'::text, 'ignored'::text])),
   created_at timestamp with time zone NOT NULL DEFAULT now(),
   updated_at timestamp with time zone NOT NULL DEFAULT now(),
-  CONSTRAINT canonical_attachments_pkey PRIMARY KEY (id),
-  CONSTRAINT canonical_attachments_canonical_email_id_fkey FOREIGN KEY (canonical_email_id) REFERENCES public.canonical_emails(id)
+  content_key text,
+  parse_error text,
+  CONSTRAINT college_attachments_pkey PRIMARY KEY (id),
+  CONSTRAINT canonical_attachments_canonical_email_id_fkey FOREIGN KEY (college_email_id) REFERENCES public.college_emails(id)
 );
+CREATE TABLE public.college_archive_refresh_lease (
+  singleton boolean NOT NULL DEFAULT true CHECK (singleton),
+  run_id uuid,
+  locked_until timestamp with time zone,
+  updated_at timestamp with time zone NOT NULL DEFAULT now(),
+  CONSTRAINT college_archive_refresh_lease_pkey PRIMARY KEY (singleton)
+);
+CREATE TABLE public.shared_college_sync_state (
+  gmail_account_id uuid NOT NULL,
+  is_syncing boolean NOT NULL DEFAULT false,
+  run_id uuid,
+  phase text NOT NULL DEFAULT 'idle'::text,
+  initial_scan_complete boolean NOT NULL DEFAULT false,
+  next_page_token text,
+  pending_message_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
+  pending_offset integer NOT NULL DEFAULT 0,
+  pending_next_page_token text,
+  pending_history_id text,
+  updated_at timestamp with time zone NOT NULL DEFAULT now(),
+  lease_expires_at timestamp with time zone,
+  last_error text,
+  CONSTRAINT shared_college_sync_state_pkey PRIMARY KEY (gmail_account_id),
+  CONSTRAINT shared_college_sync_state_gmail_account_id_fkey FOREIGN KEY (gmail_account_id) REFERENCES public.gmail_accounts(id)
+);
+-- shortlist_verification_state table removed: verdicts live on applications.status

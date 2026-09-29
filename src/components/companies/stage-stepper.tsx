@@ -240,14 +240,14 @@ export function StageStepper({
                     'relative z-10 flex items-center justify-center rounded-full border font-mono font-bold transition-all shrink-0',
                     compact ? 'h-6 w-6 text-[9px]' : 'h-7 w-7 text-[10px]',
                     isEliminated
-                      ? 'border-rose-500/70 bg-rose-500/20 text-rose-400 ring-2 ring-rose-500/40 shadow-[0_0_12px_rgba(244,63,94,0.35)]'
+                      ? 'border-rose-400 bg-rose-500/25 text-rose-300 ring-2 ring-rose-500/50 shadow-[0_0_12px_rgba(244,63,94,0.45)]'
                       : isCurrent
                         ? activeStyle.circle
                         : isHistoricalPassed
                           ? 'border-emerald-500/35 bg-emerald-500/10 text-emerald-400/80'
                           : isWithdrawn && i <= furthestPassed
-                            ? 'border-zinc-700 bg-zinc-850 text-zinc-400'
-                            : 'border-zinc-800 bg-[#141418] text-zinc-600'
+                            ? 'border-zinc-600 bg-zinc-800 text-zinc-300'
+                            : 'border-zinc-700 bg-[#141418] text-zinc-400'
                   )}
                 >
                   {isEliminated ? '✕' : (isCompleted || isHistoricalPassed) ? '✓' : i + 1}
@@ -259,12 +259,12 @@ export function StageStepper({
                   'truncate max-w-full text-center transition-colors',
                   compact ? 'text-[8px] sm:text-[8.5px] tracking-tighter sm:tracking-normal mt-1' : 'text-[10px] mt-1.5 hidden sm:block',
                   isEliminated
-                    ? 'text-rose-400 font-bold'
+                    ? 'text-rose-300 font-bold'
                     : isCurrent
                       ? activeStyle.text
                       : isHistoricalPassed
                         ? 'text-emerald-400/75 font-medium'
-                        : 'text-zinc-600 font-medium'
+                        : 'text-zinc-400 font-medium'
                 )}
               >
                 {displayLabel}
@@ -279,7 +279,7 @@ export function StageStepper({
                     ? 'bg-rose-500/70'
                     : i < currentStage
                       ? 'bg-emerald-500/45'
-                      : 'bg-zinc-800'
+                      : 'bg-zinc-700/70'
                 )}
               />
             )}

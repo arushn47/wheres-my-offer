@@ -64,7 +64,10 @@ export function SyncProvider({
 }) {
   const router = useRouter();
   const [isSyncing, setIsSyncing] = useState(false);
-  const [statusUpdatesPending, setStatusUpdatesPending] = useState(false);
+  // No verification-tracking state anymore: statuses land directly on applications.
+  // The pending/phase plumbing stays as always-false/complete so the UI keeps compiling
+  // without any masking path being reachable.
+  const [statusUpdatesPending] = useState(false);
   const [statusUpdatePhase, setStatusUpdatePhase] = useState<'personal' | 'personal_scan' | 'college' | 'college_matching' | 'recalculate' | 'status_recalculation' | 'complete'>('personal');
   const [statusChecksComplete, setStatusChecksComplete] = useState(false);
   const [isPausing, setIsPausing] = useState(false);
@@ -72,8 +75,7 @@ export function SyncProvider({
   const [syncProgress, setSyncProgress] = useState<SyncProgress | null>(null);
   const [syncResult, setSyncResult] = useState<SyncResult | null>(null);
   const [lastSyncAt, setLastSyncAt] = useState<string | null>(initialLastSyncAt || null);
-  const visibleStatusUpdatePhase = getStatusUpdatePhase(syncProgress?.currentSubject) ||
-    (statusUpdatesPending && !isSyncing ? 'recalculate' : statusUpdatePhase);
+  const visibleStatusUpdatePhase = getStatusUpdatePhase(syncProgress?.currentSubject) || statusUpdatePhase;
   const lastSyncAtRef = useRef<string | null>(initialLastSyncAt || null);
 
   const isSyncingRef = useRef(false);
@@ -115,7 +117,7 @@ export function SyncProvider({
         }
 
         if (data.isSyncing) {
-          setStatusUpdatesPending(Boolean(data.statusUpdatesPending));
+          /* statuses always visible */
           setIsSyncing(true);
           isSyncingRef.current = true;
           if (data.progress) {
@@ -142,7 +144,7 @@ export function SyncProvider({
           stopPolling();
           isSyncingRef.current = false;
           setIsSyncing(false);
-          setStatusUpdatesPending(Boolean(data.statusUpdatesPending));
+          /* statuses always visible */
           setSyncProgress(data.statusUpdatesPending && data.progress ? data.progress : null);
 
           if (data.phase === 'complete') {
@@ -200,7 +202,7 @@ export function SyncProvider({
       if (isSyncingRef.current && !isChained) return;
       setIsPaused(false);
       setIsPausing(false);
-      setStatusUpdatesPending(true);
+      /* statuses always visible */
       setStatusChecksComplete(false);
       setStatusUpdatePhase('personal');
       isSyncingRef.current = true;
@@ -337,7 +339,7 @@ export function SyncProvider({
                     else if (observedPhase === 'status_recalculation') setStatusUpdatePhase('status_recalculation');
                     else if (observedPhase === 'personal_scan') setStatusUpdatePhase('personal_scan');
                     setStatusChecksComplete(statusesUpdated);
-                    setStatusUpdatesPending(statusUpdatesPending);
+                    /* statuses always visible */
                     isSyncingRef.current = false;
                     setIsSyncing(false);
                     setSyncProgress(statusUpdatesPending && syncProgress
@@ -410,12 +412,12 @@ export function SyncProvider({
                 setLastSyncAt(data.lastSyncAt);
               }
               if (data.isSyncing) {
-                setStatusUpdatesPending(Boolean(data.statusUpdatesPending));
+                /* statuses always visible */
                 startPolling(true);
                 return;
               }
               if (data.statusUpdatesPending && data.progress) {
-                setStatusUpdatesPending(true);
+                /* statuses always visible */
                 setSyncProgress(data.progress);
               }
               if (data.phase === 'pending' && (data.progress?.paused || data.progress?.errors?.some((error: string) => error.startsWith('Paused by user')))) {
@@ -451,7 +453,7 @@ export function SyncProvider({
                 stopPolling();
                 setIsSyncing(false);
                 isSyncingRef.current = false;
-                setStatusUpdatesPending(Boolean(data.statusUpdatesPending));
+                /* statuses always visible */
                 setSyncProgress(null);
                 const resultData = {
                   show: true,
@@ -511,7 +513,7 @@ export function SyncProvider({
                 stopPolling();
                 setIsSyncing(false);
                 isSyncingRef.current = false;
-                setStatusUpdatesPending(Boolean(data.statusUpdatesPending));
+                /* statuses always visible */
                 setSyncProgress(data.statusUpdatesPending ? data.progress || null : null);
                 const resultData = {
                   show: true,
@@ -573,14 +575,14 @@ export function SyncProvider({
         }
             if (data.isSyncing) {
               setIsSyncing(true);
-              setStatusUpdatesPending(Boolean(data.statusUpdatesPending));
+              /* statuses always visible */
               isSyncingRef.current = true;
           if (data.progress) {
             setSyncProgress(data.progress);
           }
           startPolling();
         } else if (data.statusUpdatesPending && data.progress) {
-          setStatusUpdatesPending(true);
+          /* statuses always visible */
           setSyncProgress(data.progress);
         }
       })
@@ -607,7 +609,7 @@ export function SyncProvider({
 
           if (data.isSyncing) {
             setIsSyncing(true);
-            setStatusUpdatesPending(Boolean(data.statusUpdatesPending));
+            /* statuses always visible */
             isSyncingRef.current = true;
             if (data.progress) {
               setSyncProgress(data.progress);
@@ -615,7 +617,7 @@ export function SyncProvider({
             startPolling();
             } else {
               stopPolling();
-              setStatusUpdatesPending(Boolean(data.statusUpdatesPending));
+              /* statuses always visible */
             if (isSyncingRef.current) {
               isSyncingRef.current = false;
               setIsSyncing(false);

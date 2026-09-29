@@ -7,12 +7,12 @@ import { canonicalBodyFromEmail, computeCanonicalContentKey, computeCanonicalMet
 import { classifyEmail } from '@/lib/sync/classifier';
 import { extractAllDriveNumbers, extractEvents, extractJobDetails } from '@/lib/sync/events';
 import { CANONICAL_PARSER_VERSION } from '@/lib/sync/canonical-email';
+import { classifyUnsupportedAttachment, isSupportedWorkbookAttachment, isTerminalUnsupportedRow } from '@/lib/sync/attachment-status';
 import * as XLSX from 'xlsx';
 
 const ROW_BATCH_SIZE = 25;
 const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 const PARSER_VERSION = CANONICAL_PARSER_VERSION;
-const DEFAULT_SHARED_COLLEGE_EMAIL = 'arush.23bce10472@vitbhopal.ac.in';
 
 export interface SharedArchiveRefreshOptions {
   dryRun?: boolean;
@@ -85,13 +85,16 @@ async function fetchSharedCollegeMessages(options: SharedArchiveRefreshOptions):
   let failed = 0;
   let sourceInbox: string | null = null;
   let nextPageToken: string | null = null;
-  // All subscribed College inboxes contain the same broadcast. Select one stable
-  // source inbox so the shared refresh never duplicates a run across student mailboxes.
-  const requestedSourceInbox = options.sourceInbox || process.env.SHARED_COLLEGE_EMAIL || DEFAULT_SHARED_COLLEGE_EMAIL;
+  // All subscribed College inboxes contain the same broadcast. Select one stable source
+  // inbox so the shared refresh never duplicates a run across student mailboxes. There is
+  // intentionally no user-specific default: the first connected College inbox wins.
+  const requestedSourceInbox = options.sourceInbox || process.env.SHARED_COLLEGE_EMAIL || '';
   const account = (requestedSourceInbox
     ? accounts.find((candidate) => candidate.email.toLowerCase() === requestedSourceInbox.toLowerCase())
     : accounts[0]) as GmailAccount | undefined;
-  if (!account) throw new Error(`Requested connected College source inbox was not found: ${requestedSourceInbox}`);
+  if (!account) throw new Error(requestedSourceInbox
+    ? `Requested connected College source inbox was not found: ${requestedSourceInbox}`
+    : 'No connected College Gmail inbox is available for the shared archive refresh.');
   try {
     const { gmail } = await createGmailClient(account);
     const listed = await gmail.users.messages.list({
@@ -147,7 +150,7 @@ export async function refreshSharedCollegeArchive(
   const runId = randomUUID();
   let after = options.after || '2026/06/30';
   let before = options.before || new Date().toISOString().slice(0, 10).replace(/-/g, '/');
-  let sourceInbox = options.sourceInbox || process.env.SHARED_COLLEGE_EMAIL || DEFAULT_SHARED_COLLEGE_EMAIL;
+  let sourceInbox = options.sourceInbox || process.env.SHARED_COLLEGE_EMAIL || '';
   let afterId = options.afterId;
   let savedMessageIds: string[] | null = null;
   let savedOffset = 0;
@@ -230,7 +233,7 @@ export async function refreshSharedCollegeArchive(
       try {
         const existingAttachmentRows = await client
           .from('college_attachments')
-          .select('id, attachment_id, parse_status, parse_error, extracted_rows, content_hash')
+          .select('id, attachment_id, filename, size_bytes, parse_status, parse_error, extracted_rows, content_hash')
           .eq('gmail_account_id', account.id)
           .eq('gmail_message_id', messageId);
         if (existingAttachmentRows.error) throw existingAttachmentRows.error;
@@ -400,15 +403,19 @@ export async function refreshSharedCollegeArchive(
 
         for (const attachment of currentEmail.attachments) {
           result.attachmentsSeen++;
-          const prior = (existingAttachmentRows.data || []).find((row) => row.attachment_id === attachment.attachmentId);
-          const isWorkbook = /\.(?:xlsx|xls|csv)$/i.test(attachment.filename);
-          if (prior?.parse_status === 'error' && /not supported by the shared row extractor/i.test(prior.parse_error || '')) {
-            result.attachmentsSkippedUnsupported++;
-            continue;
-          }
+          // Gmail attachment_ids are not stable across fetches, and unsupported rows
+          // may carry a stale content_hash from the era when every format was
+          // downloaded. Resolve by attachment_id, then by filename+size.
+          const prior = (existingAttachmentRows.data || []).find((row) => row.attachment_id === attachment.attachmentId)
+            || (existingAttachmentRows.data || []).find((row) => (row.filename || '') === attachment.filename
+              && (row.size_bytes || 0) === (attachment.size || 0));
+          const isWorkbook = isSupportedWorkbookAttachment(attachment.filename);
           if (!isWorkbook) {
+            // Terminal: never downloaded, never retried. Images are ignored outright;
+            // other formats are deferred for future JD parsing.
+            const classification = classifyUnsupportedAttachment(attachment.filename);
             result.attachmentsSkippedUnsupported++;
-            result.errors.push({ subject: `${subject} · ${attachment.filename}`, message: 'Unsupported attachment format; logged and deferred, not retried by this refresh.' });
+            if (isTerminalUnsupportedRow(prior, classification)) continue;
             if (!result.dryRun) {
               const deferredPayload = {
                 college_email_id: canonicalReferenceId,
@@ -418,8 +425,8 @@ export async function refreshSharedCollegeArchive(
                 attachment_id: attachment.attachmentId,
                 filename: attachment.filename,
                 size_bytes: attachment.size,
-                parse_status: 'error',
-                parse_error: 'Unsupported attachment format; deferred for manual/format-specific handling.',
+                parse_status: classification.status,
+                parse_error: classification.error,
                 updated_at: new Date().toISOString(),
               };
               const write = prior
@@ -435,7 +442,6 @@ export async function refreshSharedCollegeArchive(
           }
           try {
             if (attachment.size > MAX_ATTACHMENT_BYTES) throw new Error(`Attachment exceeds ${MAX_ATTACHMENT_BYTES} byte refresh limit.`);
-            if (!isWorkbook) throw new Error('This attachment format is not supported by the shared row extractor.');
             const { data: attachmentData } = await gmail.users.messages.attachments.get({ userId: 'me', messageId, id: attachment.attachmentId });
             if (!attachmentData.data) throw new Error('Gmail returned no attachment content.');
             const buffer = Buffer.from(attachmentData.data, 'base64url');

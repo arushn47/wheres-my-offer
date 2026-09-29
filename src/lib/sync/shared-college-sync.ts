@@ -5,7 +5,8 @@ import { fetchHistoryChanges, getProfileHistoryId } from '@/lib/gmail/history';
 import { ingestSharedCollegeCircular, fanOutSharedCollegeArchiveToUser } from '@/lib/sync/shared-college-ingest';
 import { getInitialArchivePageState } from '@/lib/sync/shared-college-state';
 
-const DEFAULT_SHARED_COLLEGE_EMAIL = 'arush.23bce10472@vitbhopal.ac.in';
+// No user-specific default: the shared College ingester must run on whichever College
+// inbox is connected, not one student's address. The first connected College inbox wins.
 const MAX_BATCH_SIZE = 40;
 
 interface SharedSyncState {
@@ -39,16 +40,21 @@ async function checkpoint(
 
 export async function runSharedCollegeSync(options: { limit?: number } = {}) {
   const supabase = createAdminClient();
-  const sharedEmail = (process.env.SHARED_COLLEGE_EMAIL || DEFAULT_SHARED_COLLEGE_EMAIL).toLowerCase();
-  const { data: account, error: accountError } = await supabase
+  const requestedEmail = (process.env.SHARED_COLLEGE_EMAIL || '').toLowerCase();
+  const { data: accounts, error: accountsError } = await supabase
     .from('gmail_accounts')
     .select('id,email,account_type,access_token_encrypted,refresh_token_encrypted,token_expiry,last_sync_at,last_history_id')
-    .eq('email', sharedEmail)
     .eq('account_type', 'college')
     .eq('is_connected', true)
-    .maybeSingle();
-  if (accountError) throw accountError;
-  if (!account) throw new Error(`Shared College inbox ${sharedEmail} is not connected.`);
+    .order('email', { ascending: true });
+  if (accountsError) throw accountsError;
+  // Explicit env override when set; otherwise the first connected College inbox is the
+  // shared broadcast source. Every subscribed College inbox receives the same broadcast,
+  // so any one of them ingests the identical canonical archive.
+  const account = (requestedEmail
+    ? (accounts || []).find((candidate) => candidate.email.toLowerCase() === requestedEmail)
+    : (accounts || [])[0]) || null;
+  if (!account) throw new Error('No connected College Gmail inbox is available for the shared College ingester.');
 
   const runId = randomUUID();
   const { data: acquired, error: acquireError } = await supabase.rpc('acquire_shared_college_sync_lease', {

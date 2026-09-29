@@ -357,22 +357,8 @@ export async function PATCH(
         }
       }
 
-      // 5b. Drop the shortlist verdicts that were derived from the circular(s) we just
-      // unlinked. Otherwise a stale `verified_absent` keeps pinning the drive to
-      // "Not Shortlisted" after its evidence is gone. The archive scanner re-seeds and
-      // re-evaluates these drives on the next sync.
-      for (const [userId, driveIds] of affectedDrivesByUser) {
-        const driveIdList = Array.from(driveIds);
-        if (driveIdList.length === 0) continue;
-        const { error: verificationResetError } = await supabase
-          .from('shortlist_verification_state')
-          .delete()
-          .eq('user_id', userId)
-          .in('placement_drive_id', driveIdList);
-        if (verificationResetError) {
-          console.error('[Admin Email Unlink] Could not reset shortlist verification:', verificationResetError.message);
-        }
-      }
+      // 5b. (No verification-tracking table anymore: verdicts live on applications and are
+      // recomputed by the archive scanner from the remaining evidence.)
 
       // 6. Recalculate each affected drive from the remaining linked evidence
       const reprocessErrors: string[] = [];

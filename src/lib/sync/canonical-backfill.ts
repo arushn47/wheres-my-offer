@@ -41,7 +41,7 @@ export async function backfillCanonicalEmails(
 
   let query = client
     .from('personal_emails')
-    .select('id, user_id, gmail_account_id, gmail_message_id, sender, subject, body_snippet, rfc_message_id, assignment_source')
+    .select('id, user_id, gmail_account_id, gmail_message_id, sender, subject, body_snippet, rfc_message_id, received_at, assignment_source')
     .is('canonical_email_id', null)
     .ilike('sender', `%${APPROVED_COLLEGE_SENDER}%`)
     .or('assignment_source.is.null,assignment_source.neq.admin_unlinked')
@@ -82,6 +82,10 @@ export async function backfillCanonicalEmails(
       let rfcMessageId = receipt.rfc_message_id;
       let hasAttachments = false;
       let snippetForMetadata = bodyText;
+      // The canonical row's receipt time must never fall back to the database insert
+      // time. Prefer the source message's own Gmail receipt time and only then the
+      // per-user receipt row's stored value.
+      let receivedAtIso: string = receipt.received_at || new Date().toISOString();
 
       // If stored body_snippet was capped at 500 chars (or < 200 chars), fetch full body from Gmail
       if (!bodyText || bodyText.length <= 500) {
@@ -97,6 +101,7 @@ export async function backfillCanonicalEmails(
         rfcMessageId = parsed.messageId;
         hasAttachments = parsed.hasAttachments;
         snippetForMetadata = parsed.bodySnippet;
+        receivedAtIso = parsed.receivedAt.toISOString();
       }
 
       const contentKey = computeCanonicalContentKey(parsedSenderEmail, parsedSubject, bodyText);
@@ -118,6 +123,7 @@ export async function backfillCanonicalEmails(
         has_attachments: hasAttachments,
         metadata_key: computeCanonicalMetadataKey(parsedSenderEmail, parsedSubject, snippetForMetadata),
         processing_status: 'complete',
+        received_at: receivedAtIso,
         updated_at: new Date().toISOString(),
       };
       const normalizedMessageId = normalizeRfcMessageId(rfcMessageId);
@@ -156,6 +162,7 @@ export async function backfillCanonicalEmails(
           has_attachments: Boolean(hasAttachments),
           metadata_key: computeCanonicalMetadataKey(parsedSenderEmail, parsedSubject, snippetForMetadata),
           processing_status: 'complete',
+          received_at: receivedAtIso,
           updated_at: new Date().toISOString(),
         };
 

@@ -233,7 +233,7 @@ export default function SettingsClient({
   // Trigger live sync
   const handleTriggerSync = () => {
     window.dispatchEvent(new CustomEvent('start-placement-sync'));
-    appToast.info('Starting sync…', 'Watch live progress in Campus Radar.');
+    appToast.info('Starting sync...', 'Watch live progress in Campus Radar.');
   };
 
   // Handle Reprocess Archive with live streaming progress
@@ -244,7 +244,7 @@ export default function SettingsClient({
     setReprocessProgress({
       step: 1,
       totalSteps: 5,
-      message: 'Connecting to placement archive re-indexer…',
+      message: 'Preparing saved placement data...',
     });
 
     let completedSuccessfully = false;
@@ -429,7 +429,7 @@ export default function SettingsClient({
                 disabled={isSavingId}
                 className="h-9 rounded-lg bg-emerald-500 px-3 sm:px-4 text-xs font-bold text-zinc-950 transition-all hover:bg-emerald-400 active:scale-95 disabled:opacity-60 cursor-pointer shrink-0 whitespace-nowrap"
               >
-                {isSavingId ? 'Saving…' : 'Save ID'}
+                {isSavingId ? 'Saving...' : 'Save ID'}
               </button>
             </div>
             <p className="text-[11px] text-zinc-400 leading-snug">
@@ -546,7 +546,7 @@ export default function SettingsClient({
                     disabled={disconnecting === personalAccount.id}
                     className="shrink-0 rounded-lg border border-zinc-800 hover:border-rose-500/40 px-2.5 py-1 text-[11px] font-semibold text-zinc-400 hover:text-rose-300 active:scale-95 transition-all cursor-pointer"
                   >
-                    {disconnecting === personalAccount.id ? 'Disconnecting…' : 'Disconnect'}
+                    {disconnecting === personalAccount.id ? 'Disconnecting...' : 'Disconnect'}
                   </button>
                 ) : (
                   <a
@@ -600,7 +600,7 @@ export default function SettingsClient({
                     disabled={disconnecting === collegeAccount.id}
                     className="shrink-0 rounded-lg border border-zinc-800 hover:border-rose-500/40 px-2.5 py-1 text-[11px] font-semibold text-zinc-400 hover:text-rose-300 active:scale-95 transition-all cursor-pointer"
                   >
-                    {disconnecting === collegeAccount.id ? 'Disconnecting…' : 'Disconnect'}
+                    {disconnecting === collegeAccount.id ? 'Disconnecting...' : 'Disconnect'}
                   </button>
                 ) : (
                   <a
@@ -646,20 +646,20 @@ export default function SettingsClient({
 
       {/* Section 4: Engine Diagnostics & Archive Re-index */}
       <Card
-        id="engine-diagnostics"
-        icon={Wrench}
-        title="Placement Engine Diagnostics & Archive Re-index"
-        desc="Re-run extraction rules, drive matching algorithms, and bug fixes across saved emails."
+        id="placement-data-refresh"
+        icon={RefreshCw}
+        title="Placement Data Refresh"
+        desc="Re-check your saved placement emails and College circulars using the latest matching, event, and shortlist rules."
         testid="reprocess-card"
       >
         <div className="space-y-3">
           <div className="rounded-xl border border-white/[0.06] bg-zinc-900/50 p-3.5 sm:p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div className="space-y-0.5">
               <div className="text-xs sm:text-sm font-semibold text-zinc-200">
-                Reprocess Stored Placement Records
+                Refresh Placement Data
               </div>
               <p className="text-[11px] text-zinc-400 leading-snug">
-                Re-evaluates drive numbers, stages, CTCs & shortlists across saved emails (takes ~1–2 min).
+                Re-checks your saved placement data and updates drives, events, applications, and shortlist status (takes ~1–2 min).
               </p>
             </div>
             <button
@@ -670,7 +670,7 @@ export default function SettingsClient({
               className="flex items-center justify-center gap-2 shrink-0 rounded-lg border border-indigo-500/40 bg-indigo-500/15 px-3.5 py-2 text-xs font-semibold text-indigo-300 hover:bg-indigo-500/25 disabled:opacity-50 active:scale-95 transition-all cursor-pointer w-full sm:w-auto"
             >
               <RefreshCw className={cn('h-3.5 w-3.5', reprocessing && 'animate-spin text-indigo-400')} />
-              <span>{reprocessing ? 'Reprocessing…' : 'Reprocess Archive'}</span>
+              <span>{reprocessing ? 'Refreshing...' : 'Refresh Placement Data'}</span>
             </button>
           </div>
 
@@ -830,7 +830,7 @@ export default function SettingsClient({
                   {isResetting ? (
                     <>
                       <RefreshCw className="h-3.5 w-3.5 animate-spin" />
-                      <span>Resetting…</span>
+                      <span>Resetting...</span>
                     </>
                   ) : (
                     <span>Confirm Reset</span>
@@ -905,7 +905,7 @@ export default function SettingsClient({
                   {isDeleting ? (
                     <>
                       <RefreshCw className="h-3.5 w-3.5 animate-spin" />
-                      <span>Terminating…</span>
+                      <span>Terminating...</span>
                     </>
                   ) : (
                     <span>Delete Account Permanently</span>

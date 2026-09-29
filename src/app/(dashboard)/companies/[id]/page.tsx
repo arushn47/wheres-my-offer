@@ -246,14 +246,7 @@ export default async function CompanyDetailPage(props: {
       .eq('user_id', session.userId),
   ]);
 
-  const { data: shortlistVerificationRows } = await supabase
-    .from('shortlist_verification_state')
-    .select('placement_drive_id,verification_state')
-    .eq('user_id', session.userId)
-    .in('placement_drive_id', driveFilterIds);
-  const shortlistVerificationByDrive = new Map(
-    (shortlistVerificationRows || []).map((row) => [row.placement_drive_id, row.verification_state])
-  );
+  // Shortlist verdicts are read straight from applications.status; no verification table.
 
   const sourceEmail = targetDrive?.source_email_id
     ? (assignedEmails || []).find((email: any) => email.id === targetDrive.source_email_id)
@@ -583,7 +576,7 @@ export default async function CompanyDetailPage(props: {
   const detail: CompanyDetail = {
     id: company.id,
     placementDriveId,
-    shortlistVerificationState: placementDriveId ? shortlistVerificationByDrive.get(placementDriveId) || null : null,
+    shortlistVerificationState: null,
     name: company.name,
     legalName: null,
     aliases: company.aliases,

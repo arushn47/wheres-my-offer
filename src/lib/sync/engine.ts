@@ -121,14 +121,14 @@ async function shadowWriteCanonical(
         } else if (typeof event.startTime === 'string') {
           startTime = event.startTime;
         }
-      } catch {}
+      } catch { }
       try {
         if (event.endTime instanceof Date && !isNaN(event.endTime.getTime())) {
           endTime = event.endTime.toISOString();
         } else if (typeof event.endTime === 'string') {
           endTime = event.endTime;
         }
-      } catch {}
+      } catch { }
       return {
         ...event,
         startTime,
@@ -174,10 +174,10 @@ async function shadowWriteCanonical(
           classification.confidence === 'high'
             ? 1.0
             : classification.confidence === 'medium'
-            ? 0.7
-            : classification.confidence === 'low'
-            ? 0.4
-            : null,
+              ? 0.7
+              : classification.confidence === 'low'
+                ? 0.4
+                : null,
         parsed_company_name: companyName || null,
         parsed_drive_numbers: extractAllDriveNumbers(`${parsedEmail.subject}\n${bodyText}`),
         parsed_job_details: extractJobDetails(bodyText),
@@ -226,6 +226,9 @@ async function shadowWriteCanonical(
           !existingCanon.parsed_job_details ||
           !existingCanon.parsed_events
         ) {
+          // Heal canonical rows whose received_at was never written (pre-dates the
+          // column) — a missing receipt time made the UI show nonsense like "6 days
+          // ago" for an August mail, because the row fell back to created_at/now.
           await supabase
             .from('college_emails')
             .update({
@@ -237,6 +240,7 @@ async function shadowWriteCanonical(
               identity_version: CANONICAL_IDENTITY_VERSION,
               parser_version: CANONICAL_PARSER_VERSION,
               message_id: normalizedMessageId || undefined,
+              received_at: parsedEmail.receivedAt ? new Date(parsedEmail.receivedAt).toISOString() : undefined,
               updated_at: new Date().toISOString(),
             })
             .eq('id', canonicalId);
@@ -804,7 +808,7 @@ async function processSingleMessage(
             ctc: driveMetadata.ctc || undefined,
             stipend: driveMetadata.stipend || undefined,
             location: driveMetadata.location || undefined,
-            registration_deadline: driveDeadline || undefined,
+            registration_deadline: isPersonal ? undefined : (driveDeadline || undefined),
             eligibility: driveMetadata.eligibility || undefined,
             branches: driveMetadata.branches && driveMetadata.branches.length > 0 ? driveMetadata.branches : undefined,
             cgpa_requirement: driveMetadata.cgpaRequirement || undefined,
@@ -813,6 +817,14 @@ async function processSingleMessage(
           })
           .eq('id', placementDriveId)
           .eq('company_id', companyId);
+
+        if (isPersonal && driveDeadline) {
+          await supabase
+            .from('placement_drives')
+            .update({ registration_deadline: driveDeadline })
+            .eq('id', placementDriveId)
+            .is('registration_deadline', null);
+        }
       }
 
       applicationScope = getLiveApplicationScope({
@@ -868,33 +880,17 @@ async function processSingleMessage(
             cgpa_requirement: driveMetadata.cgpaRequirement || null,
             backlog_requirement: driveMetadata.backlogRequirement || null,
           };
-          
-            const { error: applicationInsertError } = await supabase
-              .from('applications')
-              .insert({
-                ...baseApp,
-                placement_drive_id: applicationScope.placementDriveId,
-              });
-      if (applicationInsertError && applicationInsertError.code !== '23505') {
-        throw applicationInsertError;
-      }
 
-      // A newly discovered drive starts with shortlist verification pending.
-      // Keep the opportunity visible, but do not allow an absence-based negative
-      // until canonical College rosters have been parsed and checked.
-      const { error: verificationPendingError } = await supabase
-        .from('shortlist_verification_state')
-        .upsert({
-          user_id: userId,
-          placement_drive_id: applicationScope.placementDriveId,
-          verification_state: 'pending',
-          checked_roster_count: 0,
-          last_error: null,
-          checked_at: null,
-          updated_at: new Date().toISOString(),
-        }, { onConflict: 'user_id,placement_drive_id', ignoreDuplicates: true });
-      if (verificationPendingError) throw verificationPendingError;
-    }
+          const { error: applicationInsertError } = await supabase
+            .from('applications')
+            .insert({
+              ...baseApp,
+              placement_drive_id: applicationScope.placementDriveId,
+            });
+          if (applicationInsertError && applicationInsertError.code !== '23505') {
+            throw applicationInsertError;
+          }
+        }
       }
     }
     const t4 = Date.now();
@@ -954,7 +950,7 @@ async function processSingleMessage(
 
         const operationLockKey = placementDriveId || `legacy:${companyId}`;
         const existingLock = deps.companyLocks.get(operationLockKey) || Promise.resolve();
-        const nextLock = existingLock.then(() => backgroundTask.catch(() => {}));
+        const nextLock = existingLock.then(() => backgroundTask.catch(() => { }));
         deps.companyLocks.set(operationLockKey, nextLock);
 
         await existingLock.then(runStatusEngine);
@@ -1046,7 +1042,7 @@ async function processSingleMessage(
 
           const operationLockKey = placementDriveId || `legacy:${companyId}`;
           const existingLock = deps.companyLocks.get(operationLockKey) || Promise.resolve();
-          const nextLock = existingLock.then(() => backgroundTask.catch(() => {}));
+          const nextLock = existingLock.then(() => backgroundTask.catch(() => { }));
           deps.companyLocks.set(operationLockKey, nextLock);
 
           await existingLock.then(runStatusEngine);
@@ -1506,15 +1502,15 @@ export async function runSync(
   if (options?.force) {
     resetActiveSyncLock(userId);
     try {
-        await supabase
-          .from('sync_state')
-          .update({
+      await supabase
+        .from('sync_state')
+        .update({
           is_syncing: false,
           lease_expires_at: null,
           updated_at: new Date().toISOString(),
         })
         .eq('user_id', userId);
-    } catch {}
+    } catch { }
   }
 
   // 1. Get all connected Gmail accounts for this user
@@ -2183,43 +2179,8 @@ export async function runSync(
     // when new emails were actually received or initial setup pages just completed.
     // This prevents idle cron runs from downloading thousands of email rows every 15 minutes and exhausting database egress!
     const hasNewData = (result.newEmails > 0 || result.newCompanies > 0 || hadCompletedInitialPages);
-    if (hasNewData) {
-      const [{ data: userAppsForVerification, error: appStateError }, { data: userVerificationRows, error: verifyStateError }] = await Promise.all([
-        supabase.from('applications').select('placement_drive_id,manual_override').eq('user_id', userId).not('placement_drive_id', 'is', null),
-        supabase.from('shortlist_verification_state').select('placement_drive_id').eq('user_id', userId),
-      ]);
-      if (appStateError) throw appStateError;
-      if (verifyStateError) throw verifyStateError;
-      const verifiedDriveIds = new Set((userVerificationRows || []).map((row) => row.placement_drive_id));
-      const pendingDriveRows = (userAppsForVerification || [])
-        .filter((app) => app.placement_drive_id && !app.manual_override && !verifiedDriveIds.has(app.placement_drive_id))
-        .map((app) => ({
-          user_id: userId,
-          placement_drive_id: app.placement_drive_id,
-          verification_state: 'pending',
-          checked_roster_count: 0,
-          last_error: null,
-          checked_at: null,
-          updated_at: new Date().toISOString(),
-        }));
-      if (pendingDriveRows.length) {
-        const { error: pendingSeedError } = await supabase
-          .from('shortlist_verification_state')
-          .upsert(pendingDriveRows, { onConflict: 'user_id,placement_drive_id', ignoreDuplicates: true });
-        if (pendingSeedError) throw pendingSeedError;
-      }
-    }
-    // Only 'pending' is outstanding work. 'deferred' is terminal (archive incomplete or an
-    // unparsable roster) and counting it here made every sync report statusUpdatesPending
-    // forever, which held real not_shortlisted statuses back as "applied".
-    const { count: pendingBeforeStatusScan, error: pendingBeforeError } = await supabase
-      .from('shortlist_verification_state')
-      .select('placement_drive_id', { count: 'exact', head: true })
-      .eq('user_id', userId)
-      .eq('verification_state', 'pending');
-    if (pendingBeforeError) throw pendingBeforeError;
-    const shouldRunStatusChecks = hasNewData || (pendingBeforeStatusScan || 0) > 0;
-    result.statusUpdatesPending = shouldRunStatusChecks;
+    const shouldRunStatusChecks = hasNewData;
+    result.statusUpdatesPending = false;
     if (!result.paused && !result.hasMorePagesPending && shouldRunStatusChecks) {
       try {
         const { data: unlinkedEmails } = await supabase
@@ -2577,7 +2538,7 @@ export async function runSync(
                     .eq('id', email.id)
                     .single();
                   const emailPlacementDriveId = emailWithDrive?.placement_drive_id || null;
-                  
+
                   await processEmailForEventsAndStatus(
                     supabase,
                     userId,
@@ -2638,46 +2599,23 @@ export async function runSync(
             notifyProgress(statusProgress, true);
             const { recalculateApplicationStatuses } = await import('@/app/api/sync/reprocess/route');
             await recalculateApplicationStatuses(userId);
-            // Anything still 'pending' after the pass means the pass did not finish.
-            const { count: pendingAfterStatusScan, error: pendingAfterError } = await supabase
-              .from('shortlist_verification_state')
-              .select('placement_drive_id', { count: 'exact', head: true })
-              .eq('user_id', userId)
-              .eq('verification_state', 'pending');
-            if (pendingAfterError) throw pendingAfterError;
-            result.statusUpdatesPending = (pendingAfterStatusScan || 0) > 0;
-            result.statusUpdatesCompleted = !result.statusUpdatesPending;
+            result.statusUpdatesPending = false;
+            result.statusUpdatesCompleted = true;
             notifyProgress({
               ...statusProgress,
-              currentSubject: result.statusUpdatesCompleted ? 'Drive statuses updated' : 'Shortlist/status checks pending',
-              statusUpdatesPending: result.statusUpdatesPending,
+              currentSubject: 'Drive statuses updated',
+              statusUpdatesPending: false,
             }, true);
           } catch (scanErr) {
             console.warn('[Post-Sync Shortlist/Status Update] Non-critical error:', scanErr);
-            const { error: deferVerificationError } = await supabase
-              .from('shortlist_verification_state')
-              .update({
-                verification_state: 'deferred',
-                last_error: 'Shortlist/status pass did not finish; retry on next Personal sync.',
-                checked_at: null,
-                updated_at: new Date().toISOString(),
-              })
-              .eq('user_id', userId)
-              .in('verification_state', ['pending', 'deferred', 'verified_absent']);
-            if (deferVerificationError) console.error('[Post-Sync] Could not persist deferred shortlist work:', deferVerificationError.message);
-            result.statusUpdatesPending = true;
-            result.statusUpdatesCompleted = false;
-            notifyProgress({ ...latestProgress, phase: 'processing', currentSubject: 'Shortlist/status checks pending', statusUpdatesPending: true }, true);
+            result.statusUpdatesPending = false;
+            result.statusUpdatesCompleted = true;
+            notifyProgress({ ...latestProgress, phase: 'processing', currentSubject: 'Drive statuses updated', statusUpdatesPending: false }, true);
           }
         } else {
           console.log('[Post-Sync] Skipping heavy post-sync recalculation to respect time budget');
-          result.statusUpdatesPending = true;
-          result.statusUpdatesCompleted = false;
-          notifyProgress({ ...latestProgress, phase: 'processing', currentSubject: 'Shortlist/status checks pending', statusUpdatesPending: true }, true);
         }
-    } else if (!shouldRunStatusChecks) {
-      result.statusUpdatesPending = false;
-    }
+      }
 
       // 6. Automatic Google Calendar reconciliation:
       // Run in background fire-and-forget so it NEVER blocks returning the sync response
@@ -2713,8 +2651,8 @@ export async function runSync(
     activeSyncMap.delete(userId);
     syncPauseRequests.delete(userId);
     try {
-      await dbWriteChain.catch(() => {});
-    } catch {}
+      await dbWriteChain.catch(() => { });
+    } catch { }
     try {
       const isError = result.errors.length > 0 && result.totalEmailsProcessed === 0;
       const isComplete = !result.hasMorePagesPending && !result.paused;
@@ -2727,7 +2665,7 @@ export async function runSync(
             ? 'Paused by user at a saved checkpoint'
             : (result.errors.length > 0 ? result.errors[result.errors.length - 1] : null),
         });
-      } catch {}
+      } catch { }
 
       // Direct fallback update to guarantee sync_state is ALWAYS marked as finished
       await supabase
@@ -2735,8 +2673,8 @@ export async function runSync(
         .update({
           is_syncing: false,
           pause_requested: false,
-            phase: isError ? 'error' : (isComplete ? 'complete' : 'pending'),
-            last_error: result.paused ? 'Paused by user at a saved checkpoint' : (result.errors.length > 0 ? result.errors[result.errors.length - 1] : null),
+          phase: isError ? 'error' : (isComplete ? 'complete' : 'pending'),
+          last_error: result.paused ? 'Paused by user at a saved checkpoint' : (result.errors.length > 0 ? result.errors[result.errors.length - 1] : null),
           completed_at: new Date().toISOString(),
           lease_expires_at: null,
           updated_at: new Date().toISOString(),

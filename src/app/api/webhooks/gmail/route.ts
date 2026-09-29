@@ -123,9 +123,13 @@ export async function POST(req: NextRequest) {
 
     // Keep the invocation alive after acknowledging Pub/Sub. The lease in
     // runSync still deduplicates concurrent/replayed notifications.
+    // No user-specific fallback address: the shared College ingest runs on whichever
+    // College inbox a notification arrived for (the ingester itself picks the first
+    // connected College inbox unless SHARED_COLLEGE_EMAIL overrides it).
+    const sharedCollegeInbox = (process.env.SHARED_COLLEGE_EMAIL || '').toLowerCase();
     const isSharedCollegeSource =
       account.account_type === 'college' &&
-      emailAddress.toLowerCase() === (process.env.SHARED_COLLEGE_EMAIL || 'arush.23bce10472@vitbhopal.ac.in').toLowerCase();
+      (!sharedCollegeInbox || emailAddress.toLowerCase() === sharedCollegeInbox);
 
     console.log(`[Pub/Sub] Triggering ${isSharedCollegeSource ? 'shared College ingest' : 'Personal sync'} for ${emailAddress} at historyId ${historyId}`);
     after(async () => {
@@ -142,7 +146,7 @@ export async function POST(req: NextRequest) {
         } else if (account.account_type === 'personal') {
           await runSync(account.user_id);
         } else {
-          console.warn(`[Pub/Sub] Ignoring non-primary College inbox ${emailAddress}; configure SHARED_COLLEGE_EMAIL to ingest it.`);
+          console.warn(`[Pub/Sub] Ignoring non-primary College inbox ${emailAddress}; set SHARED_COLLEGE_EMAIL to pin the ingest source.`);
         }
         const { error: completeError } = await supabase.rpc('complete_gmail_pubsub_message', {
           p_subscription: subscription,

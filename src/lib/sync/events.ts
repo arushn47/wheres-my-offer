@@ -4,16 +4,16 @@ import { deriveEventEndTime } from '@/lib/event-duration';
 
 export interface ExtractedEvent {
   eventType:
-    | 'registration_deadline'
-    | 'ppt'
-    | 'online_test'
-    | 'coding_test'
-    | 'technical_interview'
-    | 'hr_interview'
-    | 'final_interview'
-    | 'result'
-    | 'joining_date'
-    | 'other';
+  | 'registration_deadline'
+  | 'ppt'
+  | 'online_test'
+  | 'coding_test'
+  | 'technical_interview'
+  | 'hr_interview'
+  | 'final_interview'
+  | 'result'
+  | 'joining_date'
+  | 'other';
   title: string;
   startTime: Date | null;
   endTime: Date | null;
@@ -41,6 +41,8 @@ export interface ExtractedJobDetails {
   neoIdMatched: boolean;
   matchedNeoIdValue: string | null;
 }
+
+
 
 /**
  * Extracts official NeoPAT / CDC Drive Number (e.g. "pat-PL-2026-1261") from text.
@@ -201,9 +203,9 @@ export function parseDateTimeWithConfidence(
   }
 
   const timeMatch =
-    timeText.match(/(?:by|at|@|from|is\s+at)?\s*\(?\s*(\d{1,2})(?::|\.)?(\d{2})?\s*(am|pm|a\.m\.|p\.m\.|noon|p\b|a\b)/i) ||
-    timeText.match(/(?:by|at|@|from|is\s+at)\s*\(?\s*(\d{1,2})(?::|\.)(\d{2})\s*(?:hours|hrs|sharp)?/i);
-
+    timeText.match(/(?:by|at|@|from|is\s+at)?\s*\(?\s*(\d{1,2})\s*(?::|\.)?\s*(\d{2})?\s*(am|pm|a\.m\.|p\.m\.|noon|p\b|a\b)/i) ||
+    timeText.match(/(?:by|at|@|from|is\s+at)\s*\(?\s*(\d{1,2})\s*(?::|\.)\s*(\d{2})\s*(?:hours|hrs|sharp)?/i);
+    
   if (timeMatch) {
     let h = parseInt(timeMatch[1], 10);
     const indicator = timeMatch[3] ? timeMatch[3].toLowerCase() : '';
@@ -258,6 +260,110 @@ export function parseDateTime(
 // Event Extractor
 // ============================================
 
+
+const DEADLINE_DATE_RE = new RegExp(
+  `\\d{1,2}(?:st|nd|rd|th)?\\s*(?:of\\s+)?(?:${MONTH_PATTERN})\\b\\.?(?:,?\\s*\\d{4})?` +
+  `|(?:${MONTH_PATTERN})\\b\\.?\\s*\\d{1,2}(?:st|nd|rd|th)?(?:,?\\s*\\d{4})?` +
+  `|\\d{1,2}[\\/\\-\\.]\\d{1,2}[\\/\\-\\.]\\d{2,4}`,
+  'i'
+);
+
+const DEADLINE_CUES: Array<{ re: RegExp; score: number; kind: 'registration' | 'form' }> = [
+  { re: /\bregist(?:er|ration)s?\b[^.]{0,90}?\b(?:on\s+or\s+before|before|by|till|until|up\s?to)\b/gi, score: 100, kind: 'registration' },
+  { re: /\blast\s+date\b[^.]{0,40}?\b(?:registration|register|apply(?:ing)?|application)s?\b/gi, score: 100, kind: 'registration' },
+  { re: /\bregistration\s+(?:deadline|closes?|closing|ends?)\b|\b(?:registrations?|applications?)\s+(?:will\s+)?(?:close|end)s?\b/gi, score: 100, kind: 'registration' },
+  { re: /\b(?:extended|extension|revised|preponed|postponed)\b[^.]{0,60}?\b(?:to|till|until|up\s?to)\b/gi, score: 95, kind: 'registration' },
+  { re: /\bapply\s+(?:on\s+or\s+before|before|by)\b/gi, score: 90, kind: 'registration' },
+  { re: /\blast\s+date\b/gi, score: 80, kind: 'registration' },
+  { re: /\b(?:deadline|closing\s+date)\b[^.]{0,60}?(?:\bon\s+or\s+before\b|\bbefore\b|\bby\b|\bis\b|:)/gi, score: 70, kind: 'registration' },
+  { re: /\b(?:google\s*form|preference\s*form|survey|form)\b[^.]{0,80}?\b(?:on\s+or\s+before|before|by)\b/gi, score: 40, kind: 'form' },
+];
+
+/**
+ * Finds the registration deadline by semantic cue ("register … on or before", "last date for
+ * registration", "extended to"). The date must sit right after the cue and the time is read
+ * only from that date's own window, so unrelated timestamps in the email are ignored.
+ */
+export function extractRegistrationDeadline(
+  text: string,
+  refDate: Date
+): {
+  date: Date;
+  hasExplicitTime: boolean;
+  kind: 'registration' | 'form';
+  segment: string;
+  score: number;
+  idx: number;
+} | null {
+  const segments = text
+    .replace(/[*_`>#]/g, ' ')
+    .split(/\n\s*\n|(?<=[.!?])\s+(?=[A-Z(])/)
+    .map((s) => s.replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+
+  let best: { date: Date; hasExplicitTime: boolean; kind: 'registration' | 'form'; segment: string; score: number; idx: number } | null = null;
+
+  segments.forEach((seg, idx) => {
+    if (/^(?:from|to|cc|bcc|date|sent|subject)\s*:/i.test(seg)) return; // header lines
+    for (const cue of DEADLINE_CUES) {
+      for (const m of seg.matchAll(cue.re)) {
+        if (cue.score === 95 && !/regist|deadline|last\s+date|appl(?:y|ication)/i.test(seg)) continue;
+        if (cue.score === 100 && /\b(?:test|assessment|interview|ppt|pre[\s-]*placement|shortlist)/i.test(m[0])) continue;
+        const tail = seg.slice((m.index ?? 0) + m[0].length);
+        const dm = tail.slice(0, 45).match(DEADLINE_DATE_RE);
+        if (!dm || dm.index === undefined) {
+          // Relative-date fallback: "on or before 2 pm tomorrow" carries no calendar
+          // date, but the parser resolves supported relative keywords (tomorrow/tomm).
+          const relWindow = tail.slice(0, 60);
+          if (!/\b(?:tomm|tomorrow|tmrw|next\s+day)\b/i.test(relWindow)) continue;
+          if (/\b(?:test|assessment|interview|ppt|pre[\s-]*placement|joining|date\s+of\s+visit|sent|posted|received|published|generated)\b/i.test(relWindow)) continue;
+          const parsedRel = parseDateTimeWithConfidence(relWindow, refDate);
+          if (!parsedRel.date) continue;
+          const relScore = cue.score + (parsedRel.hasExplicitTime ? 5 : 0);
+          if (!best || relScore > best.score) {
+            best = { date: parsedRel.date, hasExplicitTime: parsedRel.hasExplicitTime, kind: cue.kind, segment: seg, score: relScore, idx };
+          }
+          continue;
+        }
+        if (/\b(?:test|assessment|interview|ppt|pre[\s-]*placement|joining|date\s+of\s+visit|sent|posted|received|published|generated)\b/i
+          .test(tail.slice(0, dm.index))) continue;
+        const parsed = parseDateTimeWithConfidence(tail.slice(0, dm.index + dm[0].length + 30), refDate);
+        if (!parsed.date) continue;
+        const score = cue.score + (parsed.hasExplicitTime ? 5 : 0);
+        if (!best || score > best.score || (score === best.score && idx >= best.idx)) {
+          best = { date: parsed.date, hasExplicitTime: parsed.hasExplicitTime, kind: cue.kind, segment: seg, score, idx };
+        }
+      }
+    }
+  });
+  return best;
+}
+
+/** College circular > personal NeoPAT email; among equals the latest (extensions) wins. */
+export function pickRegistrationDeadline<T extends { event: ExtractedEvent; isCollege: boolean; receivedAt: Date }>(
+  candidates: T[]
+): T | null {
+  const valid = candidates.filter((c) => c.event.eventType === 'registration_deadline' && c.event.startTime);
+  valid.sort((a, b) =>
+    Number(b.isCollege) - Number(a.isCollege) || b.receivedAt.getTime() - a.receivedAt.getTime());
+  return valid[0] ?? null;
+}
+
+const istDay = (d: Date | string) =>
+  new Date(d).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+
+export function shouldReplaceRegistrationDeadline(
+  existing: { start_time: string | null; college_email_id?: string | null },
+  incoming: { startTime: Date | null; hasExplicitTime?: boolean },
+  incomingIsCollege: boolean
+): boolean {
+  if (!incoming.startTime) return false;
+  if (existing.college_email_id && !incomingIsCollege) return false;   // NeoPAT never overrides College
+  if (!existing.start_time) return true;
+  if (istDay(existing.start_time) === istDay(incoming.startTime) && !incoming.hasExplicitTime) return false;
+  return true;
+}
+
 /**
  * Extracts placement events (PPT, Test, Interview) from an email.
  */
@@ -280,54 +386,24 @@ export function extractEvents(email: ParsedEmail): ExtractedEvent[] {
   const refDate = email.receivedAt
     ? new Date(email.receivedAt)
     : (email as any).received_at
-    ? new Date((email as any).received_at)
-    : new Date();
+      ? new Date((email as any).received_at)
+      : new Date();
 
-  // 0. Check for Registration Deadline or Form/Preference Submission Deadline
-  const regDeadlinePatterns = [
-    // Pattern A: Explicit registration portal deadline (often has exact time)
-    /(?:last\s+date\s+(?:for\s+)?registration|registration\s+deadline|register[\s\S]{0,90}?(?:on\s*(?:or)?\s*before|by|before))\s*[:\-–—\t]*\s*([^\n\r]{1,100})/gi,
-    // Pattern B: Google Form / Survey / Preference form deadline
-    /(?:fill\s*(?:out|in)?\s*(?:the\s*)?(?:google\s*form|form|preference\s*form|survey)|submit\s*(?:the\s*)?(?:google\s*form|form|preference\s*form)|location\s*preference[\s\S]{0,50}?google\s*form)[\s\S]{0,100}?(?:on\s*(?:or)?\s*before|by|before)\s*[:\-–—\t]*\s*([^\n\r]{1,100})/gi,
-    // Pattern C: Application formalities / General application deadline
-    /(?:apply\s+(?:on\s*(?:or)?\s*before|by|before)|complete[\s\S]{0,50}?application[\s\S]{0,30}?(?:by|before|on\s*(?:or)?\s*before))\s*[:\-–—\t]*\s*([^\n\r]{1,100})/gi,
-    // Pattern D: Portal deadline wording without an explicit registration verb
-    /\bdeadline\b[\s\S]{0,100}?\bon\s*(?:or\s*)?before\s*[:\-–—\t]*\s*([^\n\r]{1,100})/gi,
-  ];
 
-  let bestRegParsed: { date: Date | null; hasExplicitTime: boolean } = { date: null, hasExplicitTime: false };
 
-  for (const pat of regDeadlinePatterns) {
-    const matches = Array.from(cleanNormalizedText.matchAll(pat));
-    for (const m of matches) {
-      if (!m[1]) continue;
-      const rawCandidate = m[1].replace(/[*_`>#]/g, ' ').trim();
-      const cleanCandidate = rawCandidate.split(/\b(?:website|job|eligibility|jd|note|mandatory|no\s+manual|company(?:'s)?\s*link|company(?:'s)?\s*registration|both\s+the\s+registration)\b/i)[0].trim();
-      const parsed = parseDateTimeWithConfidence(cleanCandidate, refDate);
-      if (parsed.date) {
-        if (!bestRegParsed.date || (!bestRegParsed.hasExplicitTime && parsed.hasExplicitTime)) {
-          bestRegParsed = parsed;
-        }
-      }
-    }
-  }
-
-  if (bestRegParsed.date) {
-    const isLocPref = /location\s*preference|preference\s*form/i.test(cleanNormalizedText);
-    const isGForm = /google\s*form|survey/i.test(cleanNormalizedText);
+  const regDeadline = extractRegistrationDeadline(`${email.subject}\n\n${unquotedBody}`, refDate);
+  if (regDeadline) {
+    const isLocPref = regDeadline.kind === 'form' && /location\s*preference|preference\s*form/i.test(regDeadline.segment);
+    const isGForm = regDeadline.kind === 'form' && !isLocPref;
     events.push({
       eventType: 'registration_deadline',
-      title: isLocPref
-        ? 'Location Preference Deadline'
-        : isGForm
-        ? 'Google Form Submission Deadline'
-        : 'Registration Deadline',
-      startTime: bestRegParsed.date,
-      endTime: deriveEventEndTime('registration_deadline', 'Registration Deadline', bestRegParsed.date),
+      title: isLocPref ? 'Location Preference Deadline' : isGForm ? 'Google Form Submission Deadline' : 'Registration Deadline',
+      startTime: regDeadline.date,
+      endTime: deriveEventEndTime('registration_deadline', 'Registration Deadline', regDeadline.date),
       venue: isGForm || isLocPref ? 'Google Form / NeoPAT' : 'NeoPAT Portal / Online Form',
       mode: 'online',
       confidence: 'high',
-      hasExplicitTime: bestRegParsed.hasExplicitTime,
+      hasExplicitTime: regDeadline.hasExplicitTime,
     });
   }
 
@@ -502,8 +578,8 @@ export function extractEvents(email: ParsedEmail): ExtractedEvent[] {
         title: isTech
           ? 'Technical Interview'
           : isHr
-          ? 'HR Interview'
-          : 'Interview Round',
+            ? 'HR Interview'
+            : 'Interview Round',
         startTime: parsed.date,
         endTime: deriveEventEndTime(isTech ? 'technical_interview' : isHr ? 'hr_interview' : 'technical_interview', 'Interview', parsed.date),
         venue,
@@ -1216,7 +1292,7 @@ export function extractJobDetails(text: string): ExtractedJobDetails {
   const workModeText = cleanWithLines.match(/\b(?:mode\s+of\s+work|work\s+mode|internship\s+mode)\b\s*[:\-–—]?\s*([^\r\n]{2,100})/i)?.[1] || '';
   if (/\bhybrid\b/i.test(workModeText)) workMode = 'hybrid';
   else if (/\bwork\s+from\s+office\b|\b(?:in[\s-]*person|on[\s-]*site)\b/i.test(workModeText) ||
-           /\ball\s+the\s+roles\s+are\s+work\s+from\s+office\b/i.test(cleanText)) workMode = 'office';
+    /\ball\s+the\s+roles\s+are\s+work\s+from\s+office\b/i.test(cleanText)) workMode = 'office';
   else if (/\bremote\b|\bwork\s+from\s+home\b/i.test(workModeText)) workMode = 'remote';
 
   const unannouncedPattern = /will be (?:announced|informed|shared) later|tba|tbd|to be (?:announced|disclosed)|not disclosed/i;
@@ -1262,7 +1338,7 @@ export function extractJobDetails(text: string): ExtractedJobDetails {
 
     const isReferBelow = ctcBlockMatch && /refer (?:below|table|attached)|details below|as attached|refer\s+to\s+below/i.test(ctcBlockMatch[1]);
     const ctcText = (ctcBlockMatch && !isReferBelow) ? ctcBlockMatch[1].trim() : textForBhopal;
-    
+
     // 0. Clean out multi-year Retention Bonus (RB) formulas and internal fixed/variable/bonus breakdowns
     // e.g. "14+1 +(RB -2+3+4) LPA" -> "14+1 LPA"
     // e.g. "15 LPA (₹14 LPA Fixed + ₹1 LPA Variable) + Retention Bonus(2 Lakh +3 Lakh +4 Lakh)" -> "15 LPA"
@@ -1287,8 +1363,8 @@ export function extractJobDetails(text: string): ExtractedJobDetails {
     const tctcHeaderIndex = cleanWithLines.search(/\b(?:TCTC|Total\s+CTC)\b/i);
     if (tctcHeaderIndex !== -1) {
       const beforeTctc = cleanWithLines.slice(0, tctcHeaderIndex);
-      const lastTableStart = beforeTctc.lastIndexOf('Course') !== -1 
-        ? beforeTctc.lastIndexOf('Course') 
+      const lastTableStart = beforeTctc.lastIndexOf('Course') !== -1
+        ? beforeTctc.lastIndexOf('Course')
         : beforeTctc.lastIndexOf('CTC');
       const sliceStart = lastTableStart !== -1 ? lastTableStart : tctcHeaderIndex;
       const tctcSlice = cleanWithLines.slice(sliceStart, sliceStart + 800);
@@ -1665,7 +1741,7 @@ export function extractJobDetails(text: string): ExtractedJobDetails {
     // A JD pointer is not a city. EA's "EA Hyderabad office in person(No remote)"
     // describes the Hyderabad office; "in person" is not part of the location.
     if (/^(?:refer|see|check)\b/i.test(locMatch[1]) ||
-        /^(?:refer|see|check)\s+(?:the\s+)?(?:attached\s+)?(?:jd(?:['’]s)?|attachment)/i.test(rawLoc)) rawLoc = '';
+      /^(?:refer|see|check)\s+(?:the\s+)?(?:attached\s+)?(?:jd(?:['’]s)?|attachment)/i.test(rawLoc)) rawLoc = '';
     const namedOffice = rawLoc.match(/\b(Bangalore|Bengaluru|Hyderabad|Pune|Mumbai|Chennai|Gurgaon|Gurugram|Noida|Delhi|Kolkata|Ahmedabad)\s+office\b/i);
     if (namedOffice && /\bin\s+person\b/i.test(locMatch[1])) rawLoc = namedOffice[1];
 

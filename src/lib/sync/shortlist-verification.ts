@@ -38,10 +38,12 @@ export function evaluateCachedShortlistRosters(params: {
   identityTokens: string[];
 }): CachedRosterEvaluation {
   const identityTokens = new Set(params.identityTokens.map(normalizedIdentity).filter(Boolean));
-  const possibleRoster = params.rosters.some((roster) =>
-    !isAppliedRoster(roster.filename) &&
-    (/shortlist|selection[_\s-]*list|selected[_\s-]*student|shortlisted/i.test(roster.filename) || params.shortlistContext)
-  );
+  const possibleRoster = params.rosters.some((roster) => {
+    if (isAppliedRoster(roster.filename)) return false;
+    const named = /shortlist|selection[_\s-]*list|selected[_\s-]*student|shortlisted/i.test(roster.filename);
+    const sheet = /\.(xlsx|xls|csv)$/i.test(roster.filename);
+    return named || (sheet && params.shortlistContext);
+  });
   const relevant = params.rosters.filter((roster) => {
     if (!/\.(xlsx|xls|csv)$/i.test(roster.filename) || isAppliedRoster(roster.filename)) return false;
     const namedShortlist = /shortlist|selection[_\s-]*list|selected[_\s-]*student|shortlisted/i.test(roster.filename);

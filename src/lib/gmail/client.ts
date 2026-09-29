@@ -26,7 +26,16 @@ export interface ParsedEmail {
   senderEmail: string;
   messageId?: string | null;
   subject: string;
+  /**
+   * Authoritative receipt time: Gmail's `internalDate` (when the mailbox actually
+   * received the message). Falls back to the RFC `Date` header, then to wall clock,
+   * only when Gmail does not report an internal date.
+   */
   receivedAt: Date;
+  /** RFC `Date` header: when the *sender* claims the message was sent. */
+  dateHeader?: Date | null;
+  /** Gmail `internalDate`: authoritative mailbox receipt time. */
+  internalDate?: Date | null;
   bodySnippet: string;
   bodyPlain: string;
   bodyHtml: string;
@@ -47,7 +56,7 @@ export interface ParsedAttachment {
   mimeType: string;
   size: number;
   extractedRows?: Array<{ sheetName: string; rows: unknown[][] }>;
-  parseStatus?: 'pending' | 'complete' | 'error';
+  parseStatus?: 'pending' | 'processing' | 'complete' | 'error' | 'deferred' | 'ignored';
 }
 
 // ============================================
@@ -233,6 +242,8 @@ export interface MessageMetadata {
   messageId: string | null;
   subject: string;
   receivedAt: Date;
+  dateHeader?: Date | null;
+  internalDate?: Date | null;
   snippet: string;
 }
 
@@ -266,7 +277,7 @@ export async function fetchMessageMetadata(
   const headerMessageId = getHeader('Message-ID') || getHeader('Message-Id') || null;
   const subject = getHeader('Subject');
   const dateStr = getHeader('Date');
-  const receivedAt = dateStr ? new Date(dateStr) : new Date();
+  const { receivedAt, dateHeader, internalDate } = resolveReceivedAt(message.internalDate, dateStr);
 
   return {
     id: message.id || headerMessageId || '',
@@ -276,6 +287,8 @@ export async function fetchMessageMetadata(
     messageId: headerMessageId,
     subject,
     receivedAt,
+    dateHeader,
+    internalDate,
     snippet: message.snippet || '',
   };
 }
@@ -308,7 +321,7 @@ export async function fetchMessageDetail(
   const headerMessageId = getHeader('Message-ID') || getHeader('Message-Id') || null;
   const subject = getHeader('Subject');
   const dateStr = getHeader('Date');
-  const receivedAt = dateStr ? new Date(dateStr) : new Date();
+  const { receivedAt, dateHeader, internalDate } = resolveReceivedAt(message.internalDate, dateStr);
 
   // Extract body
   const { plain, html } = extractBody(message.payload);
@@ -324,6 +337,8 @@ export async function fetchMessageDetail(
     messageId: headerMessageId,
     subject,
     receivedAt,
+    dateHeader,
+    internalDate,
     bodySnippet: message.snippet || '',
     bodyPlain: plain,
     bodyHtml: html,
@@ -343,6 +358,32 @@ export async function fetchMessageDetail(
 function extractEmailAddress(fromHeader: string): string {
   const match = fromHeader.match(/<([^>]+)>/);
   return match ? match[1] : fromHeader;
+}
+
+/**
+ * Resolves the authoritative receipt time for a message.
+ *
+ * Gmail's `internalDate` is the time the mailbox actually received the message and
+ * is the authoritative source for `received_at`. The RFC `Date` header only records
+ * what the *sender* claims (and is easily wrong, or duplicated across a re-send),
+ * so it is kept as a separate value. Wall clock is a last resort for messages where
+ * Gmail omits both, so the archive never stores a null receipt time.
+ */
+export function resolveReceivedAt(
+  internalDate: string | number | null | undefined,
+  dateHeader: string | null | undefined
+): { receivedAt: Date; dateHeader: Date | null; internalDate: Date | null } {
+  const parsedInternal = internalDate !== null && internalDate !== undefined && internalDate !== ''
+    ? new Date(Number(internalDate))
+    : null;
+  const internal = parsedInternal && !Number.isNaN(parsedInternal.getTime()) ? parsedInternal : null;
+  const parsedDateHeader = dateHeader ? new Date(dateHeader) : null;
+  const header = parsedDateHeader && !Number.isNaN(parsedDateHeader.getTime()) ? parsedDateHeader : null;
+  return {
+    receivedAt: internal || header || new Date(),
+    dateHeader: header,
+    internalDate: internal,
+  };
 }
 
 /**

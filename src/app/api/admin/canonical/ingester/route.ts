@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { requireAdmin } from '@/lib/auth/admin';
 import { createAdminClient } from '@/lib/supabase/admin';
+import { isSupportedWorkbookAttachment } from '@/lib/sync/attachment-status';
 
 export const dynamic = 'force-dynamic';
 
@@ -27,20 +28,28 @@ export async function GET() {
       return NextResponse.json({ ingester: null }, { headers: { 'Cache-Control': 'no-store' } });
     }
 
-    const [accountResult, archiveResult, attachmentResult, failedAttachmentResult] = await Promise.all([
+    const [accountResult, archiveResult, attachmentResult, attachmentStatusResult] = await Promise.all([
       supabase.from('gmail_accounts').select('email,is_connected,last_sync_at,last_history_id').eq('id', state.gmail_account_id).maybeSingle(),
       supabase.from('college_emails').select('id', { count: 'exact', head: true }),
       supabase.from('college_attachments').select('id', { count: 'exact', head: true }),
-      supabase.from('college_attachments').select('id,filename,parse_error').eq('parse_status', 'error'),
+      supabase.from('college_attachments').select('id,filename,parse_status'),
     ]);
-    for (const result of [accountResult, archiveResult, attachmentResult, failedAttachmentResult]) {
+    for (const result of [accountResult, archiveResult, attachmentResult, attachmentStatusResult]) {
       if (result.error) throw result.error;
     }
 
     const pendingIds = Array.isArray(state.pending_message_ids) ? state.pending_message_ids : [];
-    const failedAttachments = failedAttachmentResult.data || [];
-    const unsupportedAttachments = failedAttachments.filter((attachment) =>
-      !/\.(xlsx|xls|csv)$/i.test(attachment.filename || '')
+    const attachmentRows = attachmentStatusResult.data || [];
+    // `error` is now reserved for retryable workbook failures. Unsupported formats live in
+    // the terminal `deferred` (PDF/DOC/DOCX, future JD parsing) and `ignored` (images)
+    // states, and legacy non-workbook `error` rows are still reported as unsupported.
+    const unsupportedAttachments = attachmentRows.filter((attachment) =>
+      attachment.parse_status === 'deferred' ||
+      attachment.parse_status === 'ignored' ||
+      (attachment.parse_status === 'error' && !isSupportedWorkbookAttachment(attachment.filename || ''))
+    ).length;
+    const failedAttachments = attachmentRows.filter((attachment) =>
+      attachment.parse_status === 'error' && isSupportedWorkbookAttachment(attachment.filename || '')
     ).length;
     return NextResponse.json({
       ingester: {
@@ -57,7 +66,7 @@ export async function GET() {
         lastError: state.last_error,
         canonicalEmails: archiveResult.count || 0,
         attachments: attachmentResult.count || 0,
-        failedAttachments: failedAttachments.length - unsupportedAttachments,
+        failedAttachments,
         unsupportedAttachments,
       },
     }, { headers: { 'Cache-Control': 'no-store' } });

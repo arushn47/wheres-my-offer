@@ -198,7 +198,7 @@ function getCleanEmailSummary(
       subLower.includes('selected candidates')
     ) {
       if (isMatched === false) {
-        return `Official ${companyName} round details and shortlist roster.`;
+        return `Your ID wasn't found in the ${companyName} shortlist roster.`;
       }
       return `Registrations screened and shortlist confirmed for ${companyName}. Candidate matches verified in attachment.`;
     }
@@ -953,7 +953,7 @@ export default function CompanyDetailClient({
               const iconCls = matchedCandidate
                 ? 'border-emerald-500/50 bg-[#121218] text-emerald-400'
                 : isNotShortlisted
-                ? 'border-zinc-700 bg-[#121218] text-zinc-500'
+                ? 'border-rose-500/50 bg-rose-500/10 text-rose-300'
                 : isOffer
                 ? 'border-emerald-500/50 bg-[#121218] text-emerald-400'
                 : isInterview
@@ -1038,9 +1038,9 @@ export default function CompanyDetailClient({
                             {isNotShortlisted && (
                                 <div
                                   data-testid={`not-shortlisted-evidence-${idx}`}
-                                  className="mt-2 flex min-w-0 items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-950/40 px-2.5 py-2 text-[10px] text-zinc-400"
+                                  className="mt-2 flex min-w-0 items-center gap-2 rounded-lg border border-rose-500/30 bg-rose-500/[0.07] px-2.5 py-2 text-[10px] text-rose-200"
                                 >
-                                  <FileSpreadsheet className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
+                                  <FileSpreadsheet className="h-3.5 w-3.5 shrink-0 text-rose-400" />
                                   <span className="truncate" title={email.attachmentName || email.subject}>
                                     Not listed in {email.attachmentName || 'the shortlist'}
                                   </span>

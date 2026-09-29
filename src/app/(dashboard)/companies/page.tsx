@@ -65,20 +65,7 @@ export default async function CompaniesPage() {
       .or('ctc.not.is.null,location.not.is.null,stipend.not.is.null,role.not.is.null'),
   ]);
 
-  const driveIds = (applications || []).map((application) => application.placement_drive_id).filter(Boolean);
-  const verificationResult = driveIds.length > 0
-    ? await supabase
-        .from('shortlist_verification_state')
-        .select('placement_drive_id,verification_state')
-        .eq('user_id', session.userId)
-        .in('placement_drive_id', driveIds)
-    : { data: [], error: null };
-  if (verificationResult.error) {
-    console.warn('[CompaniesPage] Shortlist verification state unavailable:', verificationResult.error.message);
-  }
-  const verificationByDrive = new Map(
-    (verificationResult.data || []).map((row) => [row.placement_drive_id, row.verification_state])
-  );
+  // Shortlist verdicts are read straight from applications.status; no verification table.
 
   const collegeAccount = accounts?.find((a) => a.account_type === 'college');
   const userCampus = detectCampus(collegeAccount?.email);
@@ -254,7 +241,7 @@ export default async function CompaniesPage() {
       },
       latestEvent: eventMap.get(entityId) || null,
       events: allEventsByEntity.get(entityId) || [],
-      shortlistVerificationState: drive?.id ? verificationByDrive.get(drive.id) || null : null,
+      shortlistVerificationState: null,
       neoIdMatched: drive ? matchedDriveIds.has(drive.id) : (app?.placement_drive_id ? matchedDriveIds.has(app.placement_drive_id) : false),
       emailCount: 0,
     };

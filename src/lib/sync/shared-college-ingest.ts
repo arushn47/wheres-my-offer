@@ -8,6 +8,12 @@ import { extractAllDriveNumbers, extractEvents, extractJobDetails } from '@/lib/
 import { processEmailForEventsAndStatus } from '@/lib/sync/status-engine';
 import { hasSharedDriveFanOutEvidence, isShortlistMatchEvidence } from '@/lib/sync/participation-evidence';
 import { normalizeDriveNumber } from '@/lib/drive-number';
+import {
+  classifyUnsupportedAttachment,
+  isSupportedWorkbookAttachment,
+  isTerminalUnsupportedRow,
+  TRANSIENT_ATTACHMENT_ERROR,
+} from '@/lib/sync/attachment-status';
 
 interface SharedDriveRow {
   id: string;
@@ -23,11 +29,6 @@ interface SharedCompanyRow {
   aliases: string[] | null;
 }
 
-const UNSUPPORTED_ATTACHMENT_ERROR = 'Unsupported attachment format; deferred.';
-
-function isSupportedWorkbookAttachment(filename: string): boolean {
-  return /\.(xlsx|xls|csv)$/i.test(filename);
-}
 
 interface SharedCircularRow {
   id: string;
@@ -210,10 +211,27 @@ export async function ingestSharedCollegeCircular(params: {
         && (row.filename || '') === attachment.filename
         && (row.size_bytes || 0) === (attachment.size || 0));
   };
+  // Unsupported / image attachments are never hashed, but rows written before the
+  // classification existed may still carry a content_hash from the era when every
+  // format was downloaded. Resolve those by attachment_id or filename+size, ignoring
+  // the hash, so a later re-ingest of the same message can never create a second row
+  // for an attachment we deliberately never parse.
+  const findPriorUnsupportedRow = (attachment: { attachmentId: string; filename: string; size: number }) => {
+    const rows = existingAttachments.data || [];
+    return rows.find((row) => row.attachment_id === attachment.attachmentId)
+      || rows.find((row) => (row.filename || '') === attachment.filename
+        && (row.size_bytes || 0) === (attachment.size || 0));
+  };
   for (const attachment of parsedEmail.attachments) {
     if (!isSupportedWorkbookAttachment(attachment.filename)) {
-      const prior = findPriorRow(attachment, null);
-      if (prior?.parse_status === 'error' && /unsupported attachment format; deferred/i.test(prior.parse_error || '')) continue;
+      // Images and other non-workbook formats are terminal and deliberately NOT
+      // downloaded or retried. They are still recorded so the email's attachment
+      // inventory (and the shortlist scanner's "a roster may exist here" signal)
+      // stays faithful. A row that already carries this exact classification is left
+      // untouched so re-ingesting the message is a true no-op.
+      const classification = classifyUnsupportedAttachment(attachment.filename);
+      const prior = findPriorUnsupportedRow(attachment);
+      if (isTerminalUnsupportedRow(prior, classification)) continue;
       const unsupportedPayload = {
         college_email_id: canonicalId,
         content_key: `${canonicalId}:${attachment.attachmentId}`,
@@ -224,8 +242,8 @@ export async function ingestSharedCollegeCircular(params: {
         size_bytes: attachment.size,
         content_hash: null,
         extracted_rows: null,
-        parse_status: 'error' as const,
-        parse_error: UNSUPPORTED_ATTACHMENT_ERROR,
+        parse_status: classification.status,
+        parse_error: classification.error,
         updated_at: new Date().toISOString(),
       };
       const write = prior
@@ -249,7 +267,6 @@ export async function ingestSharedCollegeCircular(params: {
       }
       continue;
     }
-    if (prior?.parse_status === 'error' && /unsupported attachment format; deferred/i.test(prior.parse_error || '')) continue;
     const attachmentPayload = {
       college_email_id: canonicalId,
       content_key: `${canonicalId}:${attachment.attachmentId}`,
@@ -261,7 +278,7 @@ export async function ingestSharedCollegeCircular(params: {
       content_hash: contentHash,
       extracted_rows: parsedAttachment.extractedRows,
       parse_status: parsedAttachment.parseStatus,
-      parse_error: parsedAttachment.parseStatus === 'error' ? 'Attachment fetch or parser failed; retry on a later worker pass.' : null,
+      parse_error: parsedAttachment.parseStatus === 'error' ? TRANSIENT_ATTACHMENT_ERROR : null,
       updated_at: new Date().toISOString(),
     };
     const write = prior

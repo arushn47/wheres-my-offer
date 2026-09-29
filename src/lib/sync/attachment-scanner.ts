@@ -6,6 +6,11 @@ import { normalizeDriveNumber } from '@/lib/drive-number';
 import { isShortlistMatchEvidence } from '@/lib/sync/participation-evidence';
 import { evaluateCachedShortlistRosters, getVerifiedShortlistStatus, resolveDriveVerification } from '@/lib/sync/shortlist-verification';
 import { isSharedArchiveComplete } from '@/lib/sync/shared-college-state';
+import { removeDriveEvents } from '@/lib/sync/drive-events';
+import {
+  notifyShortlistAbsent,
+  notifyShortlistMatch,
+} from '@/lib/notifications/service';
 
 /**
  * Scans `.xlsx` / `.xls` attachments on circular emails linked to placement drives
@@ -148,8 +153,8 @@ export async function scanAndPersistCandidateMatches(
           match_type: 'xlsx_cell',
           matched_round_type: /interview|selection\s+process/i.test(email.subject || '') ? 'interview'
             : /final\s*selection|selection\s*list/i.test(email.subject || '') ? 'selected'
-            : /online\s+test|coding\s+test|assessment|test\s+shortlist/i.test(email.subject || '') ? 'test'
-            : null,
+              : /online\s+test|coding\s+test|assessment|test\s+shortlist/i.test(email.subject || '') ? 'test'
+                : null,
           matched_value: excelMatch.details,
           confidence: 'high',
         };
@@ -254,17 +259,20 @@ export async function scanSharedCollegeCandidateMatches(
   } : null);
 
   const companyMap = new Map((companies || []).map((company) => [company.id, company]));
+  const driveById = new Map((drives || []).map((d) => [d.id, d]));
+
   const canonicalEmails: Array<{
     id: string;
     subject: string | null;
     classification: string | null;
     parsed_company_name: string | null;
     parsed_drive_numbers: string[] | null;
+    received_at: string | null;
   }> = [];
   for (let from = 0; ; from += 1000) {
     const { data, error } = await supabase
       .from('college_emails')
-      .select('id, subject, classification, parsed_company_name, parsed_drive_numbers')
+      .select('id, subject, classification, parsed_company_name, parsed_drive_numbers,received_at')
       .eq('processing_status', 'complete')
       .range(from, from + 999);
     if (error) throw error;
@@ -294,6 +302,24 @@ export async function scanSharedCollegeCandidateMatches(
   // relevant roster" parked whole drives at `deferred` forever. Recognize the same
   // workbook by filename+size (the legacy content-identity rule) and use the
   // already-parsed copy instead of poisoning the drive's verification.
+  // Circulars that already produced a user-scoped event are authoritatively tied to that
+  // drive: the event insert records its source circular's college_email_id. This is exact
+  // evidence, unlike company-name matching, which must defer whenever a company has
+  // sibling drives (e.g. two Deloitte drives) and could otherwise never prove absence —
+  // leaving real "not shortlisted" results stuck at PPT Scheduled / Applied forever.
+  const { data: userDriveEvents, error: userDriveEventsError } = await supabase
+    .from('events')
+    .select('placement_drive_id, college_email_id')
+    .eq('user_id', userId)
+    .not('college_email_id', 'is', null);
+  if (userDriveEventsError) throw userDriveEventsError;
+  const driveByUserEventEmail = new Map<string, string>();
+  for (const ev of userDriveEvents || []) {
+    if (ev.college_email_id && ev.placement_drive_id && !driveByUserEventEmail.has(ev.college_email_id)) {
+      driveByUserEventEmail.set(ev.college_email_id, ev.placement_drive_id);
+    }
+  }
+
   const parsedRowsByFile = new Map<string, unknown>();
   for (const attachment of cachedAttachments) {
     if (attachment.parse_status !== 'complete' || !attachment.extracted_rows) continue;
@@ -312,7 +338,15 @@ export async function scanSharedCollegeCandidateMatches(
       : { parseStatus: attachment.parse_status, extractedRows: attachment.extracted_rows };
   };
   const canonicalIdsWithAttachments = new Set((cachedAttachments || []).map((attachment) => attachment.college_email_id));
-  const canonicalEmailsWithAttachments = canonicalEmails.filter((email) => canonicalIdsWithAttachments.has(email.id));
+  // Circulars that already produced a user-scoped event participate in verification even
+  // without a stored attachment row (e.g. body-text shortlists or attachment rows lost to
+  // re-ingest) — otherwise a verified negative can never be written for them.
+  const canonicalIdsFromUserEvents = new Set(
+    Array.from(driveByUserEventEmail.keys()).filter((id) => !canonicalIdsWithAttachments.has(id))
+  );
+  const canonicalEmailsWithAttachments = canonicalEmails.filter((email) =>
+    canonicalIdsWithAttachments.has(email.id) || canonicalIdsFromUserEvents.has(email.id)
+  );
   const attachmentNamesByEmail = new Map<string, string[]>();
   for (const attachment of cachedAttachments || []) {
     const names = attachmentNamesByEmail.get(attachment.college_email_id) || [];
@@ -349,36 +383,20 @@ export async function scanSharedCollegeCandidateMatches(
   );
 
   const existingVerification = new Map<string, string>();
-  const { data: storedVerification, error: storedVerificationError } = await supabase
-    .from('shortlist_verification_state')
-    .select('placement_drive_id,verification_state')
-    .eq('user_id', userId)
-    .in('placement_drive_id', Array.from(eligibleDriveIds));
-  if (storedVerificationError) throw storedVerificationError;
-  for (const row of storedVerification || []) existingVerification.set(row.placement_drive_id, row.verification_state);
   const appRowsByDrive = new Map((applications || []).map((app) => [app.placement_drive_id, app]));
-  const pendingSeeds = Array.from(eligibleDriveIds)
-    .filter((driveId) => appRowsByDrive.has(driveId) && !appRowsByDrive.get(driveId)?.manual_override && !existingVerification.has(driveId))
-    .map((driveId) => ({
-      user_id: userId,
-      placement_drive_id: driveId,
-      verification_state: 'pending',
-      checked_roster_count: 0,
-      last_error: null,
-      checked_at: null,
-      updated_at: new Date().toISOString(),
-    }));
-  if (pendingSeeds.length) {
-    const { error: seedError } = await supabase
-      .from('shortlist_verification_state')
-      .upsert(pendingSeeds, { onConflict: 'user_id,placement_drive_id', ignoreDuplicates: true });
-    if (seedError) throw seedError;
-  }
 
   const verificationByDrive = new Map<string, {
     rosterResults: Array<{ relevant: boolean; parsed: boolean; candidatePresent: boolean }>;
-    matchDetails: string | null;
+    matchDetails: string | null; latestRosterAt?: number; matchEmailId?: string;
   }>();
+  // Ambiguous shortlist circulars (company name spanning sibling drives, or no resolvable
+  // drive at all) are held aside instead of poisoning verificationByDrive immediately.
+  // A circular that IS uniquely attributable to the user's drive — by its own drive number,
+  // by the drive's source circular, or by the user's own event link — supersedes them:
+  // roster content for THIS drive is exact evidence, while an ambiguous circular is a guess
+  // that must never outvote it (Deloitte runs several sibling drives under one company name,
+  // so name-matched circulars could otherwise defer the drive forever).
+  const ambiguousByDrive = new Map<string, { receivedAt: number }>();
   for (const match of existingMatches || []) {
     if (!match.placement_drive_id || !isShortlistMatchEvidence({
       matchType: match.match_type,
@@ -387,7 +405,7 @@ export async function scanSharedCollegeCandidateMatches(
     })) continue;
     const state = verificationByDrive.get(match.placement_drive_id) || { rosterResults: [], matchDetails: null };
     state.rosterResults.push({ relevant: true, parsed: true, candidatePresent: true });
-    state.matchDetails = match.matched_value || state.matchDetails;
+    state.matchEmailId = match.college_email_id || state.matchEmailId;
     verificationByDrive.set(match.placement_drive_id, state);
   }
 
@@ -410,17 +428,22 @@ export async function scanSharedCollegeCandidateMatches(
       .map((number) => normalizeDriveNumber(number))
       .map((number) => (number ? driveByNumber.get(number) : undefined))
       .filter(Boolean) as string[];
-    let driveId = directDriveId || (new Set(matchedByNumber).size === 1 ? matchedByNumber[0] : undefined);
+    const eventDriveId = driveByUserEventEmail.get(email.id);
+    let driveId = directDriveId
+      || (eventDriveId && eligibleDriveIds.has(eventDriveId) ? eventDriveId : undefined)
+      || (new Set(matchedByNumber).size === 1 ? matchedByNumber[0] : undefined);
     if (!driveId && email.parsed_company_name) {
       const companyDrives = driveByCompanyName.get(email.parsed_company_name.toLowerCase().trim()) || [];
       if (companyDrives.length === 1) driveId = companyDrives[0];
       else if (companyDrives.length > 1) {
         // An ambiguous same-company circular cannot prove absence for any one
-        // sibling drive. Defer only the drives evidenced for this user.
+        // sibling drive. Hold it aside; it only defers drives with no attributable
+        // roster evidence of their own (see the reconciliation below).
         for (const possibleDriveId of companyDrives.filter((id) => eligibleDriveIds.has(id))) {
-          const unresolved = verificationByDrive.get(possibleDriveId) || { rosterResults: [], matchDetails: null };
-          unresolved.rosterResults.push({ relevant: true, parsed: false, candidatePresent: false });
-          verificationByDrive.set(possibleDriveId, unresolved);
+          const prior = ambiguousByDrive.get(possibleDriveId);
+          ambiguousByDrive.set(possibleDriveId, {
+            receivedAt: Math.max(prior?.receivedAt || 0, email.received_at ? new Date(email.received_at).getTime() : 0),
+          });
         }
       }
     }
@@ -452,9 +475,10 @@ export async function scanSharedCollegeCandidateMatches(
       }
     }
     for (const driveId of candidates) {
-      const unresolved = verificationByDrive.get(driveId) || { rosterResults: [], matchDetails: null };
-      unresolved.rosterResults.push({ relevant: true, parsed: false, candidatePresent: false });
-      verificationByDrive.set(driveId, unresolved);
+      const prior = ambiguousByDrive.get(driveId);
+      ambiguousByDrive.set(driveId, {
+        receivedAt: Math.max(prior?.receivedAt || 0, email.received_at ? new Date(email.received_at).getTime() : 0),
+      });
     }
   }
 
@@ -493,6 +517,12 @@ export async function scanSharedCollegeCandidateMatches(
       ].filter(Boolean),
     });
     const driveResult = verificationByDrive.get(driveId) || { rosterResults: [], matchDetails: null };
+    if (evaluation.state === 'verified_present' || evaluation.state === 'verified_absent') {
+      driveResult.latestRosterAt = Math.max(
+        driveResult.latestRosterAt || 0,
+        email.received_at ? new Date(email.received_at).getTime() : 0
+      );
+    }
     const hasPositiveEvidence = existingMatches?.some((match) =>
       match.placement_drive_id === driveId && match.college_email_id === email.id && isShortlistMatchEvidence({
         matchType: match.match_type,
@@ -508,16 +538,20 @@ export async function scanSharedCollegeCandidateMatches(
     if (evaluation.state === 'verified_present' && evaluation.matchingRoster) {
       driveResult.matchDetails = evaluation.matchingRoster.details;
     }
+
+    if (evaluation.state === 'verified_present') {
+      driveResult.matchEmailId = email.id;
+    }
     verificationByDrive.set(driveId, driveResult);
     if (existingRefs.has(`${driveId}|${email.id}`) || evaluation.state !== 'verified_present') continue;
 
     const round = /interview|selection\s+process/i.test(email.subject || '')
       ? 'interview'
       : /final\s*selection|selection\s*list/i.test(email.subject || '')
-      ? 'selected'
-      : /online\s+test|coding\s+test|assessment|test\s+shortlist/i.test(email.subject || '')
-      ? 'test'
-      : null;
+        ? 'selected'
+        : /online\s+test|coding\s+test|assessment|test\s+shortlist/i.test(email.subject || '')
+          ? 'test'
+          : null;
     const { error } = await supabase.from('candidate_matches').insert({
       user_id: userId,
       placement_drive_id: driveId,
@@ -538,38 +572,31 @@ export async function scanSharedCollegeCandidateMatches(
     }
   }
 
+  // Reconcile: ambiguous circulars defer a drive ONLY when nothing attributable was
+  // parsed for it. A roster tied to this exact drive (unique drive number, source
+  // circular, or the user's own event link) is exact evidence and supersedes the
+  // company-name guess — without this, one company with several sibling drives
+  // (Deloitte) could never reach verified_absent at all.
+  for (const driveId of ambiguousByDrive.keys()) {
+    const result = verificationByDrive.get(driveId);
+    const hasAttributedParsedRoster = Boolean(result?.rosterResults.some((entry) => entry.parsed));
+    if (hasAttributedParsedRoster) continue;
+    const unresolved = result || { rosterResults: [], matchDetails: null };
+    unresolved.rosterResults.push({ relevant: true, parsed: false, candidatePresent: false });
+    verificationByDrive.set(driveId, unresolved);
+  }
+
   const applicationsByDrive = new Map((applications || []).map((application) => [application.placement_drive_id, application]));
   for (const driveId of eligibleDriveIds) {
     const app = applicationsByDrive.get(driveId);
     if (!app || app.manual_override) continue;
     const result = verificationByDrive.get(driveId);
     if (!result) {
-      const priorState = existingVerification.get(driveId);
-      if (priorState === 'verified_present' || priorState === 'verified_absent' || priorState === 'not_published') continue;
-      const emptyScanState = archiveReadyForNegative ? 'not_published' : 'deferred';
-      const { error: pendingError } = await supabase.from('shortlist_verification_state').upsert({
-        user_id: userId,
-        placement_drive_id: driveId,
-        verification_state: emptyScanState,
-        checked_roster_count: 0,
-        last_error: archiveReadyForNegative ? null : 'Shared College archive scan is not complete yet.',
-        checked_at: archiveReadyForNegative ? new Date().toISOString() : null,
-        updated_at: new Date().toISOString(),
-      }, { onConflict: 'user_id,placement_drive_id' });
-      if (pendingError) throw pendingError;
-      if (app.status === 'not_shortlisted') {
-        const { error: appError } = await supabase
-          .from('applications')
-          .update({ status: 'applied', status_source: 'sync_reprocess', last_updated: new Date().toISOString() })
-          .eq('user_id', userId)
-          .eq('placement_drive_id', driveId);
-        if (appError) throw appError;
-      }
+      // No relevant roster anywhere in the archive for this drive: nothing to judge.
       continue;
     }
     const verification = resolveDriveVerification({ scans: result.rosterResults, archiveComplete: archiveReadyForNegative });
-    const priorState = existingVerification.get(driveId);
-    if (verification.state === 'not_published' && priorState === 'verified_absent') {
+    if (verification.state === 'not_published' && app.status === 'not_shortlisted') {
       verification.state = 'verified_absent';
     }
     const hasPositiveMatch = (existingMatches || []).some((match) =>
@@ -586,28 +613,6 @@ export async function scanSharedCollegeCandidateMatches(
       manualOverride: Boolean(app.manual_override),
     });
 
-    const { error: verificationError } = await supabase
-      .from('shortlist_verification_state')
-      .upsert({
-        user_id: userId,
-        placement_drive_id: driveId,
-        verification_state: verification.state,
-        checked_roster_count: verification.checkedRosterCount,
-        last_error: verification.state === 'deferred' ? 'One or more relevant rosters could not be verified.' : null,
-        checked_at: verification.state === 'deferred' ? null : new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      }, { onConflict: 'user_id,placement_drive_id' });
-    if (verificationError) throw verificationError;
-
-    if (['deferred', 'not_published'].includes(verification.state) && app.status === 'not_shortlisted') {
-      const { error: appError } = await supabase
-        .from('applications')
-        .update({ status: 'applied', status_source: 'sync_reprocess', last_updated: new Date().toISOString() })
-        .eq('user_id', userId)
-        .eq('placement_drive_id', driveId);
-      if (appError) throw appError;
-    }
-
     if (nextStatus && app.status !== nextStatus) {
       const { error: appError } = await supabase
         .from('applications')
@@ -615,6 +620,56 @@ export async function scanSharedCollegeCandidateMatches(
         .eq('user_id', userId)
         .eq('placement_drive_id', driveId);
       if (appError) throw appError;
+    }
+
+    const statusNow = nextStatus ?? app.status;
+
+    const isFresh =
+      (result.latestRosterAt ?? 0) >
+      Date.now() - 7 * 24 * 60 * 60 * 1000;
+
+    const companyName =
+      companyMap.get(driveById.get(driveId)?.company_id ?? '')?.name ||
+      'Placement drive';
+
+    try {
+      if (
+        verification.state === 'verified_absent' &&
+        !hasPositiveMatch &&
+        statusNow === 'not_shortlisted'
+      ) {
+        await removeDriveEvents(supabase, userId, driveId, {
+          excludeTypes: ['registration_deadline'],
+          onlyUnfinished: true,
+        });
+
+        if (isFresh) {
+          await notifyShortlistAbsent({
+            userId,
+            placementDriveId: driveId,
+            companyName,
+          });
+        }
+      } else if (
+        hasPositiveMatch &&
+        statusNow === 'shortlisted' &&
+        isFresh &&
+        result.matchEmailId
+      ) {
+        await notifyShortlistMatch({
+          userId,
+          placementDriveId: driveId,
+          companyName,
+          neoId: userNeoId || userEmail,
+          emailSubject: '',
+          sourceEmailId: result.matchEmailId,
+        });
+      }
+    } catch (sideEffectErr) {
+      console.warn(
+        '[scanSharedCollegeCandidateMatches] side effects failed:',
+        sideEffectErr
+      );
     }
   }
 

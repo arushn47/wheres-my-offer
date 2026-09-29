@@ -50,7 +50,6 @@ export async function POST() {
     // and college_emails catalog rows intentionally remain available to everyone.
     await Promise.all([
       runCleanupStep('shortlist matches', supabase.from('candidate_matches').delete().eq('user_id', userId)),
-      runCleanupStep('shortlist verification state', supabase.from('shortlist_verification_state').delete().eq('user_id', userId)),
       runCleanupStep('events', supabase.from('events').delete().eq('user_id', userId)),
       runCleanupStep('notifications', supabase.from('notifications').delete().eq('user_id', userId)),
     ]);

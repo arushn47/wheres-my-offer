@@ -10,7 +10,10 @@ import {
   isShortlistMatchEvidence,
 } from '@/lib/sync/participation-evidence';
 import { evaluateCachedShortlistRosters } from '@/lib/sync/shortlist-verification';
+import { removeDriveEvents } from '@/lib/sync/drive-events';
+import { shouldReplaceRegistrationDeadline } from '@/lib/sync/events';
 
+// existingApp select: add `registration_deadline`
 /**
  * Converts HTML email content to clean plain text so table cells, divs, and paragraphs
  * containing Neo IDs or text are fully searchable.
@@ -46,9 +49,9 @@ function announcedShortlistRound(subject: string, body: string): ShortlistRound 
   // and final selection requires an interview match. An ambiguous "next round"/"result"
   // has no provable predecessor and must not cause rejection.
   if (/interview|selection\s+process/i.test(subject) ||
-      (/next\s+round/i.test(subject) && /interview|in[\s-]*person|f2f/i.test(body))) return 'interview';
+    (/next\s+round/i.test(subject) && /interview|in[\s-]*person|f2f/i.test(body))) return 'interview';
   if (/final\s*selection|offer\s*(?:letter|release)|selection\s*list/i.test(subject) &&
-      !/interview|test/i.test(subject)) return 'selected';
+    !/interview|test/i.test(subject)) return 'selected';
   if (/online\s+test|coding\s+test|assessment|test\s+(?:shortlist|link|invitation|schedule)/i.test(subject)) return 'test';
   return null;
 }
@@ -155,7 +158,7 @@ export async function processEmailForEventsAndStatus(
   // 0. Early check of existing application status from DB
   const { data: existingApp } = await supabase
     .from('applications')
-    .select('status, manual_override, applied_at, location, work_mode, ctc, role, stipend, notes, status_source_email_at, last_updated, eligibility, branches, cgpa_requirement, backlog_requirement')
+    .select('status, manual_override, applied_at, location, work_mode, ctc, role, stipend, notes, status_source_email_at, last_updated, eligibility, branches, cgpa_requirement, backlog_requirement, registration_deadline')
     .eq('user_id', userId)
     .eq('placement_drive_id', targetDriveId)
     .maybeSingle();
@@ -190,10 +193,10 @@ export async function processEmailForEventsAndStatus(
     /applied[_\s-]*list|opt[_\s-]*in[_\s-]*list|opt_in|eligible[_\s-]*student|registered[_\s-]*student|registration[_\s-]*list|applied[_\s-]*(?:student|candidate)/i.test(filename);
   const hasShortlistAttachment = Boolean(
     email.hasAttachments &&
-      email.attachments.some((attachment) =>
-        /shortlist|selection[_\s-]*list|test[_\s-]*shortlist|selected[_\s-]*student|shortlisted/i.test(attachment.filename) &&
-        !isAppliedRosterFilename(attachment.filename)
-      )
+    email.attachments.some((attachment) =>
+      /shortlist|selection[_\s-]*list|test[_\s-]*shortlist|selected[_\s-]*student|shortlisted/i.test(attachment.filename) &&
+      !isAppliedRosterFilename(attachment.filename)
+    )
   );
   const hasUncachedRelevantExcelAttachment = email.attachments.some((attachment) =>
     /\.(xlsx|xls|csv)$/i.test(attachment.filename) &&
@@ -240,17 +243,16 @@ export async function processEmailForEventsAndStatus(
         filename: attachment.filename,
         collegeEmailId: email.canonicalEmailId || emailDbId,
         parseStatus: attachment.parseStatus,
-          extractedRows: attachment.extractedRows,
-        })),
-        shortlistContext: isShortlistEmail,
-        identityTokens,
-      })
+        extractedRows: attachment.extractedRows,
+      })),
+      shortlistContext: isShortlistEmail,
+      identityTokens,
+    })
     : null;
-  let shortlistVerificationResult: 'verified_present' | 'pending' | null = null;
   const announcedRound = announcedShortlistRound(email.subject, fullText);
   const previousRound: ShortlistRound | null =
     announcedRound === 'interview' ? 'test' :
-    announcedRound === 'selected' ? 'interview' : null;
+      announcedRound === 'selected' ? 'interview' : null;
 
   // Body-level ID matches in application/registration rosters are not
   // candidate participation evidence. This must run before status promotion.
@@ -330,8 +332,8 @@ export async function processEmailForEventsAndStatus(
           const title = isPpt
             ? 'Pre-Placement Talk (PPT)'
             : isInterview
-            ? 'Interview'
-            : `Online Assessment${gMatch.slot ? ` (${gMatch.slot})` : ''}`;
+              ? 'Interview'
+              : `Online Assessment${gMatch.slot ? ` (${gMatch.slot})` : ''}`;
 
           const startTime = new Date(gMatch.eventDate);
           startTime.setHours(gMatch.slot && /slot\s*2/i.test(gMatch.slot) ? 14 : 9, 0, 0, 0);
@@ -384,19 +386,6 @@ export async function processEmailForEventsAndStatus(
     isInAppliedList = false;
     matchType = 'xlsx_cell';
     matchDetail = `Matched in ${filename}`;
-    shortlistVerificationResult = 'verified_present';
-  } else if (isCollegeBroadcast && cachedRosterEvaluation?.state === 'verified_absent') {
-    // This circular's own roster excludes the candidate. That is not pending news:
-    // writing `pending` here retracted an already-verified `not_shortlisted`
-    // application back to `applied` on every later pass. Absence for the whole
-    // drive is owned by the archive-wide scanner, which evaluates every relevant
-    // roster of the drive (including this one) and writes verified_absent itself.
-    shortlistVerificationResult = null;
-  } else if (
-    isCollegeBroadcast && isShortlistEmail &&
-    (!cachedRosterEvaluation || cachedRosterEvaluation.state === 'deferred')
-  ) {
-    shortlistVerificationResult = 'pending';
   }
 
   if (!isCollegeBroadcast && !isNeoMatched && email.hasAttachments && email.attachments.some((attachment) => attachment.extractedRows?.length)) {
@@ -428,9 +417,6 @@ export async function processEmailForEventsAndStatus(
     isInAppliedList,
     isEliminationEmail,
   });
-  if (isCollegeBroadcast && hasConfirmedCollegeShortlistMatch) {
-    shortlistVerificationResult = 'verified_present';
-  }
 
   if (isCollegeBroadcast) {
     const [
@@ -480,34 +466,8 @@ export async function processEmailForEventsAndStatus(
     if (!hasUserEvidence) return;
   }
 
-  if (isCollegeBroadcast && shortlistVerificationResult) {
-    const { error: verificationWriteError } = await supabase
-      .from('shortlist_verification_state')
-      .upsert({
-        user_id: userId,
-        placement_drive_id: targetDriveId,
-        verification_state: shortlistVerificationResult,
-        checked_roster_count: cachedRosterEvaluation?.checkedRosterCount || 0,
-        last_error: shortlistVerificationResult === 'pending' ? 'Relevant shortlist roster is not fully parsed.' : null,
-        checked_at: shortlistVerificationResult === 'pending' ? null : new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      }, { onConflict: 'user_id,placement_drive_id' });
-    if (verificationWriteError) throw verificationWriteError;
-
-    if (
-      shortlistVerificationResult === 'pending' &&
-      !existingApp?.manual_override &&
-      existingApp?.status === 'not_shortlisted'
-    ) {
-      const { error: provisionalStatusError } = await supabase
-        .from('applications')
-        .update({ status: 'applied', status_source: 'shortlist_verification_pending', last_updated: new Date().toISOString() })
-        .eq('user_id', userId)
-        .eq('placement_drive_id', targetDriveId);
-      if (provisionalStatusError) throw provisionalStatusError;
-      existingApp.status = 'applied';
-    }
-  }
+  // Shortlist verdicts are written directly to applications.status by the archive
+  // scanner (roster-absence) and below (roster-presence). No separate tracking state.
 
   if (isNeoMatched && (!isCollegeBroadcast || hasConfirmedCollegeShortlistMatch)) {
     // Only record genuine shortlist matches (never applied/opt-in rosters)
@@ -528,7 +488,7 @@ export async function processEmailForEventsAndStatus(
 
     const { error: candidateMatchError } = await supabase.from('candidate_matches').insert(matchPayload);
     if (candidateMatchError?.code === '23505' && announcedRound &&
-        (isShortlistEmail || hasPersonalTestCredentials)) {
+      (isShortlistEmail || hasPersonalTestCredentials)) {
       const matchQuery = supabase.from('candidate_matches')
         .update({ matched_round_type: announcedRound })
         .eq('user_id', userId)
@@ -554,6 +514,9 @@ export async function processEmailForEventsAndStatus(
   if (gsheetEventToAdd) {
     extractedEvents.push(gsheetEventToAdd);
   }
+  const regDeadlineEvt = extractedEvents.find(
+    (e) => e.eventType === 'registration_deadline' && e.startTime
+  );
 
   const isBroadcastOptOutNotice =
     /who\s+(?:wish|want)\s+to\s+opt|if\s+you\s+(?:wish|want)\s+to\s+opt|opt[\s-]*out\s+(?:form|link|google|portal)|voluntary\s+withdrawal\s+only|forms\.gle/i.test(fullText);
@@ -594,14 +557,26 @@ export async function processEmailForEventsAndStatus(
 
     await supabase.from('events').delete().eq('user_id', userId).eq('placement_drive_id', targetDriveId);
   } else {
+    const isVerifiedAbsent =
+      !existingApp?.manual_override &&
+      !isNeoMatched &&
+      (
+        existingApp?.status === 'not_shortlisted' ||
+        (isCollegeBroadcast && cachedRosterEvaluation?.state === 'verified_absent')
+      );
+
     for (const event of extractedEvents) {
+      const isDeadlineEvent = event.eventType === 'registration_deadline';
+
+      if (isVerifiedAbsent && !isDeadlineEvent) continue;
+
       // RULE: For tests, interviews, and PPTs: ONLY add to user's schedule if candidate is shortlisted or actively participating!
       const currentAppStatus = existingApp?.status || 'not_applied';
       const isEliminated = isInactiveStatus(currentAppStatus);
       const isTestOrInterview = ['online_test', 'coding_test', 'technical_interview', 'hr_interview', 'final_interview'].includes(event.eventType);
 
-      if (isEliminated && !isNeoMatched) {
-        continue; // Do not add events for companies where user is withdrawn, rejected, or eliminated
+      if (isEliminated && !isNeoMatched && !isDeadlineEvent) {
+        continue;
       }
 
       if ((isTestOrInterview || isShortlistEmail) && !isNeoMatched) {
@@ -620,49 +595,93 @@ export async function processEmailForEventsAndStatus(
       const startTimeIso = event.startTime ? event.startTime.toISOString() : null;
       const startOfDay = event.startTime
         ? new Date(
-            event.startTime.getFullYear(),
-            event.startTime.getMonth(),
-            event.startTime.getDate()
-          ).toISOString()
+          event.startTime.getFullYear(),
+          event.startTime.getMonth(),
+          event.startTime.getDate()
+        ).toISOString()
         : null;
       const endOfDay = event.startTime
         ? new Date(
-            event.startTime.getFullYear(),
-            event.startTime.getMonth(),
-            event.startTime.getDate(),
-            23,
-            59,
-            59,
-            999
-          ).toISOString()
+          event.startTime.getFullYear(),
+          event.startTime.getMonth(),
+          event.startTime.getDate(),
+          23,
+          59,
+          59,
+          999
+        ).toISOString()
         : null;
 
       let eventQuery = supabase
         .from('events')
-        .select('id, start_time, venue, mode')
+        .select('id, start_time, venue, mode, college_email_id')
         .eq('user_id', userId)
         .eq('placement_drive_id', targetDriveId)
         .eq('event_type', event.eventType);
 
-      if (startOfDay && endOfDay) {
-        eventQuery = eventQuery.gte('start_time', startOfDay).lte('start_time', endOfDay);
-      } else if (startTimeIso) {
-        eventQuery = eventQuery.eq('start_time', startTimeIso);
-      } else if (!event.startTime) {
-        eventQuery = eventQuery.is('start_time', null);
+      if (!isDeadlineEvent) {
+        if (startOfDay && endOfDay) {
+          eventQuery = eventQuery
+            .gte('start_time', startOfDay)
+            .lte('start_time', endOfDay);
+        } else if (startTimeIso) {
+          eventQuery = eventQuery.eq('start_time', startTimeIso);
+        } else if (!event.startTime) {
+          eventQuery = eventQuery.is('start_time', null);
+        }
       }
 
       const { data: existingEvents } = await eventQuery.limit(1);
 
+      const { data: compRec } = await supabase.from('companies').select('name').eq('id', companyId).single();
+      const displayComp = compRec?.name || email.subject.replace(/^(?:fwd|re|fw)\s*:\s*/i, '').slice(0, 40);
+      const finalTitle = `${displayComp} - ${event.title}`;
+      
+      const eventInsertPayload: any = {
+        user_id: userId,
+        placement_drive_id: targetDriveId,
+        event_type: event.eventType,
+        title: finalTitle,
+        start_time: startTimeIso,
+        end_time: event.endTime ? event.endTime.toISOString() : null,
+        venue: event.venue,
+        mode: event.mode,
+        confidence: event.confidence,
+        college_email_id: isCollegeBroadcast ? emailDbId : null,
+      };
+
       if (existingEvents && existingEvents.length > 0) {
-        // Event for this day/test already exists — refine details
         const updatePayload: Record<string, unknown> = {};
-        if (startTimeIso && event.hasExplicitTime) {
-          updatePayload.start_time = startTimeIso;
+
+        if (isDeadlineEvent) {
+          if (shouldReplaceRegistrationDeadline(existingEvents[0], event, isCollegeBroadcast)) {
+            updatePayload.start_time = startTimeIso;
+            updatePayload.end_time = event.endTime
+              ? event.endTime.toISOString()
+              : null;
+
+            if (isCollegeBroadcast) {
+              updatePayload.college_email_id = emailDbId;
+            }
+          }
+        } else {
+          if (startTimeIso && event.hasExplicitTime) {
+            updatePayload.start_time = startTimeIso;
+          }
+
+          if (event.endTime && event.hasExplicitTime) {
+            updatePayload.end_time = event.endTime.toISOString();
+          }
+
+          if (event.venue && event.venue !== 'Campus / Offline') {
+            updatePayload.venue = event.venue;
+          }
+
+          if (event.mode && event.mode !== 'unknown') {
+            updatePayload.mode = event.mode;
+          }
         }
-        if (event.endTime && event.hasExplicitTime) updatePayload.end_time = event.endTime.toISOString();
-        if (event.venue && event.venue !== 'Campus / Offline') updatePayload.venue = event.venue;
-        if (event.mode && event.mode !== 'unknown') updatePayload.mode = event.mode;
+
 
         if (Object.keys(updatePayload).length > 0) {
           await supabase
@@ -671,29 +690,6 @@ export async function processEmailForEventsAndStatus(
             .eq('id', existingEvents[0].id);
         }
       } else {
-        // Clean up title
-        const { data: compRec } = await supabase.from('companies').select('name').eq('id', companyId).single();
-        const displayComp = compRec?.name || email.subject.replace(/^(?:fwd|re|fw)\s*:\s*/i, '').slice(0, 40);
-        const finalTitle = `${displayComp} - ${event.title}`;
-
-        // Insert new unique event into DB
-        const eventInsertPayload: any = {
-          user_id: userId,
-          placement_drive_id: targetDriveId,
-          event_type: event.eventType,
-          title: finalTitle,
-          start_time: startTimeIso,
-          end_time: event.endTime ? event.endTime.toISOString() : null,
-          venue: event.venue,
-          mode: event.mode,
-          confidence: event.confidence,
-        };
-        if (isCollegeBroadcast) {
-          eventInsertPayload.college_email_id = emailDbId;
-        } else {
-          eventInsertPayload.source_email_id = emailDbId;
-        }
-
         const { data: insertedEvt } = await supabase
           .from('events')
           .insert(eventInsertPayload)
@@ -705,19 +701,35 @@ export async function processEmailForEventsAndStatus(
         // only confirmed, eligible events are pushed and any cancelled/withdrawn events are purged.
         if (insertedEvt) {
           const { notifyEventScheduled } = await import('@/lib/notifications/service');
-          const { data: comp } = await supabase.from('companies').select('name').eq('id', companyId).single();
+
+          const { data: comp } = await supabase
+            .from('companies')
+            .select('name')
+            .eq('id', companyId)
+            .single();
+
           const compName = comp?.name || 'Drive';
-          await notifyEventScheduled({
-            userId,
-            placementDriveId: targetDriveId,
-            companyName: compName,
-            eventType: event.eventType,
-            startTime: event.startTime || null,
-            venue: event.venue,
-            eventId: insertedEvt.id,
-            candidateConfirmed: isNeoMatched,
-          });
-          hasNotifiedEvent = true;
+
+          const holdNotification =
+            isCollegeBroadcast &&
+            isShortlistEmail &&
+            !isNeoMatched &&
+            !isDeadlineEvent;
+
+          if (!holdNotification) {
+            await notifyEventScheduled({
+              userId,
+              placementDriveId: targetDriveId,
+              companyName: compName,
+              eventType: event.eventType,
+              startTime: event.startTime || null,
+              venue: event.venue,
+              eventId: insertedEvt.id,
+              candidateConfirmed: isNeoMatched,
+            });
+
+            hasNotifiedEvent = true;
+          }
         }
       }
     }
@@ -750,11 +762,11 @@ export async function processEmailForEventsAndStatus(
 
   const existingDriveState = existingApp
     ? {
-        companyId,
-        canonicalName: compRecord?.name || '',
-        ctc: existingApp.ctc || null,
-        status: isNeoMatched ? 'shortlisted' : (existingApp.status || 'unknown'),
-      }
+      companyId,
+      canonicalName: compRecord?.name || '',
+      ctc: existingApp.ctc || null,
+      status: isNeoMatched ? 'shortlisted' : (existingApp.status || 'unknown'),
+    }
     : null;
 
   const { shouldInvokeAiFallback, reconcileCompensation } = await import('@/lib/sync/ai-gating');
@@ -869,7 +881,7 @@ export async function processEmailForEventsAndStatus(
     } else if (/final\s*selection|offer\s*(?:letter|release)|congratulations.*(?:final|offer)/i.test(subjLower) || (/selection\s*list/i.test(subjLower) && !/interview|ppt|test/i.test(subjLower))) {
       newStatus = 'selected';
     } else if (
-      /interview/i.test(subjLower) || 
+      /interview/i.test(subjLower) ||
       /next\s+round\s+of\s+(?:the\s+)?(?:selection\s+process|selection|process|hiring)|selection\s+process\s+is\s+scheduled|physical\s+selection/i.test(subjLower) ||
       (/next\s+round/i.test(subjLower) && (
         /attend\s+(?:the\s+)?interview|interview\s+(?:process|schedule|round)|shortlisted\s+for\s+interview/i.test(fullText) ||
@@ -1154,29 +1166,15 @@ export async function processEmailForEventsAndStatus(
 
     // If candidate withdrew, declined, or was not shortlisted/rejected, purge scheduled events from DB and Google Calendar
     if (newStatus === 'not_shortlisted') {
-      const { data: toDelete } = await supabase
-        .from('events')
-        .select('id, gcal_event_id')
-        .eq('user_id', userId)
-        .eq('placement_drive_id', targetDriveId)
-        .neq('event_type', 'ppt');
-
-      if (toDelete && toDelete.length > 0) {
-        const { deleteEventFromGoogleCalendar } = await import('@/lib/calendar/google-sync');
-        for (const ev of toDelete) {
-          if (ev.gcal_event_id) {
-            const deleted = await deleteEventFromGoogleCalendar({ userId, companyName: '', eventId: ev.gcal_event_id });
-            if (!deleted) return;
-          }
+      await removeDriveEvents(
+        supabase,
+        userId,
+        targetDriveId,
+        {
+          excludeTypes: ['registration_deadline'],
+          onlyUnfinished: true,
         }
-      }
-
-      await supabase
-        .from('events')
-        .delete()
-        .eq('user_id', userId)
-        .eq('placement_drive_id', targetDriveId)
-        .neq('event_type', 'ppt');
+      );
     } else if (['withdrawn', 'declined', 'rejected'].includes(newStatus)) {
       const isTestEliminatedWithMatch = newStatus === 'rejected' && hasConfirmedShortlistMatch;
       let deleteQuery = supabase
@@ -1245,9 +1243,12 @@ export async function processEmailForEventsAndStatus(
   }
 
   // Extract and populate registration deadline on application
-  const regDeadlineEvt = extractedEvents.find((e) => e.eventType === 'registration_deadline' && e.startTime);
-  if (regDeadlineEvt && regDeadlineEvt.startTime) {
-    appUpdate.registration_deadline = regDeadlineEvt.startTime.toISOString();
+  if (
+    regDeadlineEvt?.startTime &&
+    (isCollegeBroadcast || !existingApp?.registration_deadline)
+  ) {
+    appUpdate.registration_deadline =
+      regDeadlineEvt.startTime.toISOString();
   }
 
   // If this is a newly discovered company drive from a recent email, notify the candidate

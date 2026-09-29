@@ -1,25 +1,21 @@
 export type StatusUpdatePhase = 'personal_scan' | 'college_matching' | 'status_recalculation' | 'complete' | null;
 
 /**
- * A drive's shortlist verdict is only genuinely "in flight" while it is still `pending`.
- *
- * `deferred` is terminal: the archive is either incomplete or holds a roster we cannot
- * parse (PDF/DOCX). Nothing is running for that drive, so treating it as pending made the
- * UI hold a real `not_shortlisted` status back behind "Updating status…" forever.
+ * Shortlist verdicts are stored directly on applications.status. There is no
+ * separate verification-tracking state and no provisional masking: whatever the
+ * scanner wrote is what the user sees.
  */
-export function isShortlistVerificationPending(state?: string | null): boolean {
-  return (state || '').toLowerCase() === 'pending';
+export function isShortlistVerificationPending(_state?: string | null): boolean {
+  return false;
 }
 
 export function getVisibleApplicationStatus(
   status: string | null | undefined,
-  isSyncing: boolean,
-  manualOverride = false,
-  statusUpdatesPending = false
+  _isSyncing = false,
+  _manualOverride = false,
+  _statusUpdatesPending = false
 ): string {
-  return (isSyncing || statusUpdatesPending) && !manualOverride && status?.toLowerCase() === 'not_shortlisted'
-    ? 'applied'
-    : status || 'not_applied';
+  return status || 'not_applied';
 }
 
 export function getStatusUpdatePhase(subject?: string | null): StatusUpdatePhase {
@@ -31,19 +27,14 @@ export function getStatusUpdatePhase(subject?: string | null): StatusUpdatePhase
   return null;
 }
 
-export function getProvisionalStatusLabel(params: {
-  status: string | null | undefined;
-  isSyncing: boolean;
+export function getProvisionalStatusLabel(_params: {
+  status?: string | null;
+  isSyncing?: boolean;
   statusUpdatesPending?: boolean;
   verificationPending?: boolean;
   updatePhase?: 'personal' | 'personal_scan' | 'college' | 'college_matching' | 'recalculate' | 'status_recalculation' | 'complete' | null;
   manualOverride?: boolean;
   syncSubject?: string | null;
 }): string | null {
-  if ((!params.isSyncing && !params.statusUpdatesPending && !params.verificationPending) || params.manualOverride || params.status?.toLowerCase() !== 'not_shortlisted') return null;
-  if (params.updatePhase === 'college' || params.updatePhase === 'recalculate' || params.statusUpdatesPending && !params.isSyncing) return 'Updating status…';
-  if ((params.statusUpdatesPending || params.verificationPending) && !params.isSyncing) return 'Updating status…';
-  const phase = getStatusUpdatePhase(params.syncSubject);
-  if (phase === 'complete') return 'Updating status…';
-  return phase === 'college_matching' || phase === 'status_recalculation' ? 'Updating status…' : 'Checking shortlist…';
+  return null;
 }
