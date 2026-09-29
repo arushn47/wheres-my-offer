@@ -248,6 +248,8 @@ export async function scanSharedCollegeCandidateMatches(
   const { data: sharedSyncState, error: sharedSyncStateError } = await supabase
     .from('shared_college_sync_state')
     .select('initial_scan_complete,next_page_token,is_syncing,pending_message_ids,pending_offset')
+    .order('updated_at', { ascending: false })
+    .limit(1)
     .maybeSingle();
   if (sharedSyncStateError) throw sharedSyncStateError;
   const pendingIds = Array.isArray(sharedSyncState?.pending_message_ids) ? sharedSyncState.pending_message_ids : [];

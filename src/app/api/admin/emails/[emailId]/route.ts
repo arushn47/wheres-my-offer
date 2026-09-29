@@ -360,20 +360,76 @@ export async function PATCH(
       // 5b. (No verification-tracking table anymore: verdicts live on applications and are
       // recomputed by the archive scanner from the remaining evidence.)
 
-      // 6. Recalculate each affected drive from the remaining linked evidence
+      // 6. Recalculate each affected drive from the remaining linked evidence in parallel
       const reprocessErrors: string[] = [];
-      for (const [userId, driveIds] of affectedDrivesByUser) {
-        for (const driveId of driveIds) {
-          try {
-            await recalculateApplicationStatuses(userId, undefined, {
-              targetPlacementDriveIds: [driveId],
-              recalculateStatusesFromRemainingEvidence: true,
-            });
-          } catch (reprocessError) {
-            console.error(`[Admin Email Unlink] Status recalculation failed for drive ${driveId}:`, reprocessError);
-            reprocessErrors.push(driveId);
+
+      if (affectedDrivesByUser.size > 0) {
+        // Preload shared college archive data ONCE across all affected users
+        // instead of querying 1,500+ rows twice per student sequentially.
+        let preloadedCanonicalMap: Map<string, string> | undefined;
+        let preloadedCollegeEmails: any[] | undefined;
+
+        try {
+          const [canonicalsRes, collegeEmailsRes] = await Promise.all([
+            supabase
+              .from('college_emails')
+              .select('id, message_id, body_text, body_snippet')
+              .not('message_id', 'is', null)
+              .or('body_text.not.is.null,body_snippet.not.is.null'),
+            supabase
+              .from('college_emails')
+              .select('id, subject, sender_email, received_at, created_at, body_snippet, body_text, classification, parsed_company_name, parsed_drive_numbers')
+              .order('received_at', { ascending: true }),
+          ]);
+
+          if (canonicalsRes.data) {
+            preloadedCanonicalMap = new Map();
+            for (const c of canonicalsRes.data) {
+              const text = c.body_text || c.body_snippet || '';
+              if (text && c.message_id) {
+                preloadedCanonicalMap.set(c.message_id.toLowerCase().trim(), text);
+              }
+            }
           }
+
+          if (collegeEmailsRes.data) {
+            preloadedCollegeEmails = collegeEmailsRes.data.map((ce: any) => ({
+              id: ce.id,
+              subject: ce.subject,
+              sender: ce.sender_email,
+              received_at: ce.received_at || ce.created_at,
+              body_snippet: ce.body_text || ce.body_snippet || '',
+              classification: ce.classification,
+              parsed_company_name: ce.parsed_company_name,
+              parsed_drive_numbers: ce.parsed_drive_numbers || [],
+              placement_drive_id: null,
+              college_email_id: ce.id,
+              canonical_email_id: ce.id,
+              assignment_source: 'college_broadcast',
+              has_canonical_body: Boolean(ce.body_text && ce.body_text.length > 500),
+            }));
+          }
+        } catch (preloadErr) {
+          console.warn('[Admin Email Unlink] Shared archive preloading had partial failure, continuing with standard fetch:', preloadErr);
         }
+
+        const userEntries = Array.from(affectedDrivesByUser.entries());
+        await Promise.all(
+          userEntries.map(async ([userId, driveIds]) => {
+            try {
+              await recalculateApplicationStatuses(userId, undefined, {
+                targetPlacementDriveIds: Array.from(driveIds),
+                recalculateStatusesFromRemainingEvidence: true,
+                skipBodyRecovery: true,
+                preloadedCanonicalMap,
+                preloadedCollegeEmails,
+              });
+            } catch (reprocessError) {
+              console.error(`[Admin Email Unlink] Status recalculation failed for user ${userId}:`, reprocessError);
+              for (const dId of driveIds) reprocessErrors.push(dId);
+            }
+          })
+        );
       }
 
       const totalUnlinkedCount = idsToUnlink.length || (isCollegeEmail ? 1 : 0);

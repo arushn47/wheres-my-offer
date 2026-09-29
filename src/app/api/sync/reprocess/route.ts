@@ -49,6 +49,9 @@ export async function recalculateApplicationStatuses(
     targetPlacementDriveIds?: string[];
     recalculateStatusesFromRemainingEvidence?: boolean;
     suppressNotifications?: boolean;
+    skipBodyRecovery?: boolean;
+    preloadedCanonicalMap?: Map<string, string>;
+    preloadedCollegeEmails?: any[];
   }
 ): Promise<{ updatedCount: number; results: Array<{ company: string; status: string; role?: string | null; ctc?: string | null }> }> {
   const supabase = createAdminClient();
@@ -71,18 +74,22 @@ export async function recalculateApplicationStatuses(
   if (!userEmail) return { updatedCount: 0, results: [] };
 
   // Preload college_emails by RFC message ID for rows whose foreign-key link is missing.
-  const { data: canonicalsWithBody } = await supabase
-    .from('college_emails')
-    .select('id, message_id, body_text, body_snippet')
-    .not('message_id', 'is', null)
-    .or('body_text.not.is.null,body_snippet.not.is.null');
-
   const canonicalByMsgId = new Map<string, string>();
-  for (const c of canonicalsWithBody || []) {
-    const text = c.body_text || c.body_snippet || '';
-    if (text) {
-      if (c.message_id && !canonicalByMsgId.has(c.message_id.toLowerCase().trim())) {
-        canonicalByMsgId.set(c.message_id.toLowerCase().trim(), text);
+  if (options?.preloadedCanonicalMap) {
+    for (const [k, v] of options.preloadedCanonicalMap) canonicalByMsgId.set(k, v);
+  } else {
+    const { data: canonicalsWithBody } = await supabase
+      .from('college_emails')
+      .select('id, message_id, body_text, body_snippet')
+      .not('message_id', 'is', null)
+      .or('body_text.not.is.null,body_snippet.not.is.null');
+
+    for (const c of canonicalsWithBody || []) {
+      const text = c.body_text || c.body_snippet || '';
+      if (text) {
+        if (c.message_id && !canonicalByMsgId.has(c.message_id.toLowerCase().trim())) {
+          canonicalByMsgId.set(c.message_id.toLowerCase().trim(), text);
+        }
       }
     }
   }
@@ -143,10 +150,12 @@ export async function recalculateApplicationStatuses(
     page++;
   }
 
-  const recoveredBodies = await recoverTruncatedEmailBodies(allEmails);
-  for (const email of allEmails) {
-    const recoveredBody = recoveredBodies.get(email.id);
-    if (recoveredBody) email.body_snippet = recoveredBody;
+  if (!options?.skipBodyRecovery) {
+    const recoveredBodies = await recoverTruncatedEmailBodies(allEmails);
+    for (const email of allEmails) {
+      const recoveredBody = recoveredBodies.get(email.id);
+      if (recoveredBody) email.body_snippet = recoveredBody;
+    }
   }
 
   // Also fetch college broadcast circulars (shared college_emails table)
@@ -166,38 +175,42 @@ export async function recalculateApplicationStatuses(
     has_canonical_body?: boolean;
   }> = [];
 
-  let clgPage = 0;
-  while (true) {
-    const { data: cChunk, error: cErr } = await supabase
-      .from('college_emails')
-      .select('id, subject, sender_email, received_at, created_at, body_snippet, body_text, classification, parsed_company_name, parsed_drive_numbers')
-      .order('received_at', { ascending: true })
-      .range(clgPage * pageSize, (clgPage + 1) * pageSize - 1);
+  if (options?.preloadedCollegeEmails) {
+    allCollegeEmails.push(...options.preloadedCollegeEmails);
+  } else {
+    let clgPage = 0;
+    while (true) {
+      const { data: cChunk, error: cErr } = await supabase
+        .from('college_emails')
+        .select('id, subject, sender_email, received_at, created_at, body_snippet, body_text, classification, parsed_company_name, parsed_drive_numbers')
+        .order('received_at', { ascending: true })
+        .range(clgPage * pageSize, (clgPage + 1) * pageSize - 1);
 
-    if (cErr) {
-      console.error('[recalculateApplicationStatuses] Error loading college_emails:', cErr);
-      break;
+      if (cErr) {
+        console.error('[recalculateApplicationStatuses] Error loading college_emails:', cErr);
+        break;
+      }
+      if (!cChunk || cChunk.length === 0) break;
+
+      allCollegeEmails.push(...cChunk.map((ce: any) => ({
+        id: ce.id,
+        subject: ce.subject,
+        sender: ce.sender_email,
+        received_at: ce.received_at || ce.created_at,
+        body_snippet: ce.body_text || ce.body_snippet || '',
+        classification: ce.classification,
+        parsed_company_name: ce.parsed_company_name,
+        parsed_drive_numbers: ce.parsed_drive_numbers || [],
+        placement_drive_id: null,
+        college_email_id: ce.id,
+        canonical_email_id: ce.id,
+        assignment_source: 'college_broadcast',
+        has_canonical_body: Boolean(ce.body_text && ce.body_text.length > 500),
+      })));
+
+      if (cChunk.length < pageSize) break;
+      clgPage++;
     }
-    if (!cChunk || cChunk.length === 0) break;
-
-    allCollegeEmails.push(...cChunk.map((ce: any) => ({
-      id: ce.id,
-      subject: ce.subject,
-      sender: ce.sender_email,
-      received_at: ce.received_at || ce.created_at,
-      body_snippet: ce.body_text || ce.body_snippet || '',
-      classification: ce.classification,
-      parsed_company_name: ce.parsed_company_name,
-      parsed_drive_numbers: ce.parsed_drive_numbers || [],
-      placement_drive_id: null,
-      college_email_id: ce.id,
-      canonical_email_id: ce.id,
-      assignment_source: 'college_broadcast',
-      has_canonical_body: Boolean(ce.body_text && ce.body_text.length > 500),
-    })));
-
-    if (cChunk.length < pageSize) break;
-    clgPage++;
   }
 
   if (allEmails.length === 0 && allCollegeEmails.length === 0) return { updatedCount: 0, results: [] };

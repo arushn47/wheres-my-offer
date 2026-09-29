@@ -48,13 +48,39 @@ export async function runSharedCollegeSync(options: { limit?: number } = {}) {
     .eq('is_connected', true)
     .order('email', { ascending: true });
   if (accountsError) throw accountsError;
-  // Explicit env override when set; otherwise the first connected College inbox is the
-  // shared broadcast source. Every subscribed College inbox receives the same broadcast,
-  // so any one of them ingests the identical canonical archive.
-  const account = (requestedEmail
-    ? (accounts || []).find((candidate) => candidate.email.toLowerCase() === requestedEmail)
-    : (accounts || [])[0]) || null;
-  if (!account) throw new Error('No connected College Gmail inbox is available for the shared College ingester.');
+  if (!accounts || accounts.length === 0) {
+    throw new Error('No connected College Gmail inbox is available for the shared College ingester.');
+  }
+
+  // Account selection priority:
+  // 1. Explicit SHARED_COLLEGE_EMAIL env override
+  // 2. An account already marked initial_scan_complete in shared_college_sync_state
+  // 3. Most recently updated active ingester account
+  // 4. Fallback to accounts[0]
+  let account: (typeof accounts)[number] | null = null;
+  if (requestedEmail) {
+    account = accounts.find((candidate) => candidate.email.toLowerCase() === requestedEmail) || null;
+  }
+  if (!account) {
+    const { data: existingStates } = await supabase
+      .from('shared_college_sync_state')
+      .select('gmail_account_id,initial_scan_complete,updated_at')
+      .order('initial_scan_complete', { ascending: false })
+      .order('updated_at', { ascending: false });
+
+    if (existingStates && existingStates.length > 0) {
+      for (const s of existingStates) {
+        const match = accounts.find((a) => a.id === s.gmail_account_id);
+        if (match) {
+          account = match;
+          break;
+        }
+      }
+    }
+  }
+  if (!account) {
+    account = accounts[0];
+  }
 
   const runId = randomUUID();
   const { data: acquired, error: acquireError } = await supabase.rpc('acquire_shared_college_sync_lease', {
@@ -99,6 +125,24 @@ export async function runSharedCollegeSync(options: { limit?: number } = {}) {
       state.pending_next_page_token = null;
     }
 
+    // Check if the canonical archive already has data in college_emails
+    const { data: latestCanonical } = await supabase
+      .from('college_emails')
+      .select('received_at')
+      .order('received_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    const archiveAlreadySeeded = Boolean(latestCanonical?.received_at);
+
+    // If the shared archive is already populated in college_emails, no account should EVER
+    // run an initial scan from July 1st (2026/06/30). Mark initial_scan_complete = true immediately.
+    if (archiveAlreadySeeded && !state.initial_scan_complete) {
+      state.initial_scan_complete = true;
+      state.next_page_token = null;
+      state.pending_next_page_token = null;
+    }
+
     const { isInitialArchiveScan } = getInitialArchivePageState(state);
 
     // Resume a previously fetched batch before asking Gmail for more IDs.
@@ -131,22 +175,48 @@ export async function runSharedCollegeSync(options: { limit?: number } = {}) {
     } else if (state.pending_message_ids.length === 0 && state.initial_scan_complete && account.last_history_id) {
       const history = await fetchHistoryChanges(gmail, account.last_history_id);
       if (history.historyExpired) {
-        state.initial_scan_complete = false;
-        state.next_page_token = null;
-        state.pending_history_id = null;
-        state.pending_next_page_token = null;
-        state.pending_message_ids = [];
+        // Mailbox history expired: do NOT reset to July 1st! Catch up from latest canonical email with 2-day buffer
+        state.pending_history_id = await getProfileHistoryId(gmail);
+        if (latestCanonical?.received_at) {
+          const latestDate = new Date(latestCanonical.received_at);
+          const safeDate = new Date(latestDate.getTime() - 2 * 24 * 60 * 60 * 1000);
+          const dateStr = `${safeDate.getUTCFullYear()}/${String(safeDate.getUTCMonth() + 1).padStart(2, '0')}/${String(safeDate.getUTCDate()).padStart(2, '0')}`;
+          const listed = await gmail.users.messages.list({
+            userId: 'me',
+            q: `from:vitlions2027@vitbhopal.ac.in after:${dateStr}`,
+            maxResults: 50,
+          });
+          state.pending_message_ids = (listed.data.messages || []).map((message) => message.id).filter((id): id is string => Boolean(id));
+        } else {
+          state.pending_message_ids = [];
+        }
         state.pending_offset = 0;
+        state.next_page_token = null;
+        state.pending_next_page_token = null;
+        state.initial_scan_complete = true;
       } else {
-          const deleted = new Set(history.deletedMessageIds);
-          state.pending_message_ids = history.messageIds.filter((id) => !deleted.has(id));
-          fanOutNeeded = state.pending_message_ids.length > 0;
+        const deleted = new Set(history.deletedMessageIds);
+        state.pending_message_ids = history.messageIds.filter((id) => !deleted.has(id));
+        fanOutNeeded = state.pending_message_ids.length > 0;
         state.pending_offset = 0;
         state.pending_next_page_token = null;
         state.pending_history_id = history.latestHistoryId;
       }
     } else if (state.pending_message_ids.length === 0 && state.initial_scan_complete && !account.last_history_id) {
       state.pending_history_id = await getProfileHistoryId(gmail);
+      // Catch up on any recent broadcast emails since the latest canonical email in DB (2-day buffer)
+      if (latestCanonical?.received_at) {
+        const latestDate = new Date(latestCanonical.received_at);
+        const safeDate = new Date(latestDate.getTime() - 2 * 24 * 60 * 60 * 1000);
+        const dateStr = `${safeDate.getUTCFullYear()}/${String(safeDate.getUTCMonth() + 1).padStart(2, '0')}/${String(safeDate.getUTCDate()).padStart(2, '0')}`;
+        const listed = await gmail.users.messages.list({
+          userId: 'me',
+          q: `from:vitlions2027@vitbhopal.ac.in after:${dateStr}`,
+          maxResults: 50,
+        });
+        state.pending_message_ids = (listed.data.messages || []).map((message) => message.id).filter((id): id is string => Boolean(id));
+        state.pending_offset = 0;
+      }
     }
 
     const { completingPendingInitialPage, completingLastInitialPage } = getInitialArchivePageState(state);
