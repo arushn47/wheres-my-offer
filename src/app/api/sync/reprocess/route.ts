@@ -396,9 +396,18 @@ export async function recalculateApplicationStatuses(
   const targetDriveSet = options?.targetPlacementDriveIds && options.targetPlacementDriveIds.length > 0
     ? new Set(options.targetPlacementDriveIds)
     : null;
+
+  // When no explicit target is given, restrict to drives this user is actually connected to.
+  // A drive is "relevant" if the user has at least one linked email OR an existing application for it.
+  // This avoids iterating all 100+ global drives for a user who only tracks ~10-20 of them.
+  const userRelevantDriveIds = new Set<string>([
+    ...emailsByDriveId.keys(),
+    ...appsByDriveId.keys(),
+  ]);
+
   const drivesToProcess = targetDriveSet
     ? allDrives.filter((d) => targetDriveSet.has(d.id))
-    : allDrives;
+    : allDrives.filter((d) => userRelevantDriveIds.has(d.id));
 
   const DRIVE_BATCH_SIZE = 8;
   for (let bIdx = 0; bIdx < drivesToProcess.length; bIdx += DRIVE_BATCH_SIZE) {
@@ -1178,12 +1187,10 @@ export async function recalculateApplicationStatuses(
             // registered students but a separate shortlist determined who actually sits).
             // Only keep test_scheduled if there's a positive match somewhere (handled above).
             const hasAnyMatchInTestEmails = testEmails.some((e) => matchedEmailIds.has(e.id));
-            if (hasAnyMatchInTestEmails) {
+            if (hasAnyMatchInTestEmails || hasDirectPersonalTestInvitation) {
               computedStatus = 'test_scheduled';
             } else {
-              // No match in test emails â†’ likely a general schedule announcement without
-              // personal shortlist confirmation. Stay as not_shortlisted if a test existed.
-              computedStatus = 'not_shortlisted';
+              computedStatus = 'test_scheduled';
             }
           } else if (hasPptEvent) {
             computedStatus = 'ppt_scheduled';
@@ -1195,10 +1202,10 @@ export async function recalculateApplicationStatuses(
             computedStatus = 'not_shortlisted';
           } else if (testEmails.length > 0) {
             const hasAnyMatchInTestEmails = testEmails.some((e) => matchedEmailIds.has(e.id));
-            if (hasAnyMatchInTestEmails) {
+            if (hasAnyMatchInTestEmails || hasDirectPersonalTestInvitation) {
               computedStatus = 'test_scheduled';
             } else {
-              computedStatus = 'not_shortlisted';
+              computedStatus = 'test_scheduled';
             }
           } else if (hasPptEvent) {
             computedStatus = 'ppt_scheduled';
