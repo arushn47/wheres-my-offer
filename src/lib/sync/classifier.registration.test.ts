@@ -69,4 +69,56 @@ describe('classifier: registration circulars vs shortlists', () => {
     );
     expect(classifyEmail(email3).classification).toBe('shortlist');
   });
+
+  it('classifies applied list emails with forms or rosters as registration', () => {
+    const malomatia = makeEmail(
+      'Kind Attention!! Malomatia applied list!!',
+      'Find the below attached applied list.\nAll the applied candidates are informed to fill the details in the below link on or before 1st Oct 2026 (9 AM)\nLink: https://forms.gle/cqAobDBDtdfqA5ot6\n**Only the attached candidates are strictly informed to fill in the details.\nNote: Shortlisted candidates will have Pre-placement talk by tomorrow (4 PM) @ virtual mode'
+    );
+    const result = classifyEmail(malomatia);
+    expect(result.classification).toBe('registration');
+    expect(result.companyName).toBe('Malomatia');
+
+    const ubs = makeEmail(
+      'Kind Attn: UBS Applied Students - 2027 Batch',
+      'Please find the attached applied students list who have not submitted the additional data (form) in the Neopat'
+    );
+    expect(classifyEmail(ubs).classification).toBe('registration');
+  });
+
+  it('classifies campus drive/internship offers without literal registration keyword as registration', () => {
+    const jiostar = makeEmail(
+      'JIOSTAR Super Dream Internship Offer - 2027 Batch',
+      'JIOSTAR is hiring 2027 batch students for internship roles. Last date to register is 5th Oct.'
+    );
+    expect(classifyEmail(jiostar).classification).toBe('registration');
+
+    const xtep = makeEmail(
+      'Xtep India - Dream Internship - MBA 2026 Batch',
+      'Xtep India Dream Internship details and requirements.'
+    );
+    expect(classifyEmail(xtep).classification).toBe('registration');
+
+    const groww = makeEmail(
+      'GROWW - Super Dream Placement / Internship - 2027 Batch',
+      'Groww campus hiring for 2027 batch.'
+    );
+    expect(classifyEmail(groww).classification).toBe('registration');
+  });
+
+  it('classifies PPO announcements as result', () => {
+    const citi = makeEmail(
+      'Congratulations Congratulations Citi Bank - PPO',
+      'Congratulations to the following candidates on receiving PPO from Citi Bank.'
+    );
+    expect(classifyEmail(citi).classification).toBe('result');
+  });
+
+  it('classifies applied student circulars with OA/test notices as test', () => {
+    const amz = makeEmail(
+      'Amazon Internship - Amazon Internship Applied Students - NON - CS!!',
+      'Candidates will have to appear for Online Assessment (OA). OA links are active.'
+    );
+    expect(classifyEmail(amz).classification).toBe('test');
+  });
 });

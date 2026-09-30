@@ -144,9 +144,10 @@ const CLASSIFICATION_RULES: ClassificationRule[] = [
     classification: 'result',
     confidence: 'high',
     match: (s, b) =>
-      /(result|selected|selection\s*list|final\s*selection|offer\s*(letter|release))/i.test(s) &&
+      (/(result|selected|selection\s*list|final\s*selection|offer\s*(?:letter|release)|\bppo\b)/i.test(s) ||
+        (/congratulations/i.test(s) && /(?:selection|selected|selects|offer|ppo|placed)/i.test(s + ' ' + b))) &&
       !/not\s+selected/i.test(s),
-    reason: 'Subject mentions results or selection list',
+    reason: 'Subject mentions results, selection list, or PPO offer',
   },
   {
     classification: 'result',
@@ -168,10 +169,11 @@ const CLASSIFICATION_RULES: ClassificationRule[] = [
   {
     classification: 'test',
     confidence: 'high',
-    match: (s) =>
-      /(online\s+test|coding\s+test|online\s+assessment|aptitude\s+test|test\s+schedule|test\s+link|assessment\s+(?:test|link|scheduled|window)|thanks\s+for\s+taking\s+(?:the\s+)?assessment)/i.test(s) &&
-      !/(?:ppt|pre[\s-]*placement\s*talk).*(?:online\s+test|coding\s+test|assessment)/i.test(s),
-    reason: 'Subject mentions online test or assessment',
+    match: (s, b) =>
+      ((/(online\s+test|coding\s+test|online\s+assessment|aptitude\s+test|test\s+schedule|test\s+link|assessment\s+(?:test|link|scheduled|window)|thanks\s+for\s+taking\s+(?:the\s+)?assessment)/i.test(s) ||
+        (/\bapplied\s+(?:students?|candidates?)\b/i.test(s) && /(?:online\s+assessment|\boa\b|online\s+test|coding\s+test|assessment\s+link|attend\s+the\s+test)/i.test(b))) &&
+      !/(?:ppt|pre[\s-]*placement\s*talk).*(?:online\s+test|coding\s+test|assessment)/i.test(s)),
+    reason: 'Subject or applied candidates notice mentions online test or assessment',
   },
   {
     classification: 'ppt',
@@ -180,6 +182,36 @@ const CLASSIFICATION_RULES: ClassificationRule[] = [
       /pre[\s-]*placement\s*talk|ppt\b/i.test(s) &&
       !/ppt\s*file|\.ppt/i.test(s),
     reason: 'Subject mentions pre-placement talk (PPT)',
+  },
+  // --- CAMPUS DRIVE & INTERNSHIP ANNOUNCEMENTS (without literal "registration" word) ---
+  // CDC subjects like: "JIOSTAR Super Dream Internship Offer - 2027 Batch"
+  //                    "Xtep India - Dream Internship - MBA 2026 Batch"
+  //                    "DSP Mutual Fund - Dream Offer - MBA - 2026 Batch"
+  //                    "GROWW - Super Dream Placement / Internship - 2027 Batch"
+  //                    "Voxela - Super Dream Internship - 2027 Batch"
+  //                    "Update - Timeline Extension Gene Technologies - Regular Internship / Offer"
+  {
+    classification: 'registration',
+    confidence: 'high',
+    match: (s) =>
+      (/\b(?:super\s+dream|dream\s+core|dream|regular|marquee|elite)\s+(?:internship|placement|offer(?!\s*letter)|\/\s*placement|\/\s*internship)\b/i.test(s) ||
+        /\b(?:timeline|registration|deadline)\s+extension\b|\bdeadline\s+extended\b/i.test(s)) &&
+      !/(?:shortlist|result|selected|selects|selection\s*list|course|assessment\s+course|mock\s+test|learning\s+contents|practice\s+assessment|nerd\s+season|codeathon)/i.test(s),
+    reason: 'Subject announces a placement/internship offer drive or deadline extension',
+  },
+  // --- APPLIED LISTS & APPLIED CANDIDATES CIRCULARS ---
+  // CDC circulars like: "Kind Attention!! Malomatia applied list!!"
+  //                     "Kind Attn: UBS Applied Students - 2027 Batch"
+  //                     "Kind Attention!! Accenture Applied students!!!"
+  //                     "Kind Attn: Infosys Applied Students - 2027 Batch"
+  {
+    classification: 'registration',
+    confidence: 'high',
+    match: (s, b) =>
+      (/\bapplied\s+(?:list|students?|candidates?)\b/i.test(s) ||
+        /\b(?:below\s+attached|find\s+the\s+attached)\s+applied\s+list\b/i.test(b)) &&
+      !/(?:shortlist|result|selected|selects|selection\s*list|online\s+test|coding\s+test|assessment|interview|pre[\s-]*placement\s*talk|\bppt\b)/i.test(s),
+    reason: 'Subject or body refers to applied candidates list / registration verification',
   },
   {
     classification: 'withdrawal',
