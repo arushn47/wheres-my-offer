@@ -16,7 +16,7 @@ const MAX_BATCH_SIZE = 40;
  * in the DB, so listing them costs at most one metadata fetch per message.
  */
 function getGatedCollegeQuery(dateFilter: string): string {
-  return `(from:vitlions2027@vitbhopal.ac.in OR from:placementoffice@vitbhopal.ac.in) ${dateFilter}`;
+  return `(from:vitlions2027@vitbhopal.ac.in OR from:placementoffice@vitbhopal.ac.in) -subject:"god bless" -subject:"restricted offer" ${dateFilter}`;
 }
 
 interface SharedSyncState {

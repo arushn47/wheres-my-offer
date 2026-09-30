@@ -122,41 +122,25 @@ export async function ingestSharedCollegeCircular(params: {
     return { canonicalId: null, appliedUsers: 0, skippedUsers: 0, attachmentErrors: 0 };
   }
 
-  // Gated senders (e.g. the placement office) have every message scored once; the
-  // verdict is persisted in college_emails.processing_status ('rejected' = chatter).
-  // No deployment-time flag involved: the DB row itself is the decision record, and
-  // the next sync run never re-fetches a message whose verdict already exists.
+  // Gated senders (e.g. the placement office): ONLY shortlists, test schedules, and
+  // interview schedules are allowed. Chatter, blessings, and restricted offers are
+  // dropped immediately and NEVER inserted into college_emails.
   if (isGatedCollegeSender(senderAddress)) {
     const bodyTextForGate = canonicalBodyFromEmail(parsedEmail.bodyPlain, parsedEmail.bodyHtml, parsedEmail.bodySnippet);
-    const gate = scoreCollegeMessageRelevance({
-      subject: parsedEmail.subject,
-      body: bodyTextForGate,
-      hasAttachments: parsedEmail.hasAttachments,
-      attachmentFilenames: parsedEmail.attachments.map((a) => a.filename),
-    });
+    const gate = scoreCollegeMessageRelevance(
+      {
+        subject: parsedEmail.subject,
+        body: bodyTextForGate,
+        hasAttachments: parsedEmail.hasAttachments,
+        attachmentFilenames: parsedEmail.attachments.map((a) => a.filename),
+      },
+      senderAddress
+    );
     if (!gate.isRelevant) {
-      const contentKey = computeCanonicalContentKey(parsedEmail.senderEmail, parsedEmail.subject, bodyTextForGate);
-      const { error: rejectError } = await supabase
-        .from('college_emails')
-        .upsert(
-          {
-            content_key: contentKey,
-            sender_email: parsedEmail.senderEmail.toLowerCase().trim(),
-            subject: parsedEmail.subject || '(no subject)',
-            body_snippet: bodyTextForGate.slice(0, 500),
-            processing_status: 'rejected',
-            received_at: parsedEmail.receivedAt.toISOString(),
-            updated_at: new Date().toISOString(),
-          },
-          { onConflict: 'content_key' }
-        );
-      if (rejectError) {
-        console.warn('[Shared College Ingest] Failed to persist rejected verdict:', rejectError.message);
-      }
-      console.log(`[Shared College Ingest] Rejected gated-sender mail (score ${gate.score}): ${gate.reason} — "${(parsedEmail.subject || '').slice(0, 80)}"`);
+      console.log(`[Shared College Ingest] Dropped gated-sender mail: ${gate.reason} — "${(parsedEmail.subject || '').slice(0, 80)}"`);
       return { canonicalId: null, appliedUsers: 0, skippedUsers: 0, attachmentErrors: 0 };
     }
-    console.log(`[Shared College Ingest] Gated-sender mail admitted (score ${gate.score}): ${gate.reason} — "${(parsedEmail.subject || '').slice(0, 80)}"`);
+    console.log(`[Shared College Ingest] Gated-sender mail admitted (${gate.category || 'relevant'}): ${gate.reason} — "${(parsedEmail.subject || '').slice(0, 80)}"`);
   }
 
   const bodyText = canonicalBodyFromEmail(parsedEmail.bodyPlain, parsedEmail.bodyHtml, parsedEmail.bodySnippet);

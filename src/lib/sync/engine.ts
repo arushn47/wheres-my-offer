@@ -41,9 +41,11 @@ import {
   computeCanonicalContentKey,
   computeCanonicalMetadataKey,
   isApprovedCanonicalSender,
+  isGatedCollegeSender,
   normalizeRfcMessageId,
   type CanonicalEmailCacheRow,
 } from '@/lib/sync/canonical-email';
+import { scoreCollegeMessageRelevance } from '@/lib/sync/college-relevance';
 
 // ============================================
 // Canonical Email Deduplication (Phase 2C — Shadow Mode)
@@ -105,6 +107,23 @@ async function shadowWriteCanonical(
     if (!isApprovedCanonicalSender(parsedEmail.senderEmail || parsedEmail.sender)) return null;
     const bodyText = canonicalBodyFromEmail(parsedEmail.bodyPlain, parsedEmail.bodyHtml, parsedEmail.bodySnippet);
     const senderEmail = (parsedEmail.senderEmail || parsedEmail.sender || '').toLowerCase().trim();
+
+    if (isGatedCollegeSender(senderEmail)) {
+      const gate = scoreCollegeMessageRelevance(
+        {
+          subject: parsedEmail.subject,
+          body: bodyText,
+          hasAttachments: Boolean(parsedEmail.hasAttachments || parsedEmail.attachments?.length > 0),
+          attachmentFilenames: (parsedEmail.attachments || []).map((a) => a.filename),
+        },
+        senderEmail
+      );
+      if (!gate.isRelevant) {
+        console.log(`[canonical] Rejected gated email (${gate.reason}): "${parsedEmail.subject}"`);
+        return null;
+      }
+    }
+
     const contentKey = computeContentKey(
       senderEmail,
       parsedEmail.subject,

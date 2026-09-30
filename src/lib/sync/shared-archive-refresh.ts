@@ -296,37 +296,19 @@ export async function refreshSharedCollegeArchive(
           continue;
         }
 
-        // Gated senders: persist the relevance verdict instead of ingesting blindly.
-        // An existing 'rejected' row means the decision is already made — skip.
+        // Gated senders (placement office): strictly require shortlist, test schedule,
+        // or interview schedule. Never insert rejected messages into the database.
         if (isGatedCollegeSender(parsed.senderEmail || parsed.sender)) {
-          if (existingCanonical?.processing_status === 'rejected') {
-            result.skipped++;
-            continue;
-          }
-          const gate = scoreCollegeMessageRelevance({
-            subject: parsed.subject,
-            body: bodyText,
-            hasAttachments: parsed.hasAttachments,
-            attachmentFilenames: parsed.attachments.map((a) => a.filename),
-          });
+          const gate = scoreCollegeMessageRelevance(
+            {
+              subject: parsed.subject,
+              body: bodyText,
+              hasAttachments: parsed.hasAttachments,
+              attachmentFilenames: parsed.attachments.map((a) => a.filename),
+            },
+            parsed.senderEmail || parsed.sender
+          );
           if (!gate.isRelevant) {
-            if (!result.dryRun) {
-              const contentKey = computeCanonicalContentKey(senderEmail, parsed.subject, bodyText);
-              await client
-                .from('college_emails')
-                .upsert(
-                  {
-                    content_key: contentKey,
-                    sender_email: senderEmail,
-                    subject: parsed.subject || '(no subject)',
-                    body_snippet: bodyText.slice(0, 500),
-                    processing_status: 'rejected',
-                    received_at: parsed.receivedAt.toISOString(),
-                    updated_at: new Date().toISOString(),
-                  },
-                  { onConflict: 'content_key' }
-                );
-            }
             result.skipped++;
             continue;
           }
