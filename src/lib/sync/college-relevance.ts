@@ -48,10 +48,11 @@ const TEST_SCHEDULE_PATTERNS = [
 
 /** Positive interview schedule indicators. */
 const INTERVIEW_SCHEDULE_PATTERNS = [
-  /\b(interview\s+schedule|technical\s+interview|hr\s+interview|interview\s+slot|interview\s+round|interview\s+link|interview\s+date|interview\s+time|shortlisted\s+for\s+interview|interview\s+call|f2f\s+interview|virtual\s+interview)\b/i,
+  /\b(interviews?\s+schedule|technical\s+interview|hr\s+interview|interview\s+slot|interview\s+round|interview\s+link|interview\s+date|interview\s+time|shortlisted\s+for\s+interview|interview\s+call|f2f\s+interview|virtual\s+interview|interviews?\s+(?:are\s+in|in|at|venue|venues))\b/i,
+  /\binterviews?\b.{0,30}\b(?:lc\s*\d{3}|ab\s*\d|audi|lab)\b/i,
 ];
 
-const SCHEDULE_TIMING_PATTERN = /(?:\b(?:on|at|date|time|scheduled|slot|window|am|pm|\d{1,2}(?:st|nd|rd|th)?\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec))\b)/i;
+const SCHEDULE_TIMING_PATTERN = /(?:\b(?:on|at|date|time|scheduled|slot|window|am|pm|venue|venues|lc\s*\d{3}|ab\s*\d|\d{1,2}(?:st|nd|rd|th)?\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec))\b)/i;
 
 /** Positive signals that a message is a drive circular. */
 export interface RelevanceInput {
@@ -69,6 +70,14 @@ export interface CollegeRelevanceResult {
   category?: 'shortlist' | 'test_schedule' | 'interview_schedule' | 'circular';
 }
 
+function stripPlacementBoilerplate(text: string): string {
+  // Strip placement office boilerplate footer notes explaining separate "God bless you mails", closing blessings, etc.
+  return text
+    .replace(/(?:^|\n)\s*\d+\.\s*\*?in\s+god\s+bless\s+you\s+mails?[\s\S]*$/i, '')
+    .replace(/(?:^|\n)\s*(?:\*\s*)?god\s+bless\s+(?:you|us)[\s\S]*$/i, '')
+    .trim();
+}
+
 /**
  * Evaluates whether an email from `placementoffice@vitbhopal.ac.in` strictly satisfies
  * the requirement: ONLY shortlists, test schedules, and interview schedules.
@@ -82,14 +91,37 @@ export function isPlacementOfficeMessageAllowed(input: RelevanceInput): {
   const body = (input.body || '').trim();
   const fullText = `${subject}\n${body}`;
 
-  // 1. Immediate Hard Veto: Blessings, restricted offers, meeting pings
-  for (const pattern of HARD_VETO_PATTERNS) {
+  // 1. Immediate Hard Veto on Subjects: Standalone "God bless you" mails or "restricted offer" circulars
+  if (/\bgod\s+bless(\s+you)?\b/i.test(subject)) {
+    return { isAllowed: false, reason: 'hard veto matched: "God bless you" circular' };
+  }
+  if (/\b(inbox\s+)?restricted\s+offer\b/i.test(subject) || /\brestricted\s+offer\s+\d+\s*lpa/i.test(subject)) {
+    return { isAllowed: false, reason: 'hard veto matched: restricted offer circular' };
+  }
+
+  // 2. Immediate Hard Veto: Meeting pings and chatter (we will start, let us start, join now)
+  const meetingPings = [
+    /^\s*(dear\s+)?(lions?|lionesses?|students?|all)\b.{0,60}\b(start|join|begin)/i,
+    /\bwe\s+will\s+start\b/i,
+    /\blet\s+us\s+start\b/i,
+    /\bstart(ing)?\s+(now|in\s+\d+\s+min|shortly|ma)\b/i,
+    /\bjoin\s+(if\s+you\s+can|now|soon)\b/i,
+    /\bplease\s+join\b/i,
+    /\bmeeting\s+(is\s+)?(live|starting)\b/i,
+    /^(?:re|fwd?)\s*:\s*(?:meeting|join)/i,
+  ];
+  for (const pattern of meetingPings) {
     if (pattern.test(fullText)) {
-      return { isAllowed: false, reason: `hard veto matched: ${pattern}` };
+      return { isAllowed: false, reason: `hard veto matched: meeting chatter (${pattern})` };
     }
   }
 
-  // 2. Category A: Shortlist / Selection List
+  // If the email is a bare "God bless you" email where body begins with blessings without company/schedule
+  if (/^\s*(?:dear\s+students|dear\s+lions[^\n]*\n+)?\s*god\s+bless\s+you/i.test(body) && !SHORTLIST_PATTERNS.some((p) => p.test(fullText))) {
+    return { isAllowed: false, reason: 'hard veto matched: "God bless you" greeting body' };
+  }
+
+  // 3. Category A: Shortlist / Selection List
   const regNumbers = body.match(REG_NUMBER_PATTERN) || [];
   const hasRegNumbers = regNumbers.length >= 2;
   const hasShortlistText = SHORTLIST_PATTERNS.some((p) => p.test(fullText));
@@ -97,21 +129,22 @@ export function isPlacementOfficeMessageAllowed(input: RelevanceInput): {
   const hasShortlistAttachment = attachmentNames.some((name) =>
     /\.(xlsx|xls|csv|pdf)$/i.test(name) && /(shortlist|selected|roster|results?|candidates?)/i.test(name)
   );
+  const hasGoogleSheetRoster = /docs\.google\.com\/spreadsheets|drive\.google\.com\/(?:file|open)|sheets\.google\.com/i.test(body);
 
-  if (hasRegNumbers || hasShortlistAttachment || (hasShortlistText && (regNumbers.length > 0 || input.hasAttachments))) {
-    return { isAllowed: true, category: 'shortlist', reason: 'shortlist roster / student IDs detected' };
+  if (hasRegNumbers || hasShortlistAttachment || (hasShortlistText && (regNumbers.length > 0 || input.hasAttachments || hasGoogleSheetRoster))) {
+    return { isAllowed: true, category: 'shortlist', reason: 'shortlist roster / student IDs / spreadsheet detected' };
   }
 
-  // 3. Category B: Test Schedule
+  // 4. Category B: Test Schedule
   const hasTestSchedule = TEST_SCHEDULE_PATTERNS.some((p) => p.test(fullText));
   const hasScheduleDetails = SCHEDULE_TIMING_PATTERN.test(fullText);
-  if (hasTestSchedule && hasScheduleDetails) {
+  if (hasTestSchedule && (hasScheduleDetails || hasGoogleSheetRoster)) {
     return { isAllowed: true, category: 'test_schedule', reason: 'online test / assessment schedule detected' };
   }
 
-  // 4. Category C: Interview Schedule
+  // 5. Category C: Interview Schedule
   const hasInterviewSchedule = INTERVIEW_SCHEDULE_PATTERNS.some((p) => p.test(fullText));
-  if (hasInterviewSchedule && hasScheduleDetails) {
+  if (hasInterviewSchedule && (hasScheduleDetails || hasGoogleSheetRoster || hasRegNumbers)) {
     return { isAllowed: true, category: 'interview_schedule', reason: 'interview schedule / slot detected' };
   }
 

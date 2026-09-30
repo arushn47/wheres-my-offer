@@ -92,6 +92,37 @@ Rishita Mehta 23BCE10235`,
       expect(result.isRelevant).toBe(true);
       expect(result.category).toBe('shortlist');
     });
+
+    it('admits Infosys shortlist with Google Sheet link even with standard footer boilerplate', () => {
+      const input = {
+        subject: 'Infosys shortlist and dates',
+        body: `Dear Lions and Lionesses
+Infosys shortlist and dates are given below
+Dates cannot be changed under any circumstances. Absentees will be blocked for 20 days.
+Infosys
+https://docs.google.com/spreadsheets/d/e/2PACX-1vSWJs6oYttVYhM53fPnOQ5FIpzRX9E8e8n_5l4r_tIg3Ek1a7gDPUvBcmYRqGvYTAxASv9unXZfhhjo/pubhtml
+
+1. *In God bless you mails, if the link that starts in lnkd.in/... does not open, copy the link*
+2. *Work hard - success will be yours.*
+3. *God Bless Us. *`,
+        hasAttachments: false,
+      };
+      const result = scoreCollegeMessageRelevance(input, PLACEMENT_OFFICE);
+      expect(result.isRelevant).toBe(true);
+      expect(result.category).toBe('shortlist');
+    });
+
+    it('admits Gullak interview schedule with LC venues even with standard footer notes', () => {
+      const input = {
+        subject: 'Miclient Accordion and Gullak interviews - LC 204 and LC 205',
+        body: `Miclient Accordion and Gullak interviews are in LC 204 and LC 205
+1. *In God bless you mails, if the link that starts in lnkd.in/... does not open, copy the link*`,
+        hasAttachments: false,
+      };
+      const result = scoreCollegeMessageRelevance(input, PLACEMENT_OFFICE);
+      expect(result.isRelevant).toBe(true);
+      expect(result.category).toBe('interview_schedule');
+    });
   });
 
   describe('general chatter and circulars', () => {
