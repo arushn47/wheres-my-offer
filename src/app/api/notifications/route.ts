@@ -5,7 +5,8 @@ import { createAdminClient } from '@/lib/supabase/admin';
 /**
  * GET /api/notifications
  * Returns recent in-app notifications (last 7 days) and unread count for the authenticated user.
- * Automatically prunes notifications older than 7 days to keep the app lean.
+ * Soft-dismissed rows stay in the table as sync dedupe ledger entries but are
+ * never returned here. Rows older than 7 days age out of the inbox window.
  */
 export async function GET() {
   const session = await getSession();
@@ -16,11 +17,14 @@ export async function GET() {
   const supabase = createAdminClient();
   const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
 
-  // 1. Fetch latest active notifications (last 7 days, max 30)
+  // 1. Fetch latest active notifications (last 7 days, max 30).
+  // Soft-dismissed rows are hidden but kept: they are the dedupe_key ledger
+  // entries that stop sync from re-creating dismissed notifications.
   const { data: notifications, error } = await supabase
     .from('notifications')
     .select('id, type, title, message, body, link, is_read, created_at')
     .eq('user_id', session.userId)
+    .is('dismissed_at', null)
     .gte('created_at', sevenDaysAgo)
     .order('created_at', { ascending: false })
     .limit(30);
@@ -30,11 +34,12 @@ export async function GET() {
     return NextResponse.json({ error: 'Failed to fetch notifications' }, { status: 500 });
   }
 
-  // 3. Count unread within the active 7-day window
+  // 3. Count unread within the active 7-day window (dismissed rows excluded)
   const { count: unreadCount } = await supabase
     .from('notifications')
     .select('id', { count: 'exact', head: true })
     .eq('user_id', session.userId)
+    .is('dismissed_at', null)
     .gte('created_at', sevenDaysAgo)
     .or('is_read.eq.false,is_read.is.null');
 
@@ -72,9 +77,9 @@ export async function POST() {
 
 /**
  * DELETE /api/notifications
- * Clears notifications for the authenticated user.
- * Query param: ?readOnly=true -> only deletes marked-as-read notifications.
- * Without query param -> deletes all notifications for this user.
+ * Dismisses notifications for the authenticated user (soft-dismiss; see [id]/route.ts).
+ * Query param: ?readOnly=true -> only dismisses marked-as-read notifications.
+ * Without query param -> dismisses all notifications for this user.
  */
 export async function DELETE(request: Request) {
   const session = await getSession();
@@ -86,7 +91,11 @@ export async function DELETE(request: Request) {
   const readOnly = searchParams.get('readOnly') === 'true';
 
   const supabase = createAdminClient();
-  let query = supabase.from('notifications').delete().eq('user_id', session.userId);
+  let query = supabase
+    .from('notifications')
+    .update({ dismissed_at: new Date().toISOString() })
+    .eq('user_id', session.userId)
+    .is('dismissed_at', null);
 
   if (readOnly) {
     query = query.eq('is_read', true);
@@ -94,8 +103,8 @@ export async function DELETE(request: Request) {
 
   const { error } = await query;
   if (error) {
-    console.error('[API Notifications] Delete error:', error);
-    return NextResponse.json({ error: 'Failed to delete notifications' }, { status: 500 });
+    console.error('[API Notifications] Dismiss-all error:', error);
+    return NextResponse.json({ error: 'Failed to dismiss notifications' }, { status: 500 });
   }
 
   return NextResponse.json({ success: true });

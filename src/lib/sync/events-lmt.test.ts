@@ -9,6 +9,25 @@ import {
 } from './classifier';
 import { isFuzzyCompanyMatch } from './engine';
 
+describe('typo-tolerant company matching', () => {
+  it('matches CDC brand typos like "Goldamnsachs" vs "Goldman Sachs"', () => {
+    expect(isFuzzyCompanyMatch('Goldman Sachs', 'Goldamnsachs')).toBe(true);
+    expect(isFuzzyCompanyMatch('Goldman Sachs', 'goldmansachs')).toBe(true);
+    expect(isFuzzyCompanyMatch('Deloitte', 'Deliotte')).toBe(true);
+  });
+
+  it('still rejects unrelated companies that share a short prefix', () => {
+    expect(isFuzzyCompanyMatch('Goldman Sachs', 'Goldmedal')).toBe(false);
+    expect(isFuzzyCompanyMatch('Deloitte', 'Delhivery')).toBe(false);
+    expect(isFuzzyCompanyMatch('Infosys', 'Infomedia')).toBe(false);
+  });
+
+  it('keeps track-token and EY guards intact', () => {
+    expect(isFuzzyCompanyMatch('EY GDS', 'EY')).toBe(false);
+    expect(isFuzzyCompanyMatch('Deloitte SDET', 'Deloitte')).toBe(false);
+  });
+});
+
 describe('LMT / LTIMindtree tests', () => {
   it('extracts LTIMindtree from placement subjects with Registration and Regular Offer', () => {
     expect(

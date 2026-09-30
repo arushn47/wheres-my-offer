@@ -812,11 +812,13 @@ export default function CompaniesClient({
                         : c.latestEmailDate || c.application?.applied_at || c.application?.last_updated;
                       const titleText = isManual
                         ? `Manually updated via Placement Assistant: ${formatDate(c.application!.last_updated)}`
-                        : c.latestEmailDate
-                          ? `Latest circular/email: ${formatDate(c.latestEmailDate)}`
-                          : c.application?.applied_at
-                            ? `Applied: ${formatDate(c.application.applied_at)}`
-                            : undefined;
+                        : c.application?.last_updated && c.latestEmailDate === c.application.last_updated
+                          ? `Drive updated: ${formatDate(c.application.last_updated)}`
+                          : c.latestEmailDate
+                            ? `Latest circular/email: ${formatDate(c.latestEmailDate)}`
+                            : c.application?.applied_at
+                              ? `Applied: ${formatDate(c.application.applied_at)}`
+                              : undefined;
 
                       return (
                         <span

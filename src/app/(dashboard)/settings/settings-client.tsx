@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { motion, AnimatePresence } from 'framer-motion';
 import { appToast } from '@/components/ui/toast';
+import { useSync } from '@/context/sync-context';
 import {
   Mail,
   Fingerprint,
@@ -87,10 +88,10 @@ const Card = ({
         <Icon className="h-4 w-4" />
       </div>
       <div className="min-w-0">
-        <h2 className="font-display text-sm sm:text-base font-bold tracking-tight text-white truncate">
+        <h2 className="font-display text-base sm:text-lg font-bold tracking-tight text-white truncate">
           {title}
         </h2>
-        <p className="text-[11px] sm:text-xs text-zinc-400 leading-snug mt-0.5 line-clamp-2 sm:line-clamp-none">
+        <p className="text-xs sm:text-sm text-zinc-400 leading-snug mt-0.5 line-clamp-2 sm:line-clamp-none">
           {desc}
         </p>
       </div>
@@ -109,6 +110,14 @@ export default function SettingsClient({
 }: SettingsClientProps) {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const { startReprocess, reprocessState } = useSync();
+  const reprocessing = reprocessState?.active ?? false;
+  const reprocessProgress = reprocessState?.active ? {
+    step: reprocessState.step,
+    totalSteps: reprocessState.totalSteps,
+    message: reprocessState.message,
+  } : null;
+  const reprocessResult = !reprocessState?.active && reprocessState?.result ? reprocessState.result : null;
   const [regId, setRegId] = useState(initialNeoId);
   const [isSavingId, setIsSavingId] = useState(false);
   const [disconnecting, setDisconnecting] = useState<string | null>(null);
@@ -139,19 +148,6 @@ export default function SettingsClient({
     appToast.success(`Home campus updated to ${c}`);
   };
 
-  // Reprocess state with live progress
-  const [reprocessing, setReprocessing] = useState(false);
-  const [reprocessProgress, setReprocessProgress] = useState<{
-    step: number;
-    totalSteps: number;
-    message: string;
-  } | null>(null);
-  const [reprocessResult, setReprocessResult] = useState<{
-    neoPatDrivesCount?: number;
-    collegeCircularsLinked?: number;
-    updatedApplications?: number;
-  } | null>(null);
-
   // Danger Zone Modals state
   const [showResetModal, setShowResetModal] = useState(false);
   const [resetConfirmText, setResetConfirmText] = useState('');
@@ -161,16 +157,6 @@ export default function SettingsClient({
   const [deleteConfirmText, setDeleteConfirmText] = useState('');
   const [isDeleting, setIsDeleting] = useState(false);
 
-  // Prevent accidental navigation or tab closing while archive is being reprocessed
-  useEffect(() => {
-    if (!reprocessing) return;
-    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
-      e.preventDefault();
-      e.returnValue = '';
-    };
-    window.addEventListener('beforeunload', handleBeforeUnload);
-    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
-  }, [reprocessing]);
 
   const personalAccount = accounts.find((a) => a.account_type === 'personal' && a.is_connected);
   const collegeAccount = accounts.find((a) => a.account_type === 'college' && a.is_connected);
@@ -236,108 +222,6 @@ export default function SettingsClient({
     appToast.info('Starting sync...', 'Watch live progress in Campus Radar.');
   };
 
-  // Handle Reprocess Archive with live streaming progress
-  const handleReprocessArchive = async () => {
-    if (reprocessing) return;
-    setReprocessing(true);
-    setReprocessResult(null);
-    setReprocessProgress({
-      step: 1,
-      totalSteps: 5,
-      message: 'Preparing saved placement data...',
-    });
-
-    let completedSuccessfully = false;
-
-    try {
-      const response = await fetch('/api/sync/reprocess?stream=true', {
-        method: 'POST',
-        headers: { Accept: 'text/event-stream' },
-      });
-
-      if (!response.ok) {
-        throw new Error('Reprocess failed');
-      }
-
-      const reader = response.body?.getReader();
-      if (!reader) throw new Error('No response stream');
-
-      const decoder = new TextDecoder();
-      let buffer = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const messages = buffer.split('\n\n');
-        buffer = messages.pop() || '';
-
-        for (const message of messages) {
-          const lines = message.split('\n');
-          let event = '';
-          let dataStr = '';
-
-          for (const line of lines) {
-            if (line.startsWith('event: ')) event = line.slice(7).trim();
-            else if (line.startsWith('data: ')) dataStr = line.slice(6).trim();
-          }
-
-          if (event && dataStr) {
-            try {
-              const parsed = JSON.parse(dataStr);
-              if (event === 'progress') {
-                setReprocessProgress(parsed);
-              } else if (event === 'complete') {
-                completedSuccessfully = true;
-                setReprocessProgress(null);
-                setReprocessResult({
-                  neoPatDrivesCount: parsed.neoPatDrivesCount,
-                  collegeCircularsLinked: parsed.collegeCircularsLinked,
-                  updatedApplications: parsed.updatedApplications,
-                });
-                appToast.success(
-                  'Archive re-index complete',
-                  `${parsed.neoPatDrivesCount || 0} official drives tracked, ${parsed.updatedApplications || 0} applications updated.`
-                );
-                router.refresh();
-              } else if (event === 'error') {
-                completedSuccessfully = true;
-                appToast.error('Re-index error', parsed.message);
-              }
-            } catch {
-              // Ignore parse error
-            }
-          }
-        }
-      }
-
-      if (!completedSuccessfully) {
-        appToast.info(
-          'Re-index complete',
-          'Placement archive was processed and updated in the background.'
-        );
-        router.refresh();
-      }
-    } catch (err) {
-      if (!completedSuccessfully) {
-        const errorMessage = err instanceof Error ? err.message : 'Re-indexing failed';
-        const isNetworkErr = errorMessage.toLowerCase().includes('network') || errorMessage.toLowerCase().includes('fetch');
-        if (isNetworkErr) {
-          appToast.info(
-            'Re-index updated',
-            'Connection closed. Processed drives and application stages have been saved.'
-          );
-          router.refresh();
-        } else {
-          appToast.error('Reprocess notice', errorMessage || 'Re-indexing encountered an issue');
-        }
-      }
-    } finally {
-      setReprocessing(false);
-      setReprocessProgress(null);
-    }
-  };
 
   // Handle Reset to Fresh Candidate Mode
   const handleResetData = async () => {
@@ -391,10 +275,10 @@ export default function SettingsClient({
     <div data-testid="settings-page" className="mx-auto max-w-7xl space-y-4 sm:space-y-6 w-full min-w-0 pb-16">
       {/* Header */}
       <div>
-        <h1 className="font-display text-xl sm:text-2xl font-extrabold tracking-tight text-white">
+        <h1 className="font-display text-2xl sm:text-3xl font-extrabold tracking-tight text-white">
           Settings & Radar
         </h1>
-        <p className="mt-0.5 text-xs sm:text-sm text-zinc-400">
+        <p className="mt-0.5 text-sm sm:text-base text-zinc-400">
           Connected inboxes, applicant ID & sync preferences
         </p>
       </div>
@@ -421,25 +305,25 @@ export default function SettingsClient({
                 onChange={(e) => setRegId(e.target.value.toUpperCase())}
                 placeholder="e.g. 21BCE0492"
                 maxLength={12}
-                className="h-9 flex-1 min-w-0 bg-transparent px-2 font-mono text-xs sm:text-sm tracking-widest text-zinc-100 placeholder:text-zinc-600 placeholder:font-sans placeholder:tracking-normal focus:outline-none uppercase"
+                className="h-10 flex-1 min-w-0 bg-transparent px-2 font-mono text-sm sm:text-base tracking-widest text-zinc-100 placeholder:text-zinc-600 placeholder:font-sans placeholder:tracking-normal focus:outline-none uppercase"
               />
               <button
                 data-testid="regid-save-btn"
                 onClick={handleSaveRegId}
                 disabled={isSavingId}
-                className="h-9 rounded-lg bg-emerald-500 px-3 sm:px-4 text-xs font-bold text-zinc-950 transition-all hover:bg-emerald-400 active:scale-95 disabled:opacity-60 cursor-pointer shrink-0 whitespace-nowrap"
+                className="h-10 rounded-lg bg-emerald-500 px-3 sm:px-4 text-sm font-bold text-zinc-950 transition-all hover:bg-emerald-400 active:scale-95 disabled:opacity-60 cursor-pointer shrink-0 whitespace-nowrap"
               >
                 {isSavingId ? 'Saving...' : 'Save ID'}
               </button>
             </div>
-            <p className="text-[11px] text-zinc-400 leading-snug">
+            <p className="text-xs text-zinc-400 leading-snug">
               Matched against roll number columns, candidate tables & Excel sheets.
             </p>
           </div>
 
-          <div className="mt-3.5 pt-2.5 border-t border-white/[0.05] flex items-center justify-between text-[11px]">
+          <div className="mt-3.5 pt-2.5 border-t border-white/[0.05] flex items-center justify-between text-xs">
             <span className="text-zinc-500 font-mono">Shortlist Scanner</span>
-            <span className="font-mono text-emerald-400 font-semibold flex items-center gap-1.5 text-[11px]">
+            <span className="font-mono text-emerald-400 font-semibold flex items-center gap-1.5 text-xs">
               <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" /> Active & Monitoring
             </span>
           </div>
@@ -455,7 +339,7 @@ export default function SettingsClient({
         >
           <div className="space-y-3">
             <div>
-              <span className="font-mono text-[10px] font-bold uppercase tracking-wider text-zinc-400 block mb-2">
+              <span className="font-mono text-[11px] font-bold uppercase tracking-wider text-zinc-400 block mb-2">
                 Home Campus
               </span>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 p-1 rounded-xl bg-zinc-900/60 border border-white/[0.06]">
@@ -465,7 +349,7 @@ export default function SettingsClient({
                     type="button"
                     onClick={() => handleSelectCampus(c)}
                     className={cn(
-                      'rounded-lg py-2 px-2 text-xs font-semibold transition-all text-center cursor-pointer active:scale-95',
+                      'rounded-lg py-2 px-2 text-[13px] font-semibold transition-all text-center cursor-pointer active:scale-95',
                       selectedCampus === c
                         ? 'border border-emerald-500/40 bg-emerald-500/15 text-emerald-300 shadow-[0_0_12px_rgba(16,185,129,0.12)]'
                         : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50'
@@ -475,7 +359,7 @@ export default function SettingsClient({
                   </button>
                 ))}
               </div>
-              <p className="mt-2 text-[11px] text-zinc-500">
+              <p className="mt-2 text-xs text-zinc-500">
                 {collegeAccount?.email ? 'Auto-detected from inbox: ' : 'Active campus: '}
                 <span className="text-zinc-300 font-mono font-bold">{selectedCampus}</span>
               </p>
@@ -487,15 +371,15 @@ export default function SettingsClient({
               {detectedBranch && (
                 <div className="flex items-center gap-1.5 rounded-lg bg-zinc-900/80 border border-white/[0.06] px-2.5 py-1">
                   <GraduationCap className="w-3.5 h-3.5 text-zinc-500" />
-                  <span className="text-zinc-500 text-[10px] uppercase font-mono">Branch:</span>
-                  <span className="font-mono text-zinc-200 font-semibold text-[11px]">{detectedBranch}</span>
+                  <span className="text-zinc-500 text-[11px] uppercase font-mono">Branch:</span>
+                  <span className="font-mono text-zinc-200 font-semibold text-xs">{detectedBranch}</span>
                 </div>
               )}
               {detectedRegNo && (
                 <div className="flex items-center gap-1.5 rounded-lg bg-zinc-900/80 border border-white/[0.06] px-2.5 py-1">
                   <Fingerprint className="w-3.5 h-3.5 text-zinc-500" />
-                  <span className="text-zinc-500 text-[10px] uppercase font-mono">Reg No:</span>
-                  <span className="font-mono text-zinc-200 font-semibold text-[11px]">{detectedRegNo}</span>
+                  <span className="text-zinc-500 text-[11px] uppercase font-mono">Reg No:</span>
+                  <span className="font-mono text-zinc-200 font-semibold text-xs">{detectedRegNo}</span>
                 </div>
               )}
             </div>
@@ -521,7 +405,7 @@ export default function SettingsClient({
                   </div>
                   <div className="min-w-0">
                     <div className="flex items-center gap-1.5">
-                      <span className="text-xs sm:text-sm font-semibold text-zinc-100 truncate">
+                      <span className="text-sm sm:text-base font-semibold text-zinc-100 truncate">
                         Personal Gmail
                       </span>
                       {personalAccount ? (
@@ -534,7 +418,7 @@ export default function SettingsClient({
                         </span>
                       )}
                     </div>
-                    <div className="font-mono text-[11px] text-zinc-400 truncate mt-0.5">
+                    <div className="font-mono text-xs text-zinc-400 truncate mt-0.5">
                       {personalAccount?.email || userEmail || 'your.personal@gmail.com'}
                     </div>
                   </div>
@@ -544,20 +428,20 @@ export default function SettingsClient({
                     data-testid="disconnect-personal-btn"
                     onClick={() => handleDisconnect(personalAccount.id)}
                     disabled={disconnecting === personalAccount.id}
-                    className="shrink-0 rounded-lg border border-zinc-800 hover:border-rose-500/40 px-2.5 py-1 text-[11px] font-semibold text-zinc-400 hover:text-rose-300 active:scale-95 transition-all cursor-pointer"
+                    className="shrink-0 rounded-lg border border-zinc-800 hover:border-rose-500/40 px-2.5 py-1.5 text-xs font-semibold text-zinc-400 hover:text-rose-300 active:scale-95 transition-all cursor-pointer"
                   >
                     {disconnecting === personalAccount.id ? 'Disconnecting...' : 'Disconnect'}
                   </button>
                 ) : (
                   <a
                     href="/api/auth/google?type=personal"
-                    className="flex items-center gap-1 shrink-0 rounded-lg bg-emerald-500 hover:bg-emerald-400 px-3 py-1 text-[11px] font-bold text-zinc-950 active:scale-95 transition-all"
+                    className="flex items-center gap-1 shrink-0 rounded-lg bg-emerald-500 hover:bg-emerald-400 px-3 py-1.5 text-xs font-bold text-zinc-950 active:scale-95 transition-all"
                   >
                     <Plus className="h-3 w-3" /> Connect
                   </a>
                 )}
               </div>
-              <div className="pt-2 border-t border-white/[0.04] flex items-center justify-between text-[10px] text-zinc-500">
+              <div className="pt-2 border-t border-white/[0.04] flex items-center justify-between text-[11px] text-zinc-500">
                 <span>NeoPAT registrations & offer letters</span>
                 <span className="font-mono text-zinc-400">Master Drives</span>
               </div>
@@ -572,10 +456,10 @@ export default function SettingsClient({
                   </div>
                   <div className="min-w-0">
                     <div className="flex items-center gap-1.5 flex-wrap">
-                      <span className="text-xs sm:text-sm font-semibold text-zinc-100 truncate">
+                      <span className="text-sm sm:text-base font-semibold text-zinc-100 truncate">
                         College Gmail
                       </span>
-                      <span className="text-[10px] font-mono font-medium text-emerald-400 bg-emerald-500/10 px-1.5 py-0.5 rounded border border-emerald-500/20">
+                      <span className="text-[11px] font-mono font-medium text-emerald-400 bg-emerald-500/10 px-1.5 py-0.5 rounded border border-emerald-500/20">
                         @vitbhopal.ac.in / @vitstudent.ac.in
                       </span>
                       {collegeAccount ? (
@@ -588,7 +472,7 @@ export default function SettingsClient({
                         </span>
                       )}
                     </div>
-                    <div className="font-mono text-[11px] text-zinc-400 truncate mt-0.5">
+                    <div className="font-mono text-xs text-zinc-400 truncate mt-0.5">
                       {collegeAccount?.email || 'student.23bce@vitbhopal.ac.in'}
                     </div>
                   </div>
@@ -598,20 +482,20 @@ export default function SettingsClient({
                     data-testid="disconnect-college-btn"
                     onClick={() => handleDisconnect(collegeAccount.id)}
                     disabled={disconnecting === collegeAccount.id}
-                    className="shrink-0 rounded-lg border border-zinc-800 hover:border-rose-500/40 px-2.5 py-1 text-[11px] font-semibold text-zinc-400 hover:text-rose-300 active:scale-95 transition-all cursor-pointer"
+                    className="shrink-0 rounded-lg border border-zinc-800 hover:border-rose-500/40 px-2.5 py-1.5 text-xs font-semibold text-zinc-400 hover:text-rose-300 active:scale-95 transition-all cursor-pointer"
                   >
                     {disconnecting === collegeAccount.id ? 'Disconnecting...' : 'Disconnect'}
                   </button>
                 ) : (
                   <a
                     href="/api/auth/google?type=college"
-                    className="flex items-center gap-1 shrink-0 rounded-lg bg-emerald-500 hover:bg-emerald-400 px-3 py-1 text-[11px] font-bold text-zinc-950 active:scale-95 transition-all"
+                    className="flex items-center gap-1 shrink-0 rounded-lg bg-emerald-500 hover:bg-emerald-400 px-3 py-1.5 text-xs font-bold text-zinc-950 active:scale-95 transition-all"
                   >
                     <Plus className="h-3 w-3" /> Connect
                   </a>
                 )}
               </div>
-              <div className="pt-2 border-t border-white/[0.04] flex items-center justify-between text-[10px] text-zinc-500">
+              <div className="pt-2 border-t border-white/[0.04] flex items-center justify-between text-[11px] text-zinc-500">
                 <span>Shared archive matching when available</span>
                 <span className="font-mono text-zinc-400">{selectedCampus}</span>
               </div>
@@ -625,14 +509,14 @@ export default function SettingsClient({
                 <Zap className="h-3.5 w-3.5 text-emerald-400" />
               </div>
               <div className="min-w-0">
-                <p className="text-xs font-semibold text-zinc-200 truncate">Manual Inbox Sync</p>
-                <p className="text-[10px] text-zinc-400 truncate">Check your Personal inbox and match shared shortlists</p>
+                <p className="text-sm font-semibold text-zinc-200 truncate">Manual Inbox Sync</p>
+                <p className="text-[11px] text-zinc-400 truncate">Check your Personal inbox and match shared shortlists</p>
               </div>
             </div>
             <button
               type="button"
               onClick={handleTriggerSync}
-              className="flex items-center gap-1.5 rounded-lg bg-emerald-500/15 border border-emerald-500/35 px-3 py-1.5 text-xs font-semibold text-emerald-300 hover:bg-emerald-500/25 active:scale-95 transition-all cursor-pointer shrink-0"
+              className="flex items-center gap-1.5 rounded-lg bg-emerald-500/15 border border-emerald-500/35 px-3 py-1.5 text-[13px] font-semibold text-emerald-300 hover:bg-emerald-500/25 active:scale-95 transition-all cursor-pointer shrink-0"
             >
               <Zap className="h-3 w-3" />
               <span>Sync Now</span>
@@ -655,22 +539,22 @@ export default function SettingsClient({
         <div className="space-y-3">
           <div className="rounded-xl border border-white/[0.06] bg-zinc-900/50 p-3.5 sm:p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div className="space-y-0.5">
-              <div className="text-xs sm:text-sm font-semibold text-zinc-200">
+              <div className="text-sm font-semibold text-zinc-200">
                 Refresh Placement Data
               </div>
-              <p className="text-[11px] text-zinc-400 leading-snug">
+              <p className="text-xs text-zinc-400 leading-snug">
                 Re-checks your saved placement data and updates drives, events, applications, and shortlist status (takes ~1–2 min).
               </p>
             </div>
             <button
               type="button"
               data-testid="reprocess-btn"
-              onClick={handleReprocessArchive}
+              onClick={startReprocess}
               disabled={reprocessing}
-              className="flex items-center justify-center gap-2 shrink-0 rounded-lg border border-indigo-500/40 bg-indigo-500/15 px-3.5 py-2 text-xs font-semibold text-indigo-300 hover:bg-indigo-500/25 disabled:opacity-50 active:scale-95 transition-all cursor-pointer w-full sm:w-auto"
+              className="flex items-center justify-center gap-2 shrink-0 rounded-lg border border-indigo-500/40 bg-indigo-500/15 px-3.5 py-2 text-[13px] font-semibold text-indigo-300 hover:bg-indigo-500/25 disabled:opacity-50 active:scale-95 transition-all cursor-pointer w-full sm:w-auto"
             >
               <RefreshCw className={cn('h-3.5 w-3.5', reprocessing && 'animate-spin text-indigo-400')} />
-              <span>{reprocessing ? 'Refreshing...' : 'Refresh Placement Data'}</span>
+              <span>{reprocessing ? 'Refreshing…' : 'Refresh Placement Data'}</span>
             </button>
           </div>
 
@@ -693,7 +577,7 @@ export default function SettingsClient({
                 />
               </div>
               <p className="text-[10px] font-mono text-indigo-300/80">
-                ⚡ Please keep this tab open until re-indexing completes (~1 min).
+                ⚡ Running in background — you can navigate away and progress will follow you.
               </p>
             </div>
           )}
@@ -721,11 +605,11 @@ export default function SettingsClient({
           {/* Action 1: Reset All Data */}
           <div className="rounded-xl border border-amber-500/20 bg-amber-500/[0.04] p-3.5 sm:p-4 flex flex-col justify-between gap-3">
             <div className="space-y-1">
-              <div className="flex items-center gap-2 text-amber-300 text-xs sm:text-sm font-semibold">
-                <RotateCcw className="h-3.5 w-3.5 shrink-0" />
+              <div className="flex items-center gap-2 text-amber-300 text-sm font-semibold">
+                <RotateCcw className="h-4 w-4 shrink-0" />
                 <span>Reset Placement Data</span>
               </div>
-              <p className="text-[11px] text-zinc-400 leading-snug">
+              <p className="text-xs text-zinc-400 leading-snug">
                 Clears your applications, events, shortlist matches & email receipts. Keeps shared catalog data, Google accounts & Candidate ID.
               </p>
             </div>
@@ -736,7 +620,7 @@ export default function SettingsClient({
                 setResetConfirmText('');
                 setShowResetModal(true);
               }}
-              className="w-full py-2 rounded-lg border border-amber-500/40 bg-amber-500/10 text-xs font-semibold text-amber-300 hover:bg-amber-500/20 active:scale-95 transition-all cursor-pointer text-center"
+              className="w-full py-2 rounded-lg border border-amber-500/40 bg-amber-500/10 text-[13px] font-semibold text-amber-300 hover:bg-amber-500/20 active:scale-95 transition-all cursor-pointer text-center"
             >
               Reset All Data
             </button>
@@ -745,11 +629,11 @@ export default function SettingsClient({
           {/* Action 2: Terminate Account Entirely */}
           <div className="rounded-xl border border-rose-500/25 bg-rose-500/[0.04] p-3.5 sm:p-4 flex flex-col justify-between gap-3">
             <div className="space-y-1">
-              <div className="flex items-center gap-2 text-rose-300 text-xs sm:text-sm font-semibold">
-                <Trash2 className="h-3.5 w-3.5 shrink-0" />
+              <div className="flex items-center gap-2 text-rose-300 text-sm font-semibold">
+                <Trash2 className="h-4 w-4 shrink-0" />
                 <span>Terminate Account</span>
               </div>
-              <p className="text-[11px] text-zinc-400 leading-snug">
+              <p className="text-xs text-zinc-400 leading-snug">
                 Permanently deletes profile, revokes Google OAuth tokens & purges all data.
               </p>
             </div>
@@ -760,7 +644,7 @@ export default function SettingsClient({
                 setDeleteConfirmText('');
                 setShowDeleteModal(true);
               }}
-              className="w-full py-2 rounded-lg border border-rose-500/40 bg-rose-500/20 text-xs font-semibold text-rose-200 hover:bg-rose-500/30 active:scale-95 transition-all cursor-pointer text-center"
+              className="w-full py-2 rounded-lg border border-rose-500/40 bg-rose-500/20 text-[13px] font-semibold text-rose-200 hover:bg-rose-500/30 active:scale-95 transition-all cursor-pointer text-center"
             >
               Terminate Account
             </button>
@@ -918,11 +802,11 @@ export default function SettingsClient({
       </AnimatePresence>
 
       {/* Legal & Compliance Footer */}
-      <div className="pt-2 pb-8 flex flex-col sm:flex-row items-center justify-between gap-3 font-mono text-[11px] text-zinc-500 border-t border-white/[0.05]">
+      <div className="pt-2 pb-8 flex flex-col sm:flex-row items-center justify-between gap-3 font-mono text-xs text-zinc-500 border-t border-white/[0.05]">
         <span className="text-zinc-500 text-center sm:text-left">
           Where&apos;s My Offer<span className="text-emerald-400 font-extrabold ml-0.5">?</span> · Placement Radar
         </span>
-        <div className="flex items-center justify-center gap-3 sm:gap-4 whitespace-nowrap text-[11px]">
+        <div className="flex items-center justify-center gap-3 sm:gap-4 whitespace-nowrap text-xs">
           <Link href="/feedback" className="hover:text-zinc-300 transition-colors py-1">
             Feedback
           </Link>

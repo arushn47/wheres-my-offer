@@ -89,8 +89,12 @@ export function getPlacementSearchQuery(
       ? ` after:${afterDate.toISOString().split('T')[0].replace(/-/g, '/')}`
       : ' after:2026/07/01';
 
-    // College accounts — STRICTLY official batch placement group
-    return `from:vitlions2027@vitbhopal.ac.in${collegeDateFilter} -category:promotions -category:social`;
+    // Gated senders (placement office) are always listed; the relevance gate at the
+    // ingest boundary scores each message and persists the verdict in the DB.
+    const gatedSenders = ' OR from:placementoffice@vitbhopal.ac.in';
+
+    // College accounts — official batch placement group + gated senders
+    return `(from:vitlions2027@vitbhopal.ac.in${gatedSenders})${collegeDateFilter} -category:promotions -category:social`;
   }
 
   // Personal accounts — STRICTLY official NeoPAT / CDC emails from vitstudent.ac.in starting July 2026

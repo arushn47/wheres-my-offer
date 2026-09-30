@@ -253,6 +253,7 @@ export interface DbNotification {
   link?: string | null;
   event_id?: string | null;
   dedupe_key?: string | null;
+  dismissed_at?: string | null;
   created_at: string;
 }
 

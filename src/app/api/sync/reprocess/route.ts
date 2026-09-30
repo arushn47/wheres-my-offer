@@ -557,6 +557,56 @@ export async function recalculateApplicationStatuses(
           hasExplicitTime: boolean;
         }> = [];
 
+        // 0. Scan company emails for candidate matches (email body direct matches and Google Sheets)
+        for (const email of companyEmails) {
+          const emailText = `${email.subject || ''}\n${email.body_snippet || ''}`;
+          const isRelevantCandidateEmail =
+            /shortlist|selection|selected|test|assessment|interview|score|rank|eligible|candidates|students/i.test(
+              emailText
+            );
+          if (!isRelevantCandidateEmail) continue;
+
+          const alreadyMatched = (candidateMatches || []).some(
+            (cm) => {
+              const match = cm as unknown as { email_id: string | null; college_email_id: string | null };
+              return match.email_id === email.id || match.college_email_id === email.id;
+            }
+          );
+          if (alreadyMatched) continue;
+
+          // Check direct Neo ID or Reg No match in email body
+          const { checkNeoIdMatch } = await import('@/lib/sync/status-engine');
+          const bodyMatch = checkNeoIdMatch(emailText, userNeoId, userEmail);
+          if (bodyMatch.matched) {
+            matchedEmailIds.add(email.id);
+            const isShortlistNotice = /shortlist|selection|selected|result/i.test(email.subject || '');
+            const round = /interview/i.test(email.subject || '')
+              ? 'interview'
+              : /selection\s*list|final\s*selection|offer/i.test(email.subject || '')
+                ? 'selected'
+                : 'test';
+            const isCollegeRef = Boolean(email.college_email_id || email.canonical_email_id || (email as any).sender_email);
+            const insertPayload: any = {
+              user_id: userId,
+              placement_drive_id: drive.id,
+              neo_id: userNeoId || userEmail,
+              match_type: 'email_body',
+              matched_round_type: isShortlistNotice ? round : null,
+              matched_value: `Found ${bodyMatch.matchedValue} in email body selection list`,
+              confidence: 'high',
+            };
+            if (isCollegeRef) {
+              insertPayload.college_email_id = email.id;
+            } else {
+              insertPayload.email_id = email.id;
+            }
+            const { error: insertError } = await supabase.from('candidate_matches').insert(insertPayload);
+            if (insertError && insertError.code !== '23505') {
+              throw insertError;
+            }
+          }
+        }
+
         if (options?.deepGSheetScan) {
           const { extractGoogleSheetUrls, scanGoogleSheetForCandidate } = await import('@/lib/sync/gsheet-parser');
 
@@ -574,7 +624,7 @@ export async function recalculateApplicationStatuses(
                 return match.email_id === email.id || match.college_email_id === email.id;
               }
             );
-            if (alreadyMatched) continue;
+            if (alreadyMatched || matchedEmailIds.has(email.id)) continue;
 
             const gUrls = extractGoogleSheetUrls(emailText);
             for (const gUrl of gUrls) {

@@ -18,8 +18,10 @@ export async function GET() {
   const supabase = createAdminClient();
 
   try {
-    // 1. Fetch all placement_drives across all users
-    const [drivesRes, companiesRes, emailsRes, appsRes] = await Promise.all([
+    // 1. Fetch all placement_drives across all users. Aliases come from
+    // drive_resolutions (drive-scoped) — companies.aliases is shared by sibling
+    // drives and would wrongly show/edit across drive groups.
+    const [drivesRes, companiesRes, emailsRes, appsRes, resolutionsRes] = await Promise.all([
       supabase
         .from('placement_drives')
         .select('id, company_id, drive_number, normalized_drive_number, drive_name, role, category, ctc, stipend, location, updated_at')
@@ -33,6 +35,9 @@ export async function GET() {
       supabase
         .from('applications')
         .select('id, placement_drive_id, status'),
+      supabase
+        .from('drive_resolutions')
+        .select('drive_number, company_base_name, resolved_via'),
     ]);
 
     if (drivesRes.error) {
@@ -44,6 +49,17 @@ export async function GET() {
     const companies = companiesRes.data || [];
     const emails = emailsRes.data || [];
     const apps = appsRes.data || [];
+
+    // Drive-scoped aliases: drive_number(lowercased) -> alias terms (manual only)
+    const driveAliasesMap = new Map<string, string[]>();
+    for (const res of resolutionsRes.data || []) {
+      if (res.resolved_via !== 'manual_review') continue;
+      const num = (res.drive_number || '').toLowerCase().trim();
+      if (!num || !res.company_base_name) continue;
+      const list = driveAliasesMap.get(num) || [];
+      if (!list.includes(res.company_base_name)) list.push(res.company_base_name);
+      driveAliasesMap.set(num, list);
+    }
 
     // Map companyId to Company Name and Aliases
     const companyMap = new Map<string, string>();
@@ -107,7 +123,12 @@ export async function GET() {
       const appCount = appsPerDrive.get(d.id) || 0;
 
       const existing = groupMap.get(key);
-      const companyAliases = d.company_id ? companyAliasesMap.get(d.company_id) || [] : [];
+      // Prefer drive-scoped aliases; fall back to company aliases only when the
+      // drive has none of its own AND no sibling drive has customized theirs.
+      const driveScopeKey = (d.drive_number || d.normalized_drive_number || '').toLowerCase().trim();
+      const companyAliases = driveScopeKey && driveAliasesMap.has(driveScopeKey)
+        ? driveAliasesMap.get(driveScopeKey)!
+        : (d.company_id ? companyAliasesMap.get(d.company_id) || [] : []);
       if (existing) {
         existing.totalEmails += emailStats.count;
         existing.totalApplications += appCount;

@@ -195,7 +195,11 @@ export default async function CompaniesPage() {
     const { drive, app, entityId } = ent;
     const companyId = drive?.company_id || ent.company?.id || (app as any)?.company_id;
     const comp = companyId ? compMap.get(companyId) : undefined;
-    const effectiveLatestDate = drive?.updated_at || app?.last_updated || comp?.updated_at || drive?.created_at || new Date().toISOString();
+    // Per-drive time: the user-scoped application update always reflects THIS drive's
+    // last change. drive.updated_at is bumped by shared catalog operations (admin edits,
+    // archive refreshes) that touch every drive at once — showing it makes every card
+    // display the same "common" time. Application first, drive only as fallback.
+    const effectiveLatestDate = app?.last_updated || drive?.updated_at || comp?.updated_at || drive?.created_at || new Date().toISOString();
     
     const normNum = drive?.normalized_drive_number || drive?.drive_number;
     const shared = normNum ? sharedMetaMap.get(normNum.toLowerCase().trim()) : undefined;

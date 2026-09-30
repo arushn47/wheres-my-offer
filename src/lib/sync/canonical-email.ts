@@ -5,16 +5,33 @@ export const CANONICAL_IDENTITY_VERSION = 2;
 export const CANONICAL_PARSER_VERSION = 2;
 export const APPROVED_COLLEGE_SENDER = 'vitlions2027@vitbhopal.ac.in';
 
+/**
+ * Secondary, GATED college senders.
+ *
+ * Unlike the primary batch group (vitlions2027, ~99% relevant), these senders mix
+ * drive circulars with heavy chatter (meeting start pings, meet links, greetings).
+ * Every message from them is scored once by `scoreCollegeMessageRelevance()`; the
+ * verdict lives in college_emails.processing_status ('rejected' = chatter), so
+ * there is no deployment-time flag to manage — the database is the switch.
+ */
+export const GATED_COLLEGE_SENDERS = ['placementoffice@vitbhopal.ac.in'] as const;
+
 export function extractSenderAddress(sender: string | null | undefined): string {
   const raw = (sender || '').trim();
   const angleMatch = raw.match(/<([^>]+)>/);
   return (angleMatch ? angleMatch[1] : raw).trim().toLowerCase();
 }
 
+export function isGatedCollegeSender(senderEmail: string | null | undefined): boolean {
+  const address = extractSenderAddress(senderEmail);
+  return (GATED_COLLEGE_SENDERS as readonly string[]).includes(address);
+}
+
 export function isApprovedCanonicalSender(senderEmail: string | null | undefined): boolean {
   if (!senderEmail) return false;
   if (/noreply\.cdcinfo@vitstudent\.ac\.in/i.test(senderEmail)) return false;
-  return extractSenderAddress(senderEmail) === APPROVED_COLLEGE_SENDER;
+  const address = extractSenderAddress(senderEmail);
+  return address === APPROVED_COLLEGE_SENDER || (GATED_COLLEGE_SENDERS as readonly string[]).includes(address);
 }
 
 export function normalizeRfcMessageId(messageId: string | null | undefined): string | null {

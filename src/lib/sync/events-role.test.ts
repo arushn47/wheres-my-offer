@@ -105,12 +105,50 @@ Fixed Pay 14,86,120 Joining Bonus 3,00,000 TCTC@Target 21,27,320
     expect(details.role).toBe('ETS – Software Engineering');
   });
 
+  it('extracts un-delimited single-line Title Intern from JD tables', () => {
+    const text = `
+About Us:
+Axxela Research & Analytics
+Title Intern
+Job Location Mumbai / Kolkata / Bengaluru / Gurgaon
+Cut-Off Criteria 50% and above throughout
+    `;
+    const details = extractJobDetails(text);
+    expect(details.role).toBe('Intern');
+    expect(details.location).toBe('Mumbai / Kolkata / Bengaluru / Gurgaon');
+  });
+
   it('does NOT capture prose containing the word "role" as a job role', () => {
     const text = `
 Access the embedded Business Unit Job Links available under the role to complete applications on the American Express Career Portal and learn more about the teams hiring within American Express through Business Unit specific information, role details, Job Descriptions, and key requirements.
     `;
     const details = extractJobDetails(text);
     expect(details.role).toBeNull();
+  });
+
+  it('extracts Tata Technologies GET designation without compensation-table bleed', () => {
+    const text = `
+1. Designation: GET
+Compensation Detail for GET - 6.5 LPA + Insurance + 50K/ year trainee bonus for first two years
+Service Agreement: 2 Years
+Qualification – B.Tech (Computer Science, Mechanical and relevant specializations)
+
+2. Designation: PGET
+Compensation Detail for GET - 7.5 LPA + Insurance + 50K/ year trainee bonus for first two years
+Service Agreement: 2 Years
+Qualification – M.Tech (Computer Science, Mechanical and relevant specializations)
+
+Job Location: Tata Technologies Ltd. Pune/ Bangalore/Thane
+    `;
+    const details = extractJobDetails(text);
+    expect(details.role).toBe('GET');
+  });
+
+  it('still captures legit multi-line bullet role lists', () => {
+    const text = `Designation:
+- Graduate Engineer Trainee
+- Systems Engineer`;    const details = extractJobDetails(text);
+    expect(details.role).toBe('Graduate Engineer Trainee / Systems Engineer');
   });
 
   it('returns null for drives where circular says "Job Description : Below attachment"', () => {

@@ -192,16 +192,15 @@ export default function NotificationSettings() {
             <Bell className="h-4 w-4 text-emerald-400" />
           </div>
           <div>
-            <h2 className="font-display text-sm sm:text-base font-bold tracking-tight text-white">
+            <h2 className="font-display text-base sm:text-lg font-bold tracking-tight text-white">
               Notifications & Radar Alerts
             </h2>
-            <p className="text-[11px] sm:text-xs text-zinc-400 mt-0.5">
+            <p className="text-xs sm:text-sm text-zinc-400 mt-0.5">
               Instant radar pings, push alerts & countdown reminders
             </p>
           </div>
         </div>
-        {savingPrefs && (
-          <span className="text-[11px] text-emerald-400 flex items-center gap-1.5 font-mono">
+        {savingPrefs && (                <span className="text-xs text-emerald-400 flex items-center gap-1.5 font-mono">
             <Loader2 className="w-3 h-3 animate-spin" /> Saving…
           </span>
         )}
@@ -217,7 +216,7 @@ export default function NotificationSettings() {
               </div>
               <div className="min-w-0">
                 <div className="flex items-center gap-2">
-                  <span className="text-xs sm:text-sm font-semibold text-zinc-100">
+                  <span className="text-sm font-semibold text-zinc-100">
                     Browser Push Alerts
                   </span>
                   {isSubscribed && (
@@ -226,7 +225,7 @@ export default function NotificationSettings() {
                     </span>
                   )}
                 </div>
-                <p className="text-[11px] text-zinc-400 mt-0.5 leading-snug truncate sm:whitespace-normal">
+                <p className="text-xs text-zinc-400 mt-0.5 leading-snug truncate sm:whitespace-normal">
                   Alerts for test schedules, shortlists & deadlines even when closed
                 </p>
               </div>
@@ -379,8 +378,8 @@ export default function NotificationSettings() {
                       <Icon className={cn('w-4 h-4', color)} />
                     </div>
                     <div className="min-w-0">
-                      <p className="text-xs font-semibold text-zinc-100 truncate">{label}</p>
-                      <p className="text-[10px] text-zinc-400 truncate mt-0.5">{desc}</p>
+                      <p className="text-[13px] font-semibold text-zinc-100 truncate">{label}</p>
+                      <p className="text-[11px] text-zinc-400 truncate mt-0.5">{desc}</p>
                     </div>
                   </div>
 
@@ -406,10 +405,10 @@ export default function NotificationSettings() {
                 <Timer className="h-4 w-4 text-rose-400" />
               </div>
               <div className="min-w-0">
-                <h3 className="text-xs sm:text-sm font-semibold text-zinc-100 truncate">
+                <h3 className="text-sm font-semibold text-zinc-100 truncate">
                   Event Reminders & Lead Times
                 </h3>
-                <p className="text-[10px] sm:text-[11px] text-zinc-400 truncate">
+                <p className="text-[11px] sm:text-xs text-zinc-400 truncate">
                   Automatic countdown alerts before scheduled placement rounds
                 </p>
               </div>
@@ -429,7 +428,7 @@ export default function NotificationSettings() {
             <div className="space-y-3 pt-2.5 border-t border-white/[0.05] animate-fade-in">
               {/* Event Types */}
               <div>
-                <p className="text-[11px] font-semibold text-zinc-300 mb-2">
+                <p className="text-xs font-semibold text-zinc-300 mb-2">
                   Remind for these rounds:
                 </p>
                 <div className="grid grid-cols-2 gap-1.5">
@@ -448,8 +447,8 @@ export default function NotificationSettings() {
                         )}
                       >
                         <div className="min-w-0 flex-1 pr-1.5">
-                          <p className="text-[11px] font-semibold leading-tight truncate">{opt.label}</p>
-                          <p className="text-[9px] text-zinc-500 truncate mt-0.5">{opt.desc}</p>
+                          <p className="text-xs font-semibold leading-tight truncate">{opt.label}</p>
+                          <p className="text-[10px] text-zinc-500 truncate mt-0.5">{opt.desc}</p>
                         </div>
                         <div
                           className={cn(
@@ -469,7 +468,7 @@ export default function NotificationSettings() {
 
               {/* Lead Time Selection */}
               <div>
-                <p className="text-[11px] font-semibold text-zinc-300 mb-1.5">
+                <p className="text-xs font-semibold text-zinc-300 mb-1.5">
                   Alert schedule:
                 </p>
                 <div className="flex flex-wrap gap-1.5">
@@ -481,7 +480,7 @@ export default function NotificationSettings() {
                         type="button"
                         onClick={() => toggleLeadTime(lt.minutes)}
                         className={cn(
-                          'flex items-center gap-1 px-2.5 py-1 rounded-full border text-[11px] font-mono transition-all cursor-pointer active:scale-95',
+                          'flex items-center gap-1 px-2.5 py-1 rounded-full border text-xs font-mono transition-all cursor-pointer active:scale-95',
                           isSelected
                             ? 'bg-rose-500/15 border-rose-500/40 text-rose-300 font-semibold shadow-sm'
                             : 'bg-zinc-800/40 border-zinc-800 text-zinc-500 hover:text-zinc-300 hover:border-zinc-700'

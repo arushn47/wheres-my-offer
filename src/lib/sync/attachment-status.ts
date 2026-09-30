@@ -1,18 +1,19 @@
 /**
  * College attachment parse-status vocabulary.
  *
- * The shared College archive only extracts roster/JD rows from spreadsheets
- * (`xlsx` / `xls` / `csv`). Every other attachment format falls into one of two
- * terminal, deliberately *non-retryable* buckets so that the archive never reports
- * them as transient parser failures and never re-downloads them on later worker passes:
+ * The shared College archive extracts roster rows from spreadsheets
+ * (`xlsx` / `xls` / `csv`) and JD text from text-layer PDFs (see `pdf-parser.ts`).
+ * Every other attachment format falls into one of two terminal, deliberately
+ * *non-retryable* buckets so that the archive never reports them as transient
+ * parser failures and never re-downloads them on later worker passes:
  *
  *   - `ignored`  — images. Nothing in the product consumes them (not a roster, not a
  *                  JD), so they are recorded for inventory fidelity and then dropped.
- *   - `deferred` — formats we may parse in a future feature (PDF / DOC / DOCX JD
- *                  extraction). Keep the row, never retry it now.
+ *   - `deferred` — formats we may parse in a future feature (DOC / DOCX JD
+ *                  extraction, PDF OCR). Keep the row, never retry it now.
  *
  * `error` is reserved for a genuinely transient fetch/parse failure on a supported
- * workbook, which a later worker pass is expected to retry.
+ * workbook or PDF, which a later worker pass is expected to retry.
  */
 export type AttachmentParseStatus = 'pending' | 'processing' | 'complete' | 'error' | 'deferred' | 'ignored';
 

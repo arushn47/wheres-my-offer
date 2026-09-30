@@ -44,3 +44,4 @@ next-env.d.ts
 .freebuff/
 supabase/.temp/
 .tempmediaStorage/
+.kilo/agents/data.md

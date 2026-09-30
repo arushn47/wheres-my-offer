@@ -38,12 +38,14 @@ async function executeBackgroundSync(userIds: string[], includeSharedCollege = f
       .eq('status', 'completed')
       .lt('created_at', twoDaysAgo);
 
-    // Prune in-app notifications older than 7 days
-    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    // Notification rows double as the sync pipeline's dedupe_key ledger: deleting
+    // one lets sync re-create (and re-push) that notification on the next run.
+    // Keep rows well past the inbox window; only prune truly ancient entries.
+    const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
     await supabase
       .from('notifications')
       .delete()
-      .lt('created_at', sevenDaysAgo);
+      .lt('created_at', ninetyDaysAgo);
   } catch (cleanErr) {
     console.warn('[Cron Sync] Stale data cleanup non-fatal error:', cleanErr);
   }

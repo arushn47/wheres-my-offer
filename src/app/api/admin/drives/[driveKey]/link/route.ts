@@ -3,6 +3,11 @@ import { requireAdmin } from '@/lib/auth/admin';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { normalizeDriveNumber } from '@/lib/drive-number';
 import { recalculateApplicationStatuses } from '@/app/api/sync/reprocess/route';
+import {
+  getDriveRegistrationDateBoundary,
+  isEmailAllowedByDriveBoundary,
+  formatIstDate,
+} from '@/lib/sync/drive-temporal-boundary';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 300;
@@ -26,7 +31,7 @@ export async function POST(
 
   try {
     const body = await req.json();
-    const { emailId, emailIds, aliasToAdd } = body;
+    const { emailId, emailIds, aliasToAdd, force } = body;
 
     if (!emailId && (!emailIds || emailIds.length === 0)) {
       return NextResponse.json({ error: 'emailId or emailIds is required' }, { status: 400 });
@@ -52,7 +57,7 @@ export async function POST(
     // 2. Fetch target placement drives
     let driveQuery = supabase
       .from('placement_drives')
-      .select('id, company_id, drive_number, normalized_drive_number, drive_name, excluded_email_ids, source_college_email_id');
+      .select('id, company_id, drive_number, normalized_drive_number, drive_name, created_at, source_email_id, excluded_email_ids, source_college_email_id');
 
     if (driveNumber) {
       driveQuery = driveQuery.or(`drive_number.eq.${driveNumber},normalized_drive_number.eq.${driveNumber}`);
@@ -68,6 +73,13 @@ export async function POST(
     if (!matchedDrives || matchedDrives.length === 0) {
       return NextResponse.json({ error: 'Target placement drive not found' }, { status: 404 });
     }
+
+    // Calculate drive registration date boundary
+    const boundary = await getDriveRegistrationDateBoundary(
+      supabase,
+      matchedDrives.map((d) => d.id),
+      matchedDrives[0]?.created_at
+    );
 
     // 3. Resolve all email IDs to link
     let idsToLink: string[] = emailIds && emailIds.length > 0 ? emailIds : [emailId];
@@ -108,14 +120,34 @@ export async function POST(
     // 4. Fetch the emails to identify their user_id
     const { data: targetEmails, error: emailFetchErr } = await supabase
       .from('personal_emails')
-      .select('id, user_id, subject')
+      .select('id, user_id, subject, received_at')
       .in('id', idsToLink);
 
     const referenceDrive = matchedDrives[0];
     const affectedUserIds = new Set<string>();
 
     if (!emailFetchErr && targetEmails && targetEmails.length > 0) {
-      for (const em of targetEmails) {
+      // Validate drive registration temporal boundary: only emails on or after registration announcement can be linked
+      if (boundary.minAllowedDate && !force) {
+        const violatingEmail = targetEmails.find(
+          (em) => !isEmailAllowedByDriveBoundary(em.received_at, boundary.minAllowedDate)
+        );
+        if (violatingEmail) {
+          const emailDateStr = violatingEmail.received_at
+            ? formatIstDate(new Date(violatingEmail.received_at))
+            : 'unknown date';
+          return NextResponse.json(
+            {
+              error: `Cannot link email received on ${emailDateStr}: it predates the drive's registration announcement (${boundary.formattedRegistrationDate || 'Registration Date'}). Only emails received on or after the registration announcement date can be linked.`,
+              code: 'PRE_REGISTRATION_DATE',
+              registrationDateBoundary: boundary.formattedRegistrationDate,
+            },
+            { status: 400 }
+          );
+        }
+      }
+
+      await Promise.all(targetEmails.map(async (em) => {
         affectedUserIds.add(em.user_id);
 
         // Update email to point directly to the global placement_drive
@@ -147,15 +179,34 @@ export async function POST(
             },
             { onConflict: 'email_id,placement_drive_id' }
           );
-      }
+      }));
     } else {
       // Check if target is a college broadcast circular
       const { data: collegeEmails } = await supabase
         .from('college_emails')
-        .select('id, subject, parsed_drive_numbers, parsed_company_name')
+        .select('id, subject, parsed_drive_numbers, parsed_company_name, received_at, created_at')
         .in('id', idsToLink);
 
       if (collegeEmails && collegeEmails.length > 0) {
+        // Validate drive registration temporal boundary for college circular
+        if (boundary.minAllowedDate && !force) {
+          const violatingCollege = collegeEmails.find(
+            (ce) => !isEmailAllowedByDriveBoundary(ce.received_at || ce.created_at, boundary.minAllowedDate)
+          );
+          if (violatingCollege) {
+            const circularDate = violatingCollege.received_at || violatingCollege.created_at;
+            const circularDateStr = circularDate ? formatIstDate(new Date(circularDate)) : 'unknown date';
+            return NextResponse.json(
+              {
+                error: `Cannot link circular received on ${circularDateStr}: it predates the drive's registration announcement (${boundary.formattedRegistrationDate || 'Registration Date'}). Only circulars received on or after the registration announcement date can be linked.`,
+                code: 'PRE_REGISTRATION_DATE',
+                registrationDateBoundary: boundary.formattedRegistrationDate,
+              },
+              { status: 400 }
+            );
+          }
+        }
+
         const primaryCollegeEmail = collegeEmails[0];
 
         // Set source_college_email_id on the drive if not already set
@@ -220,7 +271,7 @@ export async function POST(
           .or(ceIds.map((id) => `college_email_id.eq.${id}`).join(','));
 
         if (ceReceipts && ceReceipts.length > 0) {
-          for (const r of ceReceipts) {
+          await Promise.all(ceReceipts.map(async (r) => {
             affectedUserIds.add(r.user_id);
             await supabase
               .from('personal_emails')
@@ -249,39 +300,33 @@ export async function POST(
                 },
                 { onConflict: 'email_id,placement_drive_id' }
               );
-          }
+          }));
         }
       } else {
         return NextResponse.json({ error: 'No matching emails found to link' }, { status: 404 });
       }
     }
 
-    // 5. If aliasToAdd provided, register in companies.aliases & drive_resolutions
+    // 5. If aliasToAdd provided, register it as a DRIVE-SCOPED resolution.
+    // Deliberately NOT companies.aliases: sibling drives (e.g. two Deloitte drive
+    // numbers) share one company row, so writing there would leak the alias to
+    // every sibling drive. drive_resolutions keys on the drive number, keeping
+    // aliases per-drive.
     if (aliasToAdd && typeof aliasToAdd === 'string' && aliasToAdd.trim().length >= 2) {
       const cleanAlias = aliasToAdd.trim();
-      const companyIds = Array.from(new Set(matchedDrives.map((d) => d.company_id).filter(Boolean)));
-
-      if (companyIds.length > 0) {
-        const { data: compRows } = await supabase
-          .from('companies')
-          .select('id, aliases')
-          .in('id', companyIds);
-
-        for (const comp of compRows || []) {
-          const currentAliases = new Set(comp.aliases || []);
-          currentAliases.add(cleanAlias);
-          await supabase
-            .from('companies')
-            .update({ aliases: Array.from(currentAliases), updated_at: new Date().toISOString() })
-            .eq('id', comp.id);
-        }
-      }
 
       if (referenceDrive.drive_number) {
-        await supabase
+        const { data: existingRes } = await supabase
           .from('drive_resolutions')
-          .upsert(
-            {
+          .select('id')
+          .eq('drive_number', referenceDrive.drive_number)
+          .eq('company_base_name', cleanAlias.toLowerCase())
+          .maybeSingle();
+
+        if (!existingRes) {
+          await supabase
+            .from('drive_resolutions')
+            .insert({
               drive_number: referenceDrive.drive_number,
               company_base_name: cleanAlias.toLowerCase(),
               resolved_company_name: referenceDrive.drive_name || cleanAlias,
@@ -290,22 +335,32 @@ export async function POST(
               confidence: 'high',
               notes: 'Added via Admin manual email link',
               updated_at: new Date().toISOString(),
-            },
-            { onConflict: 'drive_number' }
-          );
+            });
+        }
       }
     }
 
-    // 6. Reprocess the drive for all affected users
-    for (const userId of affectedUserIds) {
-      try {
-        await recalculateApplicationStatuses(userId, undefined, {
-          targetPlacementDriveIds: [referenceDrive.id],
-          recalculateStatusesFromRemainingEvidence: true,
-        });
-      } catch (repErr) {
-        console.error(`[Admin Link Email] Reprocess failed for user ${userId}:`, repErr);
-      }
+    // 6. Reprocess the drive for all affected users in parallel batches — same
+    // concurrency model as the drive reprocess route, including skipBodyRecovery:
+    // the link action just (re)processed the circular's body itself, so per-user
+    // Gmail/college body recovery inside recalculation is pure duplicated latency.
+    const CONCURRENCY = 5;
+    const reprocessUserIds = Array.from(affectedUserIds);
+    for (let i = 0; i < reprocessUserIds.length; i += CONCURRENCY) {
+      const batch = reprocessUserIds.slice(i, i + CONCURRENCY);
+      await Promise.all(
+        batch.map(async (userId) => {
+          try {
+            await recalculateApplicationStatuses(userId, undefined, {
+              targetPlacementDriveIds: [referenceDrive.id],
+              recalculateStatusesFromRemainingEvidence: true,
+              skipBodyRecovery: true,
+            });
+          } catch (repErr) {
+            console.error(`[Admin Link Email] Reprocess failed for user ${userId}:`, repErr);
+          }
+        })
+      );
     }
 
     const linkedCount = targetEmails?.length || 1;

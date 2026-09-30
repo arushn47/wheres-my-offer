@@ -2,12 +2,14 @@ import { createHash } from 'node:crypto';
 import { randomUUID } from 'node:crypto';
 import { createGmailClient, fetchMessageDetail, getPlacementSearchQuery, type GmailAccount } from '@/lib/gmail/client';
 import { createAdminClient } from '@/lib/supabase/admin';
-import { CANONICAL_IDENTITY_VERSION, isApprovedCanonicalSender, normalizeRfcMessageId } from '@/lib/sync/canonical-email';
+import { CANONICAL_IDENTITY_VERSION, isApprovedCanonicalSender, isGatedCollegeSender, normalizeRfcMessageId } from '@/lib/sync/canonical-email';
+import { scoreCollegeMessageRelevance } from '@/lib/sync/college-relevance';
 import { canonicalBodyFromEmail, computeCanonicalContentKey, computeCanonicalMetadataKey } from '@/lib/sync/canonical-email';
 import { classifyEmail } from '@/lib/sync/classifier';
 import { extractAllDriveNumbers, extractEvents, extractJobDetails } from '@/lib/sync/events';
 import { CANONICAL_PARSER_VERSION } from '@/lib/sync/canonical-email';
 import { classifyUnsupportedAttachment, isSupportedWorkbookAttachment, isTerminalUnsupportedRow } from '@/lib/sync/attachment-status';
+import { isPdfAttachment, parsePdfAttachment } from '@/lib/sync/pdf-parser';
 import * as XLSX from 'xlsx';
 
 const ROW_BATCH_SIZE = 25;
@@ -85,6 +87,9 @@ async function fetchSharedCollegeMessages(options: SharedArchiveRefreshOptions):
   let failed = 0;
   let sourceInbox: string | null = null;
   let nextPageToken: string | null = null;
+  // Gated senders (placement office) are always listed; the ingest-boundary
+  // relevance gate scores each message and persists the verdict in the DB.
+  const gatedSenders = ' OR from:placementoffice@vitbhopal.ac.in';
   // All subscribed College inboxes contain the same broadcast. Select one stable source
   // inbox so the shared refresh never duplicates a run across student mailboxes. There is
   // intentionally no user-specific default: the first connected College inbox wins.
@@ -100,8 +105,8 @@ async function fetchSharedCollegeMessages(options: SharedArchiveRefreshOptions):
     const listed = await gmail.users.messages.list({
       userId: 'me',
       q: options.before
-        ? `from:vitlions2027@vitbhopal.ac.in after:${options.after || '2026/06/30'} before:${options.before}`
-        : `from:vitlions2027@vitbhopal.ac.in after:${options.after || '2026/06/30'}`,
+        ? `(from:vitlions2027@vitbhopal.ac.in${gatedSenders}) after:${options.after || '2026/06/30'} before:${options.before}`
+        : `(from:vitlions2027@vitbhopal.ac.in${gatedSenders}) after:${options.after || '2026/06/30'}`,
       maxResults: fetchLimit,
       pageToken: options.afterId || undefined,
     });
@@ -291,6 +296,42 @@ export async function refreshSharedCollegeArchive(
           continue;
         }
 
+        // Gated senders: persist the relevance verdict instead of ingesting blindly.
+        // An existing 'rejected' row means the decision is already made — skip.
+        if (isGatedCollegeSender(parsed.senderEmail || parsed.sender)) {
+          if (existingCanonical?.processing_status === 'rejected') {
+            result.skipped++;
+            continue;
+          }
+          const gate = scoreCollegeMessageRelevance({
+            subject: parsed.subject,
+            body: bodyText,
+            hasAttachments: parsed.hasAttachments,
+            attachmentFilenames: parsed.attachments.map((a) => a.filename),
+          });
+          if (!gate.isRelevant) {
+            if (!result.dryRun) {
+              const contentKey = computeCanonicalContentKey(senderEmail, parsed.subject, bodyText);
+              await client
+                .from('college_emails')
+                .upsert(
+                  {
+                    content_key: contentKey,
+                    sender_email: senderEmail,
+                    subject: parsed.subject || '(no subject)',
+                    body_snippet: bodyText.slice(0, 500),
+                    processing_status: 'rejected',
+                    received_at: parsed.receivedAt.toISOString(),
+                    updated_at: new Date().toISOString(),
+                  },
+                  { onConflict: 'content_key' }
+                );
+            }
+            result.skipped++;
+            continue;
+          }
+        }
+
         const currentEmail = parsed;
         const classification = classifyEmail(currentEmail);
         const jobDetails = extractJobDetails(bodyText);
@@ -410,7 +451,8 @@ export async function refreshSharedCollegeArchive(
             || (existingAttachmentRows.data || []).find((row) => (row.filename || '') === attachment.filename
               && (row.size_bytes || 0) === (attachment.size || 0));
           const isWorkbook = isSupportedWorkbookAttachment(attachment.filename);
-          if (!isWorkbook) {
+          const isPdf = isPdfAttachment(attachment.filename);
+          if (!isWorkbook && !isPdf) {
             // Terminal: never downloaded, never retried. Images are ignored outright;
             // other formats are deferred for future JD parsing.
             const classification = classifyUnsupportedAttachment(attachment.filename);
@@ -436,7 +478,7 @@ export async function refreshSharedCollegeArchive(
             }
             continue;
           }
-          if (prior?.parse_status === 'complete' && prior.extracted_rows && isWorkbook) {
+          if (prior?.parse_status === 'complete' && prior.extracted_rows && (isWorkbook || isPdf)) {
             result.attachmentsReused++;
             continue;
           }
@@ -446,7 +488,9 @@ export async function refreshSharedCollegeArchive(
             if (!attachmentData.data) throw new Error('Gmail returned no attachment content.');
             const buffer = Buffer.from(attachmentData.data, 'base64url');
             result.attachmentBytes += buffer.length;
-            const rows = extractWorkbookRows(buffer);
+            const pdfResult = isPdf ? await parsePdfAttachment(buffer) : null;
+            const rows = isPdf ? pdfResult!.extractedRows : extractWorkbookRows(buffer);
+            const parseStatus = isPdf ? pdfResult!.parseStatus : 'complete';
             result.attachmentsParsed++;
             if (!result.dryRun) {
               const contentHash = attachmentContentHash(buffer);
@@ -460,8 +504,8 @@ export async function refreshSharedCollegeArchive(
                 size_bytes: buffer.length,
                 content_hash: contentHash,
                 extracted_rows: rows,
-                parse_status: 'complete',
-                parse_error: null,
+                parse_status: parseStatus,
+                parse_error: isPdf ? pdfResult!.parseError : null,
                 updated_at: new Date().toISOString(),
               };
               const write = prior

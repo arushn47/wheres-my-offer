@@ -152,6 +152,7 @@ CREATE TABLE public.notifications (
   link text,
   event_id uuid,
   dedupe_key text UNIQUE,
+  dismissed_at timestamp with time zone DEFAULT NULL,
   placement_drive_id uuid,
   CONSTRAINT notifications_pkey PRIMARY KEY (id),
   CONSTRAINT notifications_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id),
@@ -331,7 +332,7 @@ CREATE TABLE public.college_emails (
   parsed_job_details jsonb,
   parsed_events jsonb,
   parser_version integer NOT NULL DEFAULT 1,
-  processing_status text NOT NULL DEFAULT 'pending'::text CHECK (processing_status = ANY (ARRAY['pending'::text, 'processing'::text, 'complete'::text, 'error'::text])),
+  processing_status text NOT NULL DEFAULT 'pending'::text CHECK (processing_status = ANY (ARRAY['pending'::text, 'processing'::text, 'complete'::text, 'error'::text, 'rejected'::text])),
   created_at timestamp with time zone NOT NULL DEFAULT now(),
   updated_at timestamp with time zone NOT NULL DEFAULT now(),
   message_id text,
@@ -357,6 +358,8 @@ CREATE TABLE public.college_attachments (
   updated_at timestamp with time zone NOT NULL DEFAULT now(),
   content_key text,
   parse_error text,
+  -- extracted_rows may hold either workbook sheets [{sheetName, rows}] or PDF text
+  -- pages [{sheetName: 'pdf_text', rows: [[pageText]]}] written by src/lib/sync/pdf-parser.ts.
   CONSTRAINT college_attachments_pkey PRIMARY KEY (id),
   CONSTRAINT canonical_attachments_canonical_email_id_fkey FOREIGN KEY (college_email_id) REFERENCES public.college_emails(id)
 );

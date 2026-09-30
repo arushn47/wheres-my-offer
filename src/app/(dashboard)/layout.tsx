@@ -5,6 +5,7 @@ import MobileHeader from '@/components/layout/mobile-header';
 import MobileNav from '@/components/layout/mobile-nav';
 import ChatAssistant from '@/components/shared/chat-assistant';
 import { SyncProvider } from '@/context/sync-context';
+import ReprocessCard from '@/components/layout/reprocess-card';
 
 export default async function DashboardLayout({
   children,
@@ -56,6 +57,7 @@ export default async function DashboardLayout({
         </div>
         <MobileNav isAdmin={isAdmin} />
         {!isAdmin && <ChatAssistant />}
+        <ReprocessCard />
       </div>
     </SyncProvider>
   );

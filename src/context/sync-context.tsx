@@ -37,6 +37,17 @@ export interface SyncResult {
   statusUpdatesPending?: boolean;
 }
 
+export interface ReprocessState {
+  active: boolean;
+  step: number;
+  totalSteps: number;
+  message: string;
+  result?: {
+    neoPatDrivesCount?: number;
+    updatedApplications?: number;
+  } | null;
+}
+
 interface SyncContextValue {
   isSyncing: boolean;
   statusUpdatesPending: boolean;
@@ -51,6 +62,10 @@ interface SyncContextValue {
   isPaused: boolean;
   syncResult: SyncResult | null;
   dismissResult: () => void;
+  // Background reprocess
+  reprocessState: ReprocessState | null;
+  startReprocess: () => Promise<void>;
+  dismissReprocess: () => void;
 }
 
 const SyncContext = createContext<SyncContextValue | null>(null);
@@ -77,6 +92,10 @@ export function SyncProvider({
   const [lastSyncAt, setLastSyncAt] = useState<string | null>(initialLastSyncAt || null);
   const visibleStatusUpdatePhase = getStatusUpdatePhase(syncProgress?.currentSubject) || statusUpdatePhase;
   const lastSyncAtRef = useRef<string | null>(initialLastSyncAt || null);
+
+  // Background reprocess state — survives page navigation
+  const [reprocessState, setReprocessState] = useState<ReprocessState | null>(null);
+  const reprocessAbortRef = useRef<AbortController | null>(null);
 
   const isSyncingRef = useRef(false);
   const isSseActiveRef = useRef(false);
@@ -711,6 +730,85 @@ export function SyncProvider({
     }
   }, []);
 
+  // Background reprocess — SSE-based, survives navigation
+  const startReprocess = useCallback(async () => {
+    if (reprocessState?.active) return;
+    reprocessAbortRef.current?.abort();
+    const controller = new AbortController();
+    reprocessAbortRef.current = controller;
+    setReprocessState({ active: true, step: 1, totalSteps: 5, message: 'Preparing saved placement data…', result: null });
+    try {
+      const response = await fetch('/api/sync/reprocess?stream=true', {
+        method: 'POST',
+        headers: { Accept: 'text/event-stream' },
+        signal: controller.signal,
+      });
+      if (!response.ok) throw new Error('Reprocess failed');
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error('No response stream');
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let completedSuccessfully = false;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const messages = buffer.split('\n\n');
+        buffer = messages.pop() || '';
+        for (const message of messages) {
+          const lines = message.split('\n');
+          let event = '', dataStr = '';
+          for (const line of lines) {
+            if (line.startsWith('event: ')) event = line.slice(7).trim();
+            else if (line.startsWith('data: ')) dataStr = line.slice(6).trim();
+          }
+          if (event && dataStr) {
+            try {
+              const parsed = JSON.parse(dataStr);
+              if (event === 'progress') {
+                setReprocessState((prev) => prev ? { ...prev, ...parsed } : null);
+              } else if (event === 'complete') {
+                completedSuccessfully = true;
+                setReprocessState({
+                  active: false,
+                  step: parsed.totalSteps || 5,
+                  totalSteps: parsed.totalSteps || 5,
+                  message: 'Re-index complete',
+                  result: {
+                    neoPatDrivesCount: parsed.neoPatDrivesCount,
+                    updatedApplications: parsed.updatedApplications,
+                  },
+                });
+                appToast.success(
+                  'Archive re-index complete',
+                  `${parsed.neoPatDrivesCount || 0} drives tracked, ${parsed.updatedApplications || 0} applications updated.`
+                );
+                router.refresh();
+              } else if (event === 'error') {
+                completedSuccessfully = true;
+                setReprocessState({ active: false, step: 0, totalSteps: 5, message: parsed.message || 'Re-index error', result: null });
+                appToast.error('Re-index error', parsed.message);
+              }
+            } catch { /* ignore json parse errors */ }
+          }
+        }
+      }
+      if (!completedSuccessfully) {
+        setReprocessState({ active: false, step: 5, totalSteps: 5, message: 'Re-index complete', result: null });
+        router.refresh();
+      }
+    } catch (err: any) {
+      if (err?.name === 'AbortError') return; // Intentionally cancelled
+      setReprocessState({ active: false, step: 0, totalSteps: 5, message: err.message || 'Reprocess failed', result: null });
+      appToast.error('Reprocess failed', err.message || 'Could not re-index placement archive');
+    }
+  }, [reprocessState?.active, router]);
+
+  const dismissReprocess = useCallback(() => {
+    reprocessAbortRef.current?.abort();
+    setReprocessState(null);
+  }, []);
+
   return (
     <SyncContext.Provider
       value={{
@@ -727,6 +825,9 @@ export function SyncProvider({
         isPaused,
         syncResult,
         dismissResult,
+        reprocessState,
+        startReprocess,
+        dismissReprocess,
       }}
     >
       {children}

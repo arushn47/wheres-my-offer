@@ -74,6 +74,14 @@ export async function PATCH(
 
     const driveIds = matchedDrives.map((d) => d.id);
     const companyIds = Array.from(new Set(matchedDrives.map((d) => d.company_id).filter(Boolean)));
+    // Alias edits must apply ONLY to the company of the drive group the admin edited.
+    // matchedDrives can include sibling drive rows that share a company_id (e.g. two
+    // "Deloitte" drive numbers under one company); writing aliases to the shared
+    // company row silently "links" sibling drives by giving them the same alias set.
+    const primaryDrive = matchedDrives[0];
+    const editScopeCompanyIds = Array.from(new Set([primaryDrive.company_id].filter(Boolean)));
+    // companyName rename keeps the broader scope: it is a brand correction across the org.
+    const renameScopeCompanyIds = companyIds;
 
     // Prepare update payload for placement_drives
     const driveUpdate: Record<string, any> = {
@@ -106,52 +114,54 @@ export async function PATCH(
     }
 
     // 3. If companyName is updated, update company names for linked companies
-    if (companyName && companyIds.length > 0) {
+    if (companyName && renameScopeCompanyIds.length > 0) {
       await supabase
         .from('companies')
         .update({
           name: companyName.trim(),
           updated_at: new Date().toISOString(),
         })
-        .in('id', companyIds);
+        .in('id', renameScopeCompanyIds);
     }
 
-    // 3b. Update company aliases & drive resolutions if aliases are provided
-    if (aliases !== undefined && companyIds.length > 0) {
+    // 3b. Aliases are DRIVE-SCOPED, stored in drive_resolutions keyed by this
+    // drive's number. companies.aliases is deliberately NOT written: sibling
+    // drives (e.g. two Deloitte drive numbers) share one company row, so any
+    // write there instantly re-links their alias sets. Each drive keeps its own
+    // alias list; only a company RENAME is org-wide.
+    if (aliases !== undefined) {
       const aliasArr = Array.isArray(aliases)
         ? aliases.map((s: string) => String(s).trim()).filter(Boolean)
         : typeof aliases === 'string'
         ? aliases.split(',').map((s: string) => s.trim()).filter(Boolean)
         : [];
 
-      await supabase
-        .from('companies')
-        .update({
-          aliases: aliasArr,
-          updated_at: new Date().toISOString(),
-        })
-        .in('id', companyIds);
-
       const targetDriveNumber = driveUpdate.drive_number || searchDriveNumber;
       const targetResolvedName = driveUpdate.drive_name || companyName || searchCompanyPattern || 'Company';
 
-      if (targetDriveNumber && aliasArr.length > 0) {
-        for (const al of aliasArr) {
-          await supabase
-            .from('drive_resolutions')
-            .upsert(
-              {
-                drive_number: targetDriveNumber,
-                company_base_name: al.toLowerCase(),
-                resolved_company_name: targetResolvedName,
-                resolved_role: driveUpdate.role || 'Default Role',
-                resolved_via: 'manual_review',
-                confidence: 'high',
-                notes: 'Configured from Admin Panel',
-                updated_at: new Date().toISOString(),
-              },
-              { onConflict: 'drive_number' }
-            );
+      if (targetDriveNumber) {
+        // Always wipe existing manual aliases for this drive first, then re-insert
+        // the full new set. Using upsert with onConflict:'drive_number' would only
+        // keep the last alias because drive_number is the sole conflict key — each
+        // subsequent upsert overwrites the previous one.
+        await supabase
+          .from('drive_resolutions')
+          .delete()
+          .eq('drive_number', targetDriveNumber)
+          .eq('resolved_via', 'manual_review');
+
+        if (aliasArr.length > 0) {
+          const rows = aliasArr.map((al) => ({
+            drive_number: targetDriveNumber,
+            company_base_name: al.toLowerCase(),
+            resolved_company_name: targetResolvedName,
+            resolved_role: driveUpdate.role || 'Default Role',
+            resolved_via: 'manual_review',
+            confidence: 'high',
+            notes: 'Configured from Admin Panel',
+            updated_at: new Date().toISOString(),
+          }));
+          await supabase.from('drive_resolutions').insert(rows);
         }
       }
     }

@@ -65,14 +65,21 @@ export function evaluateCachedShortlistRosters(params: {
       continue;
     }
     checkedRosterCount++;
-    const found = roster.extractedRows.some((sheet) =>
-      sheet.rows.some((row) => row.some((cell) => identityTokens.has(normalizedIdentity(cell))))
-    );
-    if (found) {
+    let matchedSheetName: string | null = null;
+    let matchedRowNumber: number | null = null;
+    for (const sheet of roster.extractedRows) {
+      const rowIdx = sheet.rows.findIndex((row) => row.some((cell) => identityTokens.has(normalizedIdentity(cell))));
+      if (rowIdx !== -1) {
+        matchedSheetName = sheet.sheetName || null;
+        matchedRowNumber = rowIdx + 1;
+        break;
+      }
+    }
+    if (matchedRowNumber !== null) {
       matchingRoster = {
         ...roster,
         round: roster.round || null,
-        details: `Matched in ${roster.filename}`,
+        details: `Matched in ${roster.filename}${matchedSheetName ? ` (${matchedSheetName}!row ${matchedRowNumber})` : ''}`,
       };
     }
   }

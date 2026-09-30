@@ -2302,6 +2302,53 @@ export async function runSync(
               }
             }
 
+            // 5.35 Stale-link demotion: the temporal filter below only guards NEW
+            // link decisions, never audits already-linked rows. Emails assigned by
+            // older rules (or before a later-registration drive moved the anchor)
+            // can sit on a drive whose anchor they predate by more than 24h — e.g.
+            // an old test notice for a previous cycle of the same company leaking
+            // onto the current drive. Demote such links back to the unassigned pool
+            // so a later reconciliation pass re-homes them (or leaves them
+            // quarantined) instead of silently keeping the stale placement.
+            try {
+              const { data: linkedForAudit } = await supabase
+                .from('personal_emails')
+                .select('id, subject, received_at, classification, placement_drive_id, placement_drives!inner(company_id)')
+                .eq('user_id', userId)
+                .not('placement_drive_id', 'is', null)
+                .or('assignment_source.eq.reconciliation,assignment_source.eq.company_only')
+                .order('received_at', { ascending: true })
+                .limit(200);
+
+              if (linkedForAudit && linkedForAudit.length > 0) {
+                const staleIds: string[] = [];
+                for (const linked of linkedForAudit) {
+                  const companyId = (linked.placement_drives as { company_id?: string } | null)?.company_id;
+                  const anchorTime = driveAnchorDates.get(companyId || '');
+                  if (isStalePreDriveEmail(linked, anchorTime)) {
+                    staleIds.push(linked.id);
+                  }
+                }
+                if (staleIds.length > 0) {
+                  await supabase
+                    .from('personal_emails')
+                    .update({
+                      placement_drive_id: null,
+                      assignment_state: 'unassigned',
+                      assignment_confidence: 'low',
+                      assignment_source: null,
+                    })
+                    .in('id', staleIds)
+                    .eq('user_id', userId);
+                  console.log(
+                    `[SyncEngine] Demoted ${staleIds.length} stale pre-anchor email link(s) for user ${userId}; reconciliation will re-home them.`
+                  );
+                }
+              }
+            } catch (staleErr) {
+              console.warn('Stale-link demotion non-critical error:', staleErr);
+            }
+
             for (const email of unlinkedEmails) {
               let matchedCompanyId: string | null = null;
 
@@ -2566,11 +2613,16 @@ export async function runSync(
       }
 
       // 5.4 Holistic Status Recalculation:
-      // ONLY run full holistic status recalculation and heavy attachment scanning when initial setup pages just completed!
-      // For regular incremental syncs (1-3 emails), statuses and events are already updated incrementally
-      // by processEmailForEventsAndStatus during page processing. Running full recalculation over all 1,500+ emails
-      // on incremental syncs is what caused 1m 44s runtimes, lease loss, and hundreds of MBs in egress.
-      if (!result.paused && !result.hasMorePagesPending && (hadCompletedInitialPages || result.newEmails > 0 || result.newCompanies > 0)) {
+      // Heavy post-sync steps are gated on REAL new placement data. result.newEmails
+      // counts every stored receipt including LMS/marketing noise, so using it alone
+      // re-downloaded the ENTIRE shared archive (college_emails + attachments + all
+      // canonical bodies, hundreds of MB per user) on any day a few noise emails
+      // landed — the source of the late-September egress blowup. newCompanies only
+      // changes with genuine placement drives, and initial page completion is the
+      // legitimate full-scan moment. A sync with noise-but-no-new-drives skips the
+      // archive rescan; statuses converge on the next real placement sync.
+      const hasPlacementRelevantData = result.newCompanies > 0 || hadCompletedInitialPages;
+      if (!result.paused && !result.hasMorePagesPending && hasPlacementRelevantData) {
         result.statusUpdatesCompleted = false;
         const remainingBudgetMs = options?.globalDeadline ? options.globalDeadline - Date.now() : Infinity;
         if (remainingBudgetMs > 30_000) {
@@ -2607,6 +2659,11 @@ export async function runSync(
         } else {
           console.log('[Post-Sync] Skipping heavy post-sync recalculation to respect time budget');
         }
+      } else if (result.newEmails > 0) {
+        // New mail arrived but nothing placement-relevant: skip the multi-MB archive
+        // rescan. Incremental per-email processing during page handling already kept
+        // statuses/events current for anything that mattered.
+        console.log(`[Post-Sync] ${result.newEmails} new email(s) but no new placement drives — skipping full archive rescan (egress guard).`);
       }
 
       // 6. Automatic Google Calendar reconciliation:
@@ -2712,6 +2769,27 @@ const GENERIC_MATCH_TOKENS = new Set([
  * Robust fuzzy matcher for company names based on distinctive token overlap.
  * Prevents false matches (e.g. "Kinaxis Super Dream" matching "Superjoin Finance").
  */
+/**
+ * Levenshtein distance with an early exit once the budget is exceeded.
+ * Used only for short brand-name typo tolerance, never for long prose.
+ */
+function boundedLevenshtein(a: string, b: string, maxDistance: number): number {
+  if (Math.abs(a.length - b.length) > maxDistance) return maxDistance + 1;
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const curr = [i];
+    let rowMin = i;
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      curr[j] = Math.min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost);
+      rowMin = Math.min(rowMin, curr[j]);
+    }
+    if (rowMin > maxDistance) return maxDistance + 1;
+    prev = curr;
+  }
+  return prev[b.length];
+}
+
 export function isFuzzyCompanyMatch(compName: string, targetName: string): boolean {
   let cLower = compName.toLowerCase().trim();
   let tLower = targetName.toLowerCase().trim();
@@ -2746,6 +2824,20 @@ export function isFuzzyCompanyMatch(compName: string, targetName: string): boole
   const tAlpha = tLower.replace(/[^a-z0-9]/g, '');
   if (cAlpha.length >= 3 && tAlpha.length >= 3 && cAlpha === tAlpha) {
     return true;
+  }
+
+  // --- Step 0.8: Typo-tolerant collapsed match ---
+  // CDC circulars mangle brand names: "Goldamnsachs" (Goldman Sachs), "Deliotte"
+  // (Deloitte). A prefix-guarded edit distance on the collapsed alphanumeric form
+  // catches single transpositions/typos without merging unrelated brands: both
+  // names must start with the same 2 characters and stay within a small distance
+  // budget (2 for names >= 8 chars, 1 for shorter ones).
+  if (cAlpha.length >= 6 && tAlpha.length >= 6) {
+    const allowed = cAlpha.length >= 8 && tAlpha.length >= 8 ? 2 : 1;
+    const samePrefix = cAlpha.slice(0, 2) === tAlpha.slice(0, 2);
+    if (samePrefix && boundedLevenshtein(cAlpha, tAlpha, allowed) <= allowed) {
+      return true;
+    }
   }
 
   // --- Step 1: Normalized-key match ---
@@ -2801,6 +2893,14 @@ export function isFuzzyCompanyMatch(compName: string, targetName: string): boole
     // Allow minor stem variations (e.g. plural s, es) but strictly limit length difference to <= 2
     if (a.length >= 5 && b.length >= 5 && (a.startsWith(b) || b.startsWith(a))) {
       return Math.abs(a.length - b.length) <= 2;
+    }
+    // Typo tolerance on substantial tokens: "goldamn" vs "goldman" style typos
+    // inside multi-token names. Same 2-char prefix + tiny edit distance only.
+    if (a.length >= 6 && b.length >= 6) {
+      const allowed = a.length >= 8 && b.length >= 8 ? 2 : 1;
+      if (a.slice(0, 2) === b.slice(0, 2) && boundedLevenshtein(a, b, allowed) <= allowed) {
+        return true;
+      }
     }
     return false;
   };

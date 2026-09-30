@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { requireAdmin } from '@/lib/auth/admin';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { isSupportedWorkbookAttachment } from '@/lib/sync/attachment-status';
+import { isPdfAttachment } from '@/lib/sync/pdf-parser';
 
 export const dynamic = 'force-dynamic';
 
@@ -46,12 +47,13 @@ export async function GET() {
     // the terminal `deferred` (PDF/DOC/DOCX, future JD parsing) and `ignored` (images)
     // states, and legacy non-workbook `error` rows are still reported as unsupported.
     const unsupportedAttachments = attachmentRows.filter((attachment) =>
-      attachment.parse_status === 'deferred' ||
+      (attachment.parse_status === 'deferred' && !isPdfAttachment(attachment.filename || '')) ||
       attachment.parse_status === 'ignored' ||
-      (attachment.parse_status === 'error' && !isSupportedWorkbookAttachment(attachment.filename || ''))
+      (attachment.parse_status === 'error' && !isSupportedWorkbookAttachment(attachment.filename || '') && !isPdfAttachment(attachment.filename || ''))
     ).length;
     const failedAttachments = attachmentRows.filter((attachment) =>
-      attachment.parse_status === 'error' && isSupportedWorkbookAttachment(attachment.filename || '')
+      attachment.parse_status === 'error' &&
+      (isSupportedWorkbookAttachment(attachment.filename || '') || isPdfAttachment(attachment.filename || ''))
     ).length;
     return NextResponse.json({
       ingester: {

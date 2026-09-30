@@ -12,6 +12,7 @@ import {
 import { evaluateCachedShortlistRosters } from '@/lib/sync/shortlist-verification';
 import { removeDriveEvents } from '@/lib/sync/drive-events';
 import { shouldReplaceRegistrationDeadline } from '@/lib/sync/events';
+import { mergePdfJobDetails } from '@/lib/sync/pdf-parser';
 
 // existingApp select: add `registration_deadline`
 /**
@@ -380,12 +381,30 @@ export async function processEmailForEventsAndStatus(
   // Resolve cached shared workbooks before the evidence gate and match insert.
   // Otherwise the first fan-out pass sees only an empty body match, returns, and
   // never persists the exact NeoID match found in the canonical attachment.
+  // Resolved sheet+row location is hoisted so the candidate_matches insert below
+  // can persist it for the drive UI.
+  let rosterMatchLocation: string | null = null;
   if (!isNeoMatched && isCollegeBroadcast && cachedRosterEvaluation?.state === 'verified_present' && cachedRosterEvaluation.matchingRoster) {
     const filename = cachedRosterEvaluation.matchingRoster.filename;
     isNeoMatched = true;
     isInAppliedList = false;
     matchType = 'xlsx_cell';
-    matchDetail = `Matched in ${filename}`;
+    // Resolve the exact sheet+row inside the matched workbook so the drive UI can
+    // show "Sheet1, row 14" instead of a bare filename.
+    try {
+      const { scanSharedCollegeAttachmentsForNeoId } = await import('@/lib/sync/excel-parser');
+      const precise = await scanSharedCollegeAttachmentsForNeoId(
+        supabase,
+        email.canonicalEmailId || emailDbId,
+        userNeoId,
+        userEmail,
+        isShortlistEmail
+      );
+      rosterMatchLocation = precise?.details && precise.details !== `Matched in ${filename}` ? precise.details : null;
+    } catch {
+      rosterMatchLocation = null;
+    }
+    matchDetail = rosterMatchLocation || `Matched in ${filename}`;
   }
 
   if (!isCollegeBroadcast && !isNeoMatched && email.hasAttachments && email.attachments.some((attachment) => attachment.extractedRows?.length)) {
@@ -480,6 +499,7 @@ export async function processEmailForEventsAndStatus(
       matched_value: matchDetail || email.subject.slice(0, 100),
       confidence: 'high',
     };
+    if (rosterMatchLocation) matchPayload.match_location = rosterMatchLocation;
     if (isCollegeBroadcast) {
       matchPayload.college_email_id = emailDbId;
     } else {
@@ -736,7 +756,9 @@ export async function processEmailForEventsAndStatus(
   }
 
   // 4. Extract Job Details (Role, CTC, Stipend, Location)
-  const jobDetails = extractJobDetails(fullText);
+  // PDF JD attachments already parsed into the shared archive fill any field the
+  // email body left empty (classic "CTC / JD in attached PDF" circulars).
+  const jobDetails = mergePdfJobDetails(extractJobDetails(fullText), email.attachments);
 
   // 4b. Tier 2 AI Fallback Gating & Reconciliation
   const { extractDriveNumber } = await import('@/lib/sync/events');

@@ -17,6 +17,7 @@ import {
   CheckCircle2,
   AlertCircle,
   Shield,
+  Calendar,
 } from 'lucide-react';
 import { timeAgo, cn } from '@/lib/utils';
 import { appToast } from '@/components/ui/toast';
@@ -115,6 +116,7 @@ export default function DrivesClient() {
   const [searchResults, setSearchResults] = useState<SearchEmailResult[]>([]);
   const [linkingEmailId, setLinkingEmailId] = useState<string | null>(null);
   const [autoAddAlias, setAutoAddAlias] = useState(true);
+  const [linkRegistrationBoundary, setLinkRegistrationBoundary] = useState<string | null>(null);
 
   const fetchDrives = async (manual: boolean = false) => {
     setLoading(true);
@@ -270,6 +272,7 @@ export default function DrivesClient() {
       const data = await res.json();
       if (res.ok) {
         setSearchResults(data.results || []);
+        setLinkRegistrationBoundary(data.registrationDateBoundary || null);
       }
     } catch (err: any) {
       console.error('Failed to search unassigned emails:', err);
@@ -280,6 +283,7 @@ export default function DrivesClient() {
 
   const handleOpenLinkEmail = (drive: AdminDrive) => {
     setLinkingDrive(drive);
+    setLinkRegistrationBoundary(null);
     // Pre-populate search query with first word or company name if available
     const initialQuery = drive.companyName ? drive.companyName.split(' ')[0] : '';
     setLinkSearchQuery(initialQuery);
@@ -1116,10 +1120,18 @@ export default function DrivesClient() {
                 </div>
                 <div>
                   <h3 className="text-base font-semibold text-white">Link Circular to Placement Drive</h3>
-                  <p className="text-xs text-zinc-400 mt-0.5">
-                    Target: <span className="text-amber-300 font-medium">{linkingDrive.companyName}</span>
-                    {linkingDrive.driveNumber && <span className="font-mono text-zinc-500 ml-1.5">(Drive {linkingDrive.driveNumber})</span>}
-                  </p>
+                  <div className="flex items-center gap-2 flex-wrap text-xs text-zinc-400 mt-0.5">
+                    <span>
+                      Target: <span className="text-amber-300 font-medium">{linkingDrive.companyName}</span>
+                      {linkingDrive.driveNumber && <span className="font-mono text-zinc-500 ml-1.5">(Drive {linkingDrive.driveNumber})</span>}
+                    </span>
+                    {linkRegistrationBoundary && (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-amber-500/10 text-amber-300 border border-amber-500/20">
+                        <Calendar className="w-3 h-3 text-amber-400" />
+                        Only circulars on or after {linkRegistrationBoundary} (Registration Date)
+                      </span>
+                    )}
+                  </div>
                 </div>
               </div>
               <button
@@ -1155,7 +1167,7 @@ export default function DrivesClient() {
                     onChange={(e) => setAutoAddAlias(e.target.checked)}
                     className="rounded border-zinc-700 bg-zinc-800 text-amber-500 focus:ring-amber-500/30"
                   />
-                  <span>Save search keyword as permanent company alias</span>
+                  <span>Save search keyword as a drive-scoped alias (won't affect sibling drives)</span>
                 </label>
                 <span className="font-mono text-[11px] text-zinc-500">
                   {searchResults.length} unassigned circular{searchResults.length === 1 ? '' : 's'} found
@@ -1173,8 +1185,12 @@ export default function DrivesClient() {
               ) : searchResults.length === 0 ? (
                 <div className="h-40 flex flex-col items-center justify-center text-center p-6 text-zinc-500 text-xs">
                   <Mail className="w-8 h-8 text-zinc-700 mb-2" />
-                  <p>No unassigned circulars match &ldquo;{linkSearchQuery}&rdquo;.</p>
-                  <p className="text-[11px] text-zinc-600 mt-1">Try searching a different keyword or company name.</p>
+                  <p>No unassigned circulars match &ldquo;{linkSearchQuery}&rdquo;{linkRegistrationBoundary ? ` on or after ${linkRegistrationBoundary}` : ''}.</p>
+                  <p className="text-[11px] text-zinc-600 mt-1">
+                    {linkRegistrationBoundary
+                      ? `Circulars received prior to ${linkRegistrationBoundary} are excluded to prevent cross-drive contamination.`
+                      : 'Try searching a different keyword or company name.'}
+                  </p>
                 </div>
               ) : (
                 searchResults.map((result) => {

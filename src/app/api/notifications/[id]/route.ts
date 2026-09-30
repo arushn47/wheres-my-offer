@@ -4,7 +4,12 @@ import { createAdminClient } from '@/lib/supabase/admin';
 
 /**
  * DELETE /api/notifications/[id]
- * Deletes / dismisses a single notification for the authenticated user.
+ * Dismisses a single notification for the authenticated user.
+ *
+ * Rows are soft-dismissed (dismissed_at) instead of hard-deleted: each
+ * notification row doubles as the sync pipeline's dedupe_key ledger entry, and
+ * destroying the row would let the next sync re-derive the same notification
+ * (e.g. "Not shortlisted" results) and re-send it forever.
  */
 export async function DELETE(
   request: NextRequest,
@@ -20,13 +25,14 @@ export async function DELETE(
 
   const { error } = await supabase
     .from('notifications')
-    .delete()
+    .update({ dismissed_at: new Date().toISOString() })
     .eq('id', id)
-    .eq('user_id', session.userId);
+    .eq('user_id', session.userId)
+    .is('dismissed_at', null);
 
   if (error) {
-    console.error('[API Notifications] Delete single error:', error);
-    return NextResponse.json({ error: 'Failed to delete notification' }, { status: 500 });
+    console.error('[API Notifications] Dismiss single error:', error);
+    return NextResponse.json({ error: 'Failed to dismiss notification' }, { status: 500 });
   }
 
   return NextResponse.json({ success: true });

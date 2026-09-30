@@ -51,7 +51,7 @@ describe('evidence-aware shortlist verification', () => {
     expect(getVerifiedShortlistStatus({ verificationState: result.state, hasPositiveMatch: false, currentStatus: 'applied' })).toBeNull();
   });
 
-  it('records a parsed shortlist match as positive evidence', () => {
+  it('records a parsed shortlist match as positive evidence with sheet and row detail', () => {
     const evaluated = evaluateCachedShortlistRosters({
       rosters: [{
         filename: 'Northstar test shortlist.xlsx',
@@ -62,6 +62,9 @@ describe('evidence-aware shortlist verification', () => {
       shortlistContext: true,
       identityTokens: ['I4W0P0K8'],
     });
+    expect(evaluated.state).toBe('verified_present');
+    // The match carries the exact sheet + 1-indexed row so the drive UI can show it.
+    expect(evaluated.matchingRoster?.details).toBe('Matched in Northstar test shortlist.xlsx (Test Shortlist!row 2)');
     const result = deriveShortlistVerificationState([
       { relevant: true, parsed: evaluated.state === 'verified_present', candidatePresent: evaluated.state === 'verified_present' },
     ]);

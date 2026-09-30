@@ -1196,6 +1196,13 @@ export function cleanRoleTitle(rawRole: string | null | undefined): string | nul
     return null;
   }
 
+  // 16.5 Compensation / employment-terms vocabulary never appears in a role title.
+  // Catches multiline-capture bleed like "GET / Compensation Detail for GET - 6" or
+  // "Systems Engineer Service Agreement: 2 Years".
+  if (/\b(?:compensation|salary|package|stipend|ctc|bonus|insurance|service\s+agreement|qualification|trainee\s+bonus|lpa|lakhs?)\b|₹/i.test(role)) {
+    return null;
+  }
+
   // 17. TBA / TBD / Not Disclosed
   if (/^(?:tba|tbd|to\s+be\s+announced|not\s+disclosed|n\/a|na)$/i.test(role)) {
     return null;
@@ -1648,11 +1655,16 @@ export function extractJobDetails(text: string): ExtractedJobDetails {
   // 1. Explicit headers: Designation, Job Role, Job Profile, Role, Position, Job Designation Offered, Title
   // Requires mandatory delimiter (colon, dash, or tab) and supports multiline bullet lists (e.g. Role:\n- Dev\n- Analyst)
   if (!role) {
-    const roleRegex = /(?:^[ \t]*|[•*\-–—][ \t]*|\b)(?:Job\s+Designation(?:\s+Offered)?|Designation(?:\s+Offered)?|Job\s+Role|Job\s+Profile|Role|Position|Job\s+Title|Title)\s*[:\-–—\t]\s*(?:\r?\n[ \t]*[-•*]?[ \t]*)?([^\r\n]{2,100}(?:\r?\n[ \t]*[-•*]?[ \t]*[A-Za-z0-9\/\,\& \t\-]{2,80})*)/gim;
+    // Continuation lines must be introduced by a bullet/dash so table column bleed
+    // like "Designation: GET\nCompensation Detail for GET - 6.5 LPA ..." is never
+    // swallowed into the role ("GET / Compensation Detail for GET - 6").
+    const roleRegex = /(?:^[ \t]*|[•*\-–—][ \t]*|\b)(?:Job\s+Designation(?:\s+Offered)?|Designation(?:\s+Offered)?|Job\s+Role|Job\s+Profile|Role|Position|Job\s+Title|Title)\s*[:\-–—\t=]\s*(?:\r?\n[ \t]*[-•*]?[ \t]*)?([^\r\n]{2,100}(?:\r?\n[ \t]*(?:[-•*–—][ \t]*|\d+\.)[ \t]*[A-Za-z0-9\/\,\& \t\-]{2,80})*)|(?:^[ \t]*|[•*\-–—][ \t]*)(?:Job\s+Designation(?:\s+Offered)?|Designation(?:\s+Offered)?|Job\s+Role|Job\s+Profile|Role|Position|Job\s+Title|Title)[ \t]+([A-Za-z][A-Za-z0-9\/\,\& \t\-]{1,60})(?=[ \t]*(?:\r?\n|$))/gim;
 
     const matches = [...cleanWithLines.matchAll(roleRegex)];
     for (const m of matches) {
-      const lines = m[1].split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+      const capture = m[1] || m[2];
+      if (!capture) continue;
+      const lines = capture.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
       const validRoles: string[] = [];
       for (const line of lines) {
         const cleaned = cleanRoleTitle(line);
@@ -1699,30 +1711,31 @@ export function extractJobDetails(text: string): ExtractedJobDetails {
 
   // 4. Job Location Extraction (extracts clean cities, states, and countries without internship/drive noise)
   // Must NOT match test venue phrases like "@ Own location You can write from LC 103"
-  // Supports Office Location, Work Location, Job Location, Tentative Location, Place of Posting, with or without colons/markdown asterisks
-  const explicitWorkLocationMatch = cleanWithLines.match(
-    /\b(?:Work|Job|Office)\s+Location(?:s)?\b\s*[:\-–—\t|=]?\s*([^\n\r]{2,160})/i
-  ) || cleanWithLines.match(
-    /\bLocation\b\s*[:\-–—\t|=]\s*([^\n\r]{2,160})/i
-  ) || cleanText.match(
-    /\b(?:Work|Job|Office)\s+Location(?:s)?\b\s*[:\-–—\t|=]?\s*([^\n\r]{2,160})/i
-  ) || cleanText.match(
-    /\bLocation\b\s*[:\-–—\t|=]\s*([^\n\r]{2,160})/i
-  );
-  const locMatch = explicitWorkLocationMatch || cleanWithLines.match(
-    /(?<!@\s*|own\s+)\b(?:Office|Work|Job|Posting|Hiring|Base|Tentative|Placement|Expected|Preferred|Internship)?\s*Locations?\b\s*[:\-–—\t|=]?\s*(?:will\s+be\s*[:\-–—]?|is\s*[:\-–—]?|is\s+at\s*[:\-–—]?)?\s*[*_~`\s]*([^\n\r<>{}_]{2,120})/i
-  ) || cleanWithLines.match(
-    /\b(?:Place\s+of\s+(?:Posting|Work))\b\s*[:\-–—\t|]?\s*[*_~`\s]*([^\n\r<>{}_]{2,120})/i
-  ) || cleanText.match(
-    /(?<!@\s*|own\s+)\b(?:Office|Work|Job|Posting|Hiring|Base|Tentative|Placement|Expected|Preferred|Internship)?\s*Locations?\b\s*[:\-–—\t|=]?\s*(?:will\s+be\s*[:\-–—]?|is\s*[:\-–—]?|is\s+at\s*[:\-–—]?)?\s*[*_~`\s]*([^\n\r<>{}_]{2,120})/i
-  ) || cleanText.match(
-    /\b(?:Place\s+of\s+(?:Posting|Work))\b\s*[:\-–—\t|]?\s*[*_~`\s]*([^\n\r<>{}_]{2,120})/i
-  );
+  // Collect all explicit location candidates to pick real locations over generic placeholders (e.g. "GEV locations")
+  const locationHeaderRegex = /(?<!@\s*|own\s+)\b(?:(?:Work|Job|Office|Hiring|Base|Tentative|Placement|Expected|Preferred|Internship)\s+)?Locations?\b\s*[:\-–—\t|=]?\s*([^\n\r]{2,160})/gi;
+  const placeOfPostingRegex = /\b(?:Place\s+of\s+(?:Posting|Work))\b\s*[:\-–—\t|=]?\s*([^\n\r]{2,160})/gi;
 
-  if (locMatch) {
-    let rawLoc = locMatch[1]
+  const rawCandidateStrings: string[] = [];
+  for (const m of cleanWithLines.matchAll(locationHeaderRegex)) {
+    if (m[1]) rawCandidateStrings.push(m[1]);
+  }
+  for (const m of cleanWithLines.matchAll(placeOfPostingRegex)) {
+    if (m[1]) rawCandidateStrings.push(m[1]);
+  }
+  if (rawCandidateStrings.length === 0) {
+    for (const m of cleanText.matchAll(locationHeaderRegex)) {
+      if (m[1]) rawCandidateStrings.push(m[1]);
+    }
+  }
+
+  const validLocations: string[] = [];
+  for (const raw of rawCandidateStrings) {
+    let rawLoc = raw
       .replace(/\s*(?:(?:\d+\.?\s*)?(?:Start\s+Date|Note|Eligibility|Criteria|Requirements?|Registration|CTC|Stipend|Internship\s+Duration|Joining\s+Date|Joining|Graduation\s+Year|Graduation|Batch|Timeline|Internship|Placement|Offer|Process|Website|Warm|Kind|Selection|Designation|Role|Job|JD|Position|Skills|Service|All\s+the|Work\s+Mode|Economy|On\s+Wed|For\s+more|PPO|About|Mandatory|depending\s+on|Fluent\s+English|Communication|You\s+can|Write\s+from|Forwarded|Queries|LC\s*\d|PRP|SJT|Anna|Lab|Hall|Venue|Whether|Academic\s+gap|Gap\s+allowed|Allowed|Backlog|Standing\s+arrear|History\s+of\s+arrear|Students?|Candidates?|Kindly|Please|Below\s+attachment|Refer\s+attachment|Allocated|Will\s+be\s+allocated|---)|[•*]).*$/i, '')
-      .replace(/\.\s+[A-Z].*$/, '')
+      // Truncate trailing prose sentences, but never mid-way through a company-suffix
+      // abbreviation: "Tata Technologies Ltd. Pune/ Bangalore/Thane" must keep its city list
+      // instead of collapsing to "Tata Technologies Ltd".
+      .replace(/(?<!\b(?:Ltd|Limited|Pvt|Private|Inc|Incorporated|LLP|Corp|Co|GmbH))\.\s+[A-Z].*$/, '')
       .replace(/\b(?:whether|academic\s+gap|gap\s+allowed|backlogs?|standing\s+arrears?|history\s+of\s+arrears?|allowed\s*:|allowed\b).*$/i, '')
       .replace(/\s*\(?(?:work\s+from\s+office|wfo|in\s+person|on\s*site|remote|hybrid|in\s+office)\)?/gi, '')
       .replace(/\b(?:internship|placement|drive|hiring|offer|job|role|any\s+honeywell\s+site|only|based|preferred|fluent\s+english|communication)\b/gi, '')
@@ -1738,28 +1751,47 @@ export function extractJobDetails(text: string): ExtractedJobDetails {
       .trim()
       .slice(0, 60);
 
-    // A JD pointer is not a city. EA's "EA Hyderabad office in person(No remote)"
-    // describes the Hyderabad office; "in person" is not part of the location.
-    if (/^(?:refer|see|check)\b/i.test(locMatch[1]) ||
-      /^(?:refer|see|check)\s+(?:the\s+)?(?:attached\s+)?(?:jd(?:['’]s)?|attachment)/i.test(rawLoc)) rawLoc = '';
+    // A JD pointer is not a city.
+    if (/^(?:refer|see|check)\b/i.test(raw) ||
+      /^(?:refer|see|check)\s+(?:the\s+)?(?:attached\s+)?(?:jd(?:['’]s)?|attachment)/i.test(rawLoc)) continue;
     const namedOffice = rawLoc.match(/\b(Bangalore|Bengaluru|Hyderabad|Pune|Mumbai|Chennai|Gurgaon|Gurugram|Noida|Delhi|Kolkata|Ahmedabad)\s+office\b/i);
-    if (namedOffice && /\bin\s+person\b/i.test(locMatch[1])) rawLoc = namedOffice[1];
+    if (namedOffice && /\bin\s+person\b/i.test(raw)) rawLoc = namedOffice[1];
 
     // Fix unclosed parenthesis (e.g. "Hybrid (Gurgaon/Bangalore/Chennai" -> "Hybrid (Gurgaon/Bangalore/Chennai)")
     if (rawLoc.includes('(') && !rawLoc.includes(')')) {
       rawLoc = rawLoc + ')';
     }
 
-    if (
-      rawLoc &&
-      rawLoc.length >= 2 &&
-      !/\byou\b|\bwe\b|\bi\b|\bcan\b|\bwrite\b|\bwant\b|\bfrom\s+(?:lc|sjt|prp|lab|home|hostel)\b|\bqueries\b|---|forwarded|own\s+location|\b(?:lc|sjt|prp|tt|mb|cb|smv)\s*\d+\b|nonsense|come at|assistance|applicable|candidate|round\s+\d+|results|lab|service agreement|forwarded message|scheduled on|online test|interview|@|pearl research|anna auditorium|students with|clash|tba|tbd|^[>,\.\*\s]+|those in|for you is|services interested|economy class|round\s+trip|will be subject|where we work|entities in|\bpre$|placement\s+office|refer attachment/i.test(rawLoc) &&
-      !/^(?:vit\s+(?:vellore|chennai|bhopal|ap)(?:\s+campus)?|(?:vellore|chennai|bhopal|ap)\s+campus)$/i.test(rawLoc.trim())
-    ) {
-      if (/remote/i.test(rawLoc)) location = 'Remote';
-      else if (/pan\s+india/i.test(rawLoc)) location = 'Pan India';
-      else location = rawLoc;
+    // "Job Location: Tata Technologies Ltd. Pune/ Bangalore/Thane" -> "Pune / Bangalore / Thane"
+    const withSpacedSlashes = rawLoc.replace(/\s*\/\s*/g, ' / ').trim();
+    const CITY_ALTERNATION = 'Pune|Bangalore|Bengaluru|Hyderabad|Secunderabad|Chennai|Mumbai|Thane|Navi\\s+Mumbai|Noida|Greater\\s+Noida|Gurgaon|Gurugram|New\\s+Delhi|Delhi|Kolkata|Ahmedabad|Gandhinagar|Coimbatore|Kochi|Indore|Bhopal|Jaipur|Chandigarh|Mohali|Trivandrum|Visakhapatnam|Mysore|Nagpur|Surat|Vadodara|Pan\\s+India|Remote|Across\\s+India';
+    const suffixSplit = withSpacedSlashes.match(/^(.{2,60}?(?:Ltd|Limited|Pvt|Private|Inc|Incorporated|LLP|Corp)\.?)\s+(.+)$/i);
+    if (suffixSplit && new RegExp(`^(?:${CITY_ALTERNATION})(?:\\s*\/\\s*(?:${CITY_ALTERNATION}))*$`, 'i').test(suffixSplit[2].trim())) {
+      rawLoc = suffixSplit[2].trim();
+    } else {
+      rawLoc = withSpacedSlashes;
     }
+
+    // Reject placeholder junk like "GEV locations", "company locations", "office locations", "our locations"
+    if (
+      !rawLoc ||
+      rawLoc.length < 2 ||
+      /\b(?:[a-z0-9]{2,10}|company|client|office|multiple|various|all|our|their|respective|own|any)\s+locations?\b/i.test(rawLoc) ||
+      /^[a-z0-9\s]{0,20}\blocations?$/i.test(rawLoc.trim()) ||
+      /\byou\b|\bwe\b|\bi\b|\bcan\b|\bwrite\b|\bwant\b|\bfrom\s+(?:lc|sjt|prp|lab|home|hostel)\b|\bqueries\b|---|forwarded|own\s+location|\b(?:lc|sjt|prp|tt|mb|cb|smv)\s*\d+\b|nonsense|come at|assistance|applicable|candidate|round\s+\d+|results|lab|service agreement|forwarded message|scheduled on|online test|interview|@|pearl research|anna auditorium|students with|clash|tba|tbd|^[>,\.\*\s]+|those in|for you is|services interested|economy class|round\s+trip|will be subject|where we work|entities in|\bpre$|placement\s+office|refer attachment/i.test(rawLoc) ||
+      /^(?:vit\s+(?:vellore|chennai|bhopal|ap)(?:\s+campus)?|(?:vellore|chennai|bhopal|ap)\s+campus)$/i.test(rawLoc.trim())
+    ) {
+      continue;
+    }
+
+    if (/remote/i.test(rawLoc)) validLocations.push('Remote');
+    else if (/pan\s+india/i.test(rawLoc)) validLocations.push('Pan India');
+    else validLocations.push(rawLoc);
+  }
+
+  if (validLocations.length > 0) {
+    const preferred = validLocations.find((loc) => !/locations?$/i.test(loc));
+    location = preferred || validLocations[0];
   }
 
   // Fallback 1: Specific office mentions (e.g. "ION's Noida Office", "Noida Office")

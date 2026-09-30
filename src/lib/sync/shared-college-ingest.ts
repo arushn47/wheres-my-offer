@@ -2,7 +2,8 @@ import { createHash } from 'node:crypto';
 import type { gmail_v1 } from 'googleapis';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { createGmailClient, fetchMessageDetail, type GmailAccount, type ParsedAttachment, type ParsedEmail } from '@/lib/gmail/client';
-import { CANONICAL_IDENTITY_VERSION, CANONICAL_PARSER_VERSION, canonicalBodyFromEmail, computeCanonicalContentKey, computeCanonicalMetadataKey, isApprovedCanonicalSender, normalizeRfcMessageId } from '@/lib/sync/canonical-email';
+import { CANONICAL_IDENTITY_VERSION, CANONICAL_PARSER_VERSION, canonicalBodyFromEmail, computeCanonicalContentKey, computeCanonicalMetadataKey, isApprovedCanonicalSender, isGatedCollegeSender, normalizeRfcMessageId } from '@/lib/sync/canonical-email';
+import { scoreCollegeMessageRelevance } from '@/lib/sync/college-relevance';
 import { classifyEmail } from '@/lib/sync/classifier';
 import { extractAllDriveNumbers, extractEvents, extractJobDetails } from '@/lib/sync/events';
 import { processEmailForEventsAndStatus } from '@/lib/sync/status-engine';
@@ -14,6 +15,7 @@ import {
   isTerminalUnsupportedRow,
   TRANSIENT_ATTACHMENT_ERROR,
 } from '@/lib/sync/attachment-status';
+import { isPdfAttachment, mergePdfJobDetails, parsePdfAttachment } from '@/lib/sync/pdf-parser';
 
 interface SharedDriveRow {
   id: string;
@@ -99,6 +101,10 @@ async function scanSharedAttachment(
     }));
     return { extractedRows, parseStatus: 'complete' as const, bytes };
   }
+  if (isPdfAttachment(attachment.filename)) {
+    const pdfResult = await parsePdfAttachment(bytes);
+    return { extractedRows: pdfResult.extractedRows, parseStatus: pdfResult.parseStatus, parseError: pdfResult.parseError, bytes };
+  }
   return { extractedRows: null, parseStatus: 'error' as const, bytes };
 }
 
@@ -111,15 +117,53 @@ export async function ingestSharedCollegeCircular(params: {
   const supabase = createAdminClient();
   const gmail = params.gmail || (await createGmailClient(params.account)).gmail;
   const parsedEmail = await fetchMessageDetail(gmail, params.gmailMessageId);
-  if (!isApprovedCanonicalSender(parsedEmail.senderEmail || parsedEmail.sender)) {
+  const senderAddress = parsedEmail.senderEmail || parsedEmail.sender;
+  if (!isApprovedCanonicalSender(senderAddress)) {
     return { canonicalId: null, appliedUsers: 0, skippedUsers: 0, attachmentErrors: 0 };
+  }
+
+  // Gated senders (e.g. the placement office) have every message scored once; the
+  // verdict is persisted in college_emails.processing_status ('rejected' = chatter).
+  // No deployment-time flag involved: the DB row itself is the decision record, and
+  // the next sync run never re-fetches a message whose verdict already exists.
+  if (isGatedCollegeSender(senderAddress)) {
+    const bodyTextForGate = canonicalBodyFromEmail(parsedEmail.bodyPlain, parsedEmail.bodyHtml, parsedEmail.bodySnippet);
+    const gate = scoreCollegeMessageRelevance({
+      subject: parsedEmail.subject,
+      body: bodyTextForGate,
+      hasAttachments: parsedEmail.hasAttachments,
+      attachmentFilenames: parsedEmail.attachments.map((a) => a.filename),
+    });
+    if (!gate.isRelevant) {
+      const contentKey = computeCanonicalContentKey(parsedEmail.senderEmail, parsedEmail.subject, bodyTextForGate);
+      const { error: rejectError } = await supabase
+        .from('college_emails')
+        .upsert(
+          {
+            content_key: contentKey,
+            sender_email: parsedEmail.senderEmail.toLowerCase().trim(),
+            subject: parsedEmail.subject || '(no subject)',
+            body_snippet: bodyTextForGate.slice(0, 500),
+            processing_status: 'rejected',
+            received_at: parsedEmail.receivedAt.toISOString(),
+            updated_at: new Date().toISOString(),
+          },
+          { onConflict: 'content_key' }
+        );
+      if (rejectError) {
+        console.warn('[Shared College Ingest] Failed to persist rejected verdict:', rejectError.message);
+      }
+      console.log(`[Shared College Ingest] Rejected gated-sender mail (score ${gate.score}): ${gate.reason} — "${(parsedEmail.subject || '').slice(0, 80)}"`);
+      return { canonicalId: null, appliedUsers: 0, skippedUsers: 0, attachmentErrors: 0 };
+    }
+    console.log(`[Shared College Ingest] Gated-sender mail admitted (score ${gate.score}): ${gate.reason} — "${(parsedEmail.subject || '').slice(0, 80)}"`);
   }
 
   const bodyText = canonicalBodyFromEmail(parsedEmail.bodyPlain, parsedEmail.bodyHtml, parsedEmail.bodySnippet);
   const classification = classifyEmail(parsedEmail);
   const normalizedMessageId = normalizeRfcMessageId(parsedEmail.messageId);
   const contentKey = computeCanonicalContentKey(parsedEmail.senderEmail, parsedEmail.subject, bodyText);
-  const jobDetails = extractJobDetails(bodyText);
+  const jobDetails = mergePdfJobDetails(extractJobDetails(bodyText), parsedEmail.attachments);
   const events = extractEvents(parsedEmail);
   const payload = {
     content_key: contentKey,
@@ -223,9 +267,9 @@ export async function ingestSharedCollegeCircular(params: {
         && (row.size_bytes || 0) === (attachment.size || 0));
   };
   for (const attachment of parsedEmail.attachments) {
-    if (!isSupportedWorkbookAttachment(attachment.filename)) {
-      // Images and other non-workbook formats are terminal and deliberately NOT
-      // downloaded or retried. They are still recorded so the email's attachment
+    if (!isSupportedWorkbookAttachment(attachment.filename) && !isPdfAttachment(attachment.filename)) {
+      // Images and other non-workbook/non-PDF formats are terminal and deliberately
+      // NOT downloaded or retried. They are still recorded so the email's attachment
       // inventory (and the shortlist scanner's "a roster may exist here" signal)
       // stays faithful. A row that already carries this exact classification is left
       // untouched so re-ingesting the message is a true no-op.
@@ -256,7 +300,7 @@ export async function ingestSharedCollegeCircular(params: {
     const parsedAttachment = await scanSharedAttachment(gmail, parsedEmail, attachment).catch((error) => {
       attachmentErrors++;
       console.warn(`[Shared College Ingest] Deferred ${attachment.filename}:`, error);
-      return { extractedRows: null, parseStatus: 'error' as const, bytes: Buffer.alloc(0) };
+      return { extractedRows: null, parseStatus: 'error' as const, parseError: undefined as string | undefined, bytes: Buffer.alloc(0) };
     });
     const contentHash = parsedAttachment.bytes.length ? createHash('sha256').update(parsedAttachment.bytes).digest('hex') : null;
     const prior = findPriorRow(attachment, contentHash);
@@ -278,9 +322,15 @@ export async function ingestSharedCollegeCircular(params: {
       content_hash: contentHash,
       extracted_rows: parsedAttachment.extractedRows,
       parse_status: parsedAttachment.parseStatus,
-      parse_error: parsedAttachment.parseStatus === 'error' ? TRANSIENT_ATTACHMENT_ERROR : null,
+      parse_error: parsedAttachment.parseError
+        ?? (parsedAttachment.parseStatus === 'error' ? TRANSIENT_ATTACHMENT_ERROR : null),
       updated_at: new Date().toISOString(),
     };
+    if (attachmentPayload.parse_status === 'deferred' || attachmentPayload.parse_status === 'complete') {
+      // PDFs parsed here (`complete` with pdf_text rows, or text-less `deferred`) are
+      // terminal: never retried on later passes, unlike transient workbook failures.
+      attachmentPayload.parse_error = parsedAttachment.parseError ?? null;
+    }
     const write = prior
       ? await supabase.from('college_attachments').update(attachmentPayload).eq('id', prior.id)
       : await supabase.from('college_attachments').upsert(attachmentPayload, { onConflict: 'college_email_id,attachment_id' });
@@ -305,6 +355,21 @@ export async function ingestSharedCollegeCircular(params: {
         }
       : attachment;
   });
+
+  // PDF JD text is parsed in the loop above (first ingest) or arrived hydrated from
+  // cached extracted_rows (re-ingest). Merge attachment-derived fields into the
+  // canonical job details — body-derived values still win, PDFs only fill gaps.
+  if (parsedEmail.attachments.some((attachment) =>
+    isPdfAttachment(attachment.filename) && attachment.parseStatus === 'complete' && attachment.extractedRows
+  )) {
+    const pdfMergedJobDetails = mergePdfJobDetails(extractJobDetails(bodyText), parsedEmail.attachments);
+    if (JSON.stringify(pdfMergedJobDetails) !== JSON.stringify(jobDetails)) {
+      await supabase
+        .from('college_emails')
+        .update({ parsed_job_details: pdfMergedJobDetails, updated_at: new Date().toISOString() })
+        .eq('id', canonicalId);
+    }
+  }
 
   const drive = await findDriveForCircular(supabase, {
     text: `${parsedEmail.subject}\n${bodyText}`,

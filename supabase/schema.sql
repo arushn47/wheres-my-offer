@@ -328,6 +328,7 @@ CREATE TABLE IF NOT EXISTS public.notifications (
   placement_drive_id UUID,
   dedupe_key TEXT UNIQUE,
   is_read BOOLEAN DEFAULT FALSE,
+  dismissed_at TIMESTAMPTZ DEFAULT NULL,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   CONSTRAINT notifications_pkey PRIMARY KEY (id),
   CONSTRAINT notifications_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE,
@@ -581,6 +582,7 @@ CREATE INDEX IF NOT EXISTS idx_events_user_drive_type_date ON public.events(user
 CREATE INDEX IF NOT EXISTS idx_notifications_drive ON public.notifications(placement_drive_id);
 CREATE INDEX IF NOT EXISTS idx_notifications_user ON public.notifications(user_id, is_read);
 CREATE INDEX IF NOT EXISTS idx_notifications_dedupe ON public.notifications(dedupe_key);
+CREATE INDEX IF NOT EXISTS idx_notifications_user_inbox ON public.notifications(user_id, created_at DESC) WHERE dismissed_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_notifications_user_created ON public.notifications(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_notifications_user_drive ON public.notifications(user_id, placement_drive_id);
 CREATE INDEX IF NOT EXISTS idx_notifications_user_type_created ON public.notifications(user_id, type, created_at DESC);

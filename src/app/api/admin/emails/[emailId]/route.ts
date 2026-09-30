@@ -283,18 +283,6 @@ export async function PATCH(
         ...(collegeRef ? [collegeRef] : []),
       ])).filter(Boolean);
 
-      // Also gather any sibling college_emails with identical normalized subject
-      const rawSub = collegeEmailRecord?.subject || personalEmail?.subject || '';
-      const normSub = rawSub.replace(/^(?:(?:re|fw|fwd)\s*:\s*)+/i, '').trim();
-      if (normSub.length >= 4) {
-        const { data: siblingCollege } = await supabase
-          .from('college_emails')
-          .select('id')
-          .ilike('subject', `%${normSub}%`);
-        for (const sc of siblingCollege || []) {
-          allItemIdsToExclude.push(sc.id);
-        }
-      }
 
       if (targetDriveIds.size > 0 && allItemIdsToExclude.length > 0) {
         const { data: drivesToExcludeOn } = await supabase

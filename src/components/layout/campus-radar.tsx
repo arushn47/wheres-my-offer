@@ -128,6 +128,12 @@ export default function CampusRadar({ className, compact = false }: CampusRadarP
     : isSharedMatching ? 'Inbox scan complete'
     : isPaused ? 'Paused' : 'Idle';
   const sharedProcessing = Boolean(sharedStatus?.isSyncing || isSharedMatching);
+  // Distinguish: truly ingesting (has work to do) vs idle lease check (queue=0, no archive pages)
+  const sharedActuallyIngesting = sharedProcessing && (
+    isSharedMatching ||
+    (sharedStatus?.pendingMessages ?? 0) > 0 ||
+    Boolean(sharedStatus?.hasMoreArchivePages)
+  );
   const personalProgress = syncProgress && syncProgress.totalMessages > 0
     ? Math.min(100, Math.round((syncProgress.processedMessages / syncProgress.totalMessages) * 100))
     : progressPercent;
@@ -147,7 +153,7 @@ export default function CampusRadar({ className, compact = false }: CampusRadarP
     <div
       className={cn(
         'rounded-2xl border p-3 transition-all duration-300 shadow-md select-none',
-        personalSyncActive || sharedProcessing
+        personalSyncActive || sharedActuallyIngesting
           ? 'border-emerald-500/40 bg-emerald-950/25 shadow-[0_0_24px_rgba(16,185,129,0.12)]'
           : 'border-zinc-800/90 bg-zinc-900/50 hover:border-zinc-700/80',
         className
@@ -160,10 +166,10 @@ export default function CampusRadar({ className, compact = false }: CampusRadarP
             <span
               className={cn(
                 'absolute inline-flex h-full w-full rounded-full opacity-75',
-                personalSyncActive || sharedProcessing ? 'animate-ping bg-emerald-400' : 'bg-zinc-500'
+                personalSyncActive || sharedActuallyIngesting ? 'animate-ping bg-emerald-400' : 'bg-zinc-500'
               )}
             />
-            <span className={cn('relative inline-flex h-2 w-2 rounded-full', personalSyncActive || sharedProcessing ? 'bg-emerald-400' : 'bg-zinc-500')} />
+            <span className={cn('relative inline-flex h-2 w-2 rounded-full', personalSyncActive || sharedActuallyIngesting ? 'bg-emerald-400' : 'bg-zinc-500')} />
           </span>
           <span className="tracking-tight font-medium">Sync Radar</span>
         </div>
@@ -272,24 +278,29 @@ export default function CampusRadar({ className, compact = false }: CampusRadarP
         </section>
 
         {sharedProcessing && (
-          <div className="flex items-center gap-1.5 rounded-md border border-emerald-500/15 bg-emerald-500/[0.025] px-2 py-1.5 text-[9px] text-emerald-300" aria-live="polite">
-            <RefreshCw className="h-2.5 w-2.5 shrink-0 animate-spin" />
-            <span className="truncate">{isSharedMatching ? 'Matching cached College updates to your drives…' : 'New College updates are processing in the background…'}</span>
-          </div>
+          sharedActuallyIngesting ? (
+            <div className="flex items-center gap-1.5 rounded-md border border-emerald-500/15 bg-emerald-500/[0.025] px-2 py-1.5 text-[9px] text-emerald-300" aria-live="polite">
+              <RefreshCw className="h-2.5 w-2.5 shrink-0 animate-spin" />
+              <span className="truncate">{isSharedMatching ? 'Matching cached College updates to your drives…' : 'New College updates are processing in the background…'}</span>
+            </div>
+          ) : (
+            <div className="flex items-center gap-1.5 px-1 py-1 text-[9px] text-zinc-500" aria-live="polite">
+              <RefreshCw className="h-2.5 w-2.5 shrink-0 animate-spin opacity-50" />
+              <span className="truncate">Checking college inbox for new circulars…</span>
+            </div>
+          )
         )}
       </div>
       )}
 
       {!personalSyncActive && !sharedProcessing && sharedStatus &&
-        (sharedStatus.hasMoreArchivePages || sharedStatus.lastError || !sharedStatus.complete) && (
+        (sharedStatus.lastError || (sharedStatus.pendingMessages ?? 0) > 0) && (
           <div className="mt-2 flex items-start gap-1.5 rounded-md border border-zinc-800 bg-black/20 px-2 py-1.5 text-[9px] leading-snug text-zinc-400">
             <FileText className="mt-px h-3 w-3 shrink-0 text-emerald-500" />
             <span>
               {sharedStatus.lastError
                 ? 'College data processing needs attention.'
-                : sharedStatus.hasMoreArchivePages
-                  ? 'College archive updates are queued for matching to your Personal-evidenced drives.'
-                  : 'Shared College archive is being prepared.'}
+                : `${sharedStatus.pendingMessages} College updates queued for matching to your Personal-evidenced drives.`}
             </span>
           </div>
         )}

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireAdmin } from '@/lib/auth/admin';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { normalizeDriveNumber } from '@/lib/drive-number';
+import { getDriveRegistrationDateBoundary, isEmailAllowedByDriveBoundary } from '@/lib/sync/drive-temporal-boundary';
 
 export const dynamic = 'force-dynamic';
 
@@ -23,6 +24,150 @@ export async function GET(req: NextRequest) {
   const supabase = createAdminClient();
 
   try {
+    // If a driveKey is provided, resolve target drive(s), exclude already-assigned circulars,
+    // and enforce the drive registration temporal boundary (only circulars on or after registration date).
+    const assignedCollegeEmailIds = new Set<string>();
+    const takenCollegeEmailIds = new Set<string>();
+    let boundary: { minAllowedDate: Date | null; registrationDate: Date | null; formattedRegistrationDate: string | null } = {
+      minAllowedDate: null,
+      registrationDate: null,
+      formattedRegistrationDate: null,
+    };
+
+    if (driveKey) {
+      let resolvedDriveNumber: string | null = null;
+      let resolvedCompanyPattern: string | null = null;
+
+      if (driveKey.startsWith('drive:')) {
+        resolvedDriveNumber = normalizeDriveNumber(driveKey.slice(6));
+      } else if (driveKey.startsWith('name:')) {
+        resolvedCompanyPattern = driveKey.slice(5).trim();
+      } else {
+        const norm = normalizeDriveNumber(driveKey);
+        if (norm) resolvedDriveNumber = norm;
+        else resolvedCompanyPattern = driveKey.trim();
+      }
+
+      // Resolve the target drive(s)
+      let driveQuery = supabase
+        .from('placement_drives')
+        .select('id, drive_number, normalized_drive_number, drive_name, created_at, source_email_id, source_college_email_id, excluded_email_ids, companies(id, name, aliases)');
+
+      if (resolvedDriveNumber) {
+        driveQuery = driveQuery.or(
+          `drive_number.eq.${resolvedDriveNumber},normalized_drive_number.eq.${resolvedDriveNumber}`
+        );
+      } else if (resolvedCompanyPattern) {
+        driveQuery = driveQuery.ilike('drive_name', `%${resolvedCompanyPattern}%`);
+      }
+
+      const { data: targetDrives } = await driveQuery;
+
+      if (targetDrives && targetDrives.length > 0) {
+        const driveIds = targetDrives.map((d) => d.id);
+        const excludedIds = new Set<string>();
+        for (const td of targetDrives) {
+          if (Array.isArray(td.excluded_email_ids)) {
+            for (const ex of td.excluded_email_ids) excludedIds.add(ex);
+          }
+        }
+
+        // Calculate minimum allowed registration date boundary for this drive
+        boundary = await getDriveRegistrationDateBoundary(
+          supabase,
+          driveIds,
+          targetDrives[0]?.created_at
+        );
+
+        // 1. source_college_email_id set directly on the drive
+        for (const d of targetDrives) {
+          if (d.source_college_email_id && !excludedIds.has(d.source_college_email_id)) {
+            assignedCollegeEmailIds.add(d.source_college_email_id);
+          }
+        }
+
+        // 2. college_email_id referenced by personal_emails already assigned to this drive
+        const { data: assignedReceipts } = await supabase
+          .from('personal_emails')
+          .select('college_email_id, canonical_email_id')
+          .in('placement_drive_id', driveIds)
+          .not('college_email_id', 'is', null);
+
+        for (const r of assignedReceipts || []) {
+          if (r.college_email_id && !excludedIds.has(r.college_email_id)) assignedCollegeEmailIds.add(r.college_email_id);
+          if (r.canonical_email_id && !excludedIds.has(r.canonical_email_id)) assignedCollegeEmailIds.add(r.canonical_email_id);
+        }
+
+        // 3. college_emails whose parsed_drive_numbers JSON array contains any of the target drive numbers
+        const driveNumVariants = new Set<string>();
+        if (resolvedDriveNumber) driveNumVariants.add(resolvedDriveNumber);
+        for (const td of targetDrives) {
+          if (td.drive_number) driveNumVariants.add(td.drive_number);
+          if (td.normalized_drive_number) driveNumVariants.add(td.normalized_drive_number);
+        }
+
+        for (const num of driveNumVariants) {
+          const { data: alreadyParsed } = await supabase
+            .from('college_emails')
+            .select('id')
+            .filter('parsed_drive_numbers', 'cs', JSON.stringify([num]));
+
+          for (const ce of alreadyParsed || []) {
+            if (!excludedIds.has(ce.id)) {
+              assignedCollegeEmailIds.add(ce.id);
+            }
+          }
+        }
+
+        // 4. College circulars matching the drive's company name/aliases
+        for (const td of targetDrives) {
+          const company = (td as any).companies;
+          const cName = company?.name || td.drive_name || '';
+          const cAliases: string[] = Array.isArray(company?.aliases) ? company.aliases : [];
+          const companyTerms = [cName, ...cAliases].filter((t) => typeof t === 'string' && t.trim().length >= 3);
+
+          for (const term of companyTerms) {
+            const cleanTerm = term.replace(/[.*+?^${}()|[\]\\,]/g, '').trim();
+            if (!cleanTerm) continue;
+
+            const { data: matchedByCompany } = await supabase
+              .from('college_emails')
+              .select('id, classification')
+              .or(`subject.ilike.%${cleanTerm}%,parsed_company_name.ilike.%${cleanTerm}%`)
+              .limit(50);
+
+            for (const cm of matchedByCompany || []) {
+              if (!excludedIds.has(cm.id) && cm.classification !== 'irrelevant') {
+                assignedCollegeEmailIds.add(cm.id);
+              }
+            }
+          }
+        }
+
+        // 5. College circulars already assigned to ANY OTHER drive must never be
+        // offered for linking again — one circular drives one placement drive.
+        const { data: takenReceipts } = await supabase
+          .from('personal_emails')
+          .select('college_email_id, canonical_email_id')
+          .not('placement_drive_id', 'is', null)
+          .not('college_email_id', 'is', null)
+          .not('assignment_source', 'eq', 'admin_unlinked');
+        for (const r of takenReceipts || []) {
+          if (r.college_email_id) takenCollegeEmailIds.add(r.college_email_id);
+          if (r.canonical_email_id) takenCollegeEmailIds.add(r.canonical_email_id);
+        }
+        const { data: takenDrives } = await supabase
+          .from('placement_drives')
+          .select('id, source_college_email_id')
+          .not('source_college_email_id', 'is', null);
+        for (const d of takenDrives || []) {
+          if (d.source_college_email_id && !driveIds.includes(d.id)) {
+            takenCollegeEmailIds.add(d.source_college_email_id);
+          }
+        }
+      }
+    }
+
     let query = supabase
       .from('personal_emails')
       .select('id, user_id, subject, sender, received_at, body_snippet, college_email_id, canonical_email_id, placement_drive_id, users(name, email)')
@@ -35,6 +180,10 @@ export async function GET(req: NextRequest) {
 
     if (unassignedOnly) {
       query = query.is('placement_drive_id', null);
+    }
+
+    if (boundary.minAllowedDate) {
+      query = query.gte('received_at', boundary.minAllowedDate.toISOString());
     }
 
     const { data: rawEmails, error } = await query;
@@ -58,8 +207,19 @@ export async function GET(req: NextRequest) {
     }>();
 
     for (const em of rawEmails || []) {
-      const normSubject = (em.subject || '').replace(/^(?:re|fwd?)\s*:\s*/i, '').trim().toLowerCase();
-      const groupKey = em.canonical_email_id ? `can:${em.canonical_email_id}` : `sub:${normSubject}`;
+      // Respect drive registration temporal boundary if set
+      if (boundary.minAllowedDate && !isEmailAllowedByDriveBoundary(em.received_at, boundary.minAllowedDate)) {
+        continue;
+      }
+
+      // Group ONLY by canonical circular identity, never by subject: "Re: X" replies
+      // in the same Gmail thread are DIFFERENT circulars with different attachments
+      // and different recipients.
+      const groupKey = em.canonical_email_id
+        ? `can:${em.canonical_email_id}`
+        : em.college_email_id
+          ? `ce:${em.college_email_id}`
+          : `raw:${em.id}`;
 
       const u = Array.isArray(em.users) ? em.users[0] : em.users;
       const studentInfo = {
@@ -92,156 +252,28 @@ export async function GET(req: NextRequest) {
 
     // Also query college_emails if searching by keyword
     if (q) {
-      // If a driveKey is provided, find all college email IDs already assigned to that drive
-      // so we can exclude them (they already show in "Emails Assigned to This Drive").
-      const assignedCollegeEmailIds = new Set<string>();
-
-      if (driveKey) {
-        // Parse the driveKey format: 'drive:pat-pl-2026-1333' or 'name:deloitte'
-        let resolvedDriveNumber: string | null = null;
-        let resolvedCompanyPattern: string | null = null;
-
-        if (driveKey.startsWith('drive:')) {
-          resolvedDriveNumber = normalizeDriveNumber(driveKey.slice(6));
-        } else if (driveKey.startsWith('name:')) {
-          resolvedCompanyPattern = driveKey.slice(5).trim();
-        } else {
-          const norm = normalizeDriveNumber(driveKey);
-          if (norm) resolvedDriveNumber = norm;
-          else resolvedCompanyPattern = driveKey.trim();
-        }
-
-        // Resolve the target drive(s)
-        let driveQuery = supabase
-          .from('placement_drives')
-          .select('id, drive_number, normalized_drive_number, drive_name, source_college_email_id, excluded_email_ids, companies(id, name, aliases)');
-
-        if (resolvedDriveNumber) {
-          driveQuery = driveQuery.or(
-            `drive_number.eq.${resolvedDriveNumber},normalized_drive_number.eq.${resolvedDriveNumber}`
-          );
-        } else if (resolvedCompanyPattern) {
-          driveQuery = driveQuery.ilike('drive_name', `%${resolvedCompanyPattern}%`);
-        }
-
-        const { data: targetDrives } = await driveQuery;
-
-        if (targetDrives && targetDrives.length > 0) {
-          const driveIds = targetDrives.map((d) => d.id);
-          const excludedIds = new Set<string>();
-          for (const td of targetDrives) {
-            if (Array.isArray(td.excluded_email_ids)) {
-              for (const ex of td.excluded_email_ids) excludedIds.add(ex);
-            }
-          }
-
-          // 1. source_college_email_id set directly on the drive
-          for (const d of targetDrives) {
-            if (d.source_college_email_id && !excludedIds.has(d.source_college_email_id)) {
-              assignedCollegeEmailIds.add(d.source_college_email_id);
-            }
-          }
-
-          // 2. college_email_id referenced by personal_emails already assigned to this drive
-          const { data: assignedReceipts } = await supabase
-            .from('personal_emails')
-            .select('college_email_id, canonical_email_id')
-            .in('placement_drive_id', driveIds)
-            .not('college_email_id', 'is', null);
-
-          for (const r of assignedReceipts || []) {
-            if (r.college_email_id && !excludedIds.has(r.college_email_id)) assignedCollegeEmailIds.add(r.college_email_id);
-            if (r.canonical_email_id && !excludedIds.has(r.canonical_email_id)) assignedCollegeEmailIds.add(r.canonical_email_id);
-          }
-
-          // 3. college_emails whose parsed_drive_numbers JSON array contains any of the target drive numbers
-          const driveNumVariants = new Set<string>();
-          if (resolvedDriveNumber) driveNumVariants.add(resolvedDriveNumber);
-          for (const td of targetDrives) {
-            if (td.drive_number) driveNumVariants.add(td.drive_number);
-            if (td.normalized_drive_number) driveNumVariants.add(td.normalized_drive_number);
-          }
-
-          for (const num of driveNumVariants) {
-            const { data: alreadyParsed } = await supabase
-              .from('college_emails')
-              .select('id')
-              .filter('parsed_drive_numbers', 'cs', JSON.stringify([num]));
-
-            for (const ce of alreadyParsed || []) {
-              if (!excludedIds.has(ce.id)) {
-                assignedCollegeEmailIds.add(ce.id);
-              }
-            }
-          }
-
-          // 4. College circulars matching the drive's company name/aliases
-          //    (matching the exact assignment criteria of /api/admin/drives/[driveKey]/emails)
-          for (const td of targetDrives) {
-            const company = (td as any).companies;
-            const cName = company?.name || td.drive_name || '';
-            const cAliases: string[] = Array.isArray(company?.aliases) ? company.aliases : [];
-            const companyTerms = [cName, ...cAliases].filter((t) => typeof t === 'string' && t.trim().length >= 3);
-
-            for (const term of companyTerms) {
-              const cleanTerm = term.replace(/[.*+?^${}()|[\]\\,]/g, '').trim();
-              if (!cleanTerm) continue;
-
-              const { data: matchedByCompany } = await supabase
-                .from('college_emails')
-                .select('id, classification')
-                .or(`subject.ilike.%${cleanTerm}%,parsed_company_name.ilike.%${cleanTerm}%`)
-                .limit(50);
-
-              for (const cm of matchedByCompany || []) {
-                if (!excludedIds.has(cm.id) && cm.classification !== 'irrelevant') {
-                  assignedCollegeEmailIds.add(cm.id);
-                }
-              }
-            }
-          }
-
-          // 5. Collect normalized subjects of all personal_emails assigned to this drive
-          //    so we can exclude college_emails with matching subjects even if no ID linkage exists
-          const { data: allAssignedReceipts } = await supabase
-            .from('personal_emails')
-            .select('subject')
-            .in('placement_drive_id', driveIds);
-
-          const assignedNormSubjects = new Set<string>();
-          for (const r of allAssignedReceipts || []) {
-            const ns = (r.subject || '').replace(/^(?:re|fwd?)\s*:\s*/i, '').trim().toLowerCase();
-            if (ns) assignedNormSubjects.add(ns);
-          }
-
-          // Attach to outer scope for use during filtering below
-          (assignedCollegeEmailIds as any)._assignedNormSubjects = assignedNormSubjects;
-        }
-      }
-
-      const { data: collegeMatches } = await supabase
+      let collegeQuery = supabase
         .from('college_emails')
         .select('id, subject, sender_email, received_at, created_at, body_snippet')
         .ilike('subject', `%${q}%`)
         .order('received_at', { ascending: false })
         .limit(30);
 
-      // Retrieve the assigned-subjects set attached earlier
-      const assignedNormSubjects: Set<string> = (assignedCollegeEmailIds as any)._assignedNormSubjects || new Set<string>();
-      // Deduplicate by normalized subject so we don't show the same circular twice
-      const seenSubjects = new Set<string>();
+      if (boundary.minAllowedDate) {
+        collegeQuery = collegeQuery.gte('received_at', boundary.minAllowedDate.toISOString());
+      }
+
+      const { data: collegeMatches } = await collegeQuery;
 
       for (const cm of collegeMatches || []) {
         // Skip if already assigned to the target drive (by ID or parsed_drive_numbers)
         if (assignedCollegeEmailIds.has(cm.id)) continue;
-
-        const normSubject = (cm.subject || '').replace(/^(?:re|fwd?)\s*:\s*/i, '').trim().toLowerCase();
-
-        // Skip if this subject already appears in personal_emails assigned to this drive
-        if (assignedNormSubjects.has(normSubject)) continue;
-
-        if (seenSubjects.has(normSubject)) continue;
-        seenSubjects.add(normSubject);
+        // Skip circulars already consumed by any other drive
+        if (takenCollegeEmailIds.has(cm.id)) continue;
+        // Respect drive registration temporal boundary if set
+        if (boundary.minAllowedDate && !isEmailAllowedByDriveBoundary(cm.received_at || cm.created_at, boundary.minAllowedDate)) {
+          continue;
+        }
 
         const groupKey = `can:${cm.id}`;
         if (!grouped.has(groupKey)) {
@@ -264,6 +296,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({
       success: true,
       results: Array.from(grouped.values()),
+      registrationDateBoundary: boundary.formattedRegistrationDate,
     });
   } catch (err: any) {
     console.error('[Admin Email Search API] Unexpected error:', err);

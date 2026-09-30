@@ -42,6 +42,23 @@ No Manual Registration & extension will be entertained.
   it('does not infer a location from a company name or headquarters', () => {
     expect(extractJobDetails('Acme placement drive. CTC: 10 LPA.').location).toBeNull();
   });
+
+  it('keeps the city list when a company name with a legal suffix precedes it (Tata Technologies)', () => {
+    const details = extractJobDetails('Job Location: Tata Technologies Ltd. Pune/ Bangalore/Thane');
+    expect(details.location).toBe('Pune / Bangalore / Thane');
+  });
+
+  it('rejects generic placeholder "GEV locations" and picks real "PAN India"', () => {
+    const text = `
+Website: https://careers.gevernova.com/
+Location: PAN India
+Internship Job title: Software Engineering intern
+Job Locations: GEV locations
+Registration: on or before 30-09-2026
+    `;
+    const details = extractJobDetails(text);
+    expect(details.location).toBe('Pan India');
+  });
 });
 
 describe('cleanLocationString normalization', () => {

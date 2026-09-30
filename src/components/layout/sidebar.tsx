@@ -90,7 +90,7 @@ export default function Sidebar({
               href={href}
               prefetch={true}
               className={cn(
-                'group flex items-center gap-3 rounded-xl px-3.5 py-2.5 text-sm font-medium transition-colors duration-150',
+                'group flex items-center gap-3 rounded-xl px-3.5 py-2.5 text-[15px] font-medium transition-colors duration-150',
                 isActive
                   ? isAdmin
                     ? 'bg-amber-500/10 text-amber-300 font-semibold border border-amber-500/20'
@@ -100,7 +100,7 @@ export default function Sidebar({
             >
               <Icon
                 className={cn(
-                  'h-4 w-4 transition-colors',
+                  'h-[18px] w-[18px] transition-colors',
                   isActive
                     ? isAdmin ? 'text-amber-400' : 'text-emerald-400'
                     : 'text-zinc-500 group-hover:text-zinc-300'
@@ -132,7 +132,7 @@ export default function Sidebar({
       </div>
 
       {/* Support & Legal Links */}
-      <div className="px-4 py-2 border-t border-zinc-800/60 flex items-center justify-between text-[10px] font-mono text-zinc-500 shrink-0 select-none">
+      <div className="px-4 py-2 border-t border-zinc-800/60 flex items-center justify-between text-[11px] font-mono text-zinc-500 shrink-0 select-none">
         <Link href="/feedback" className="hover:text-zinc-300 transition-colors">
           Feedback
         </Link>
@@ -177,16 +177,16 @@ export default function Sidebar({
             </div>
           )}
           <div className="min-w-0 flex-1">
-            <p className="text-xs font-semibold text-zinc-200 truncate group-hover:text-white transition-colors">
+            <p className="text-sm font-semibold text-zinc-200 truncate group-hover:text-white transition-colors">
               {userName || (isAdmin ? 'Admin User' : 'Logged in User')}
             </p>
             {isAdmin ? (
-              <p className="text-[10px] text-amber-400 font-mono truncate flex items-center gap-1 font-semibold">
+              <p className="text-[11px] text-amber-400 font-mono truncate flex items-center gap-1 font-semibold">
                 <Shield className="w-2.5 h-2.5 text-amber-400 shrink-0" />
                 System Administrator
               </p>
             ) : (
-              <p className="text-[10px] text-emerald-400 font-mono truncate flex items-center gap-1.5">
+              <p className="text-[11px] text-emerald-400 font-mono truncate flex items-center gap-1.5">
                 <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 shrink-0" />
                 Active Session
               </p>

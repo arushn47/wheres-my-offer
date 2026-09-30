@@ -9,6 +9,16 @@ import { getInitialArchivePageState } from '@/lib/sync/shared-college-state';
 // inbox is connected, not one student's address. The first connected College inbox wins.
 const MAX_BATCH_SIZE = 40;
 
+/**
+ * Gmail listing query for the shared College ingester. Primary sender is always
+ * included; gated senders (placement office) are always listed too — the
+ * ingest-boundary relevance gate scores each message and persists the verdict
+ * in the DB, so listing them costs at most one metadata fetch per message.
+ */
+function getGatedCollegeQuery(dateFilter: string): string {
+  return `(from:vitlions2027@vitbhopal.ac.in OR from:placementoffice@vitbhopal.ac.in) ${dateFilter}`;
+}
+
 interface SharedSyncState {
   initial_scan_complete: boolean;
   next_page_token: string | null;
@@ -165,7 +175,7 @@ export async function runSharedCollegeSync(options: { limit?: number } = {}) {
       }
       const listed = await gmail.users.messages.list({
         userId: 'me',
-        q: 'from:vitlions2027@vitbhopal.ac.in after:2026/06/30',
+        q: getGatedCollegeQuery('after:2026/06/30'),
         maxResults: 100,
         pageToken: state.next_page_token || undefined,
       });
@@ -183,7 +193,7 @@ export async function runSharedCollegeSync(options: { limit?: number } = {}) {
           const dateStr = `${safeDate.getUTCFullYear()}/${String(safeDate.getUTCMonth() + 1).padStart(2, '0')}/${String(safeDate.getUTCDate()).padStart(2, '0')}`;
           const listed = await gmail.users.messages.list({
             userId: 'me',
-            q: `from:vitlions2027@vitbhopal.ac.in after:${dateStr}`,
+            q: getGatedCollegeQuery(`after:${dateStr}`),
             maxResults: 50,
           });
           state.pending_message_ids = (listed.data.messages || []).map((message) => message.id).filter((id): id is string => Boolean(id));
@@ -211,7 +221,7 @@ export async function runSharedCollegeSync(options: { limit?: number } = {}) {
         const dateStr = `${safeDate.getUTCFullYear()}/${String(safeDate.getUTCMonth() + 1).padStart(2, '0')}/${String(safeDate.getUTCDate()).padStart(2, '0')}`;
         const listed = await gmail.users.messages.list({
           userId: 'me',
-          q: `from:vitlions2027@vitbhopal.ac.in after:${dateStr}`,
+          q: getGatedCollegeQuery(`after:${dateStr}`),
           maxResults: 50,
         });
         state.pending_message_ids = (listed.data.messages || []).map((message) => message.id).filter((id): id is string => Boolean(id));

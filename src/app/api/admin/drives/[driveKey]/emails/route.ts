@@ -244,8 +244,8 @@ export async function GET(
         .trim()
         .toLowerCase();
       const collegeRef = e.college_email_id || e.canonical_email_id;
-      // Key by normalized subject so duplicate student receipts collapse
-      const groupKey = normSubject ? `subject:${normSubject}` : (collegeRef ? `college:${collegeRef}` : `email:${e.id}`);
+      // Key by college reference if linked, else by normalized subject so duplicate student receipts collapse
+      const groupKey = collegeRef ? `college:${collegeRef}` : (normSubject ? `subject:${normSubject}` : `email:${e.id}`);
 
       const existing = groupMap.get(groupKey);
       if (existing) {
@@ -286,11 +286,9 @@ export async function GET(
 
     // Merge college broadcast circulars into groupMap so they appear in admin view
     for (const ce of collegeEmails) {
-      const normSubject = (ce.subject || '')
-        .replace(/^(?:(?:re|fw|fwd)\s*:\s*)+/i, '')
-        .trim()
-        .toLowerCase();
-      const groupKey = normSubject ? `subject:${normSubject}` : `college:${ce.id}`;
+      // Group each broadcast circular by its unique ID so replies/updates in the same
+      // thread show as distinct cards with their actual received dates and snippets
+      const groupKey = `college:${ce.id}`;
       const existing = groupMap.get(groupKey);
       if (existing) {
         existing.isCollegeCircular = true;

@@ -545,7 +545,34 @@ export async function scanSharedCollegeCandidateMatches(
       driveResult.matchEmailId = email.id;
     }
     verificationByDrive.set(driveId, driveResult);
-    if (existingRefs.has(`${driveId}|${email.id}`) || evaluation.state !== 'verified_present') continue;
+    if (existingRefs.has(`${driveId}|${email.id}`)) {
+      // Backfill: legacy match rows predate precise roster locations (they carry
+      // generic values like "Matched in shared shortlist roster" and no sheet/row).
+      // When this rescan resolved the exact roster hit, enrich the existing row so
+      // the drive UI can show "Sheet1!row 14" instead of a bare filename.
+      if (evaluation.state === 'verified_present' && evaluation.matchingRoster) {
+        const preciseDetails = evaluation.matchingRoster.details;
+        const existing = (existingMatches || []).find((match) =>
+          match.placement_drive_id === driveId &&
+          match.college_email_id === email.id &&
+          isShortlistMatchEvidence({
+            matchType: match.match_type,
+            matchedValue: match.matched_value,
+            matchedRoundType: match.matched_round_type,
+          })
+        );
+        if (existing && existing.matched_value !== preciseDetails) {
+          await supabase
+            .from('candidate_matches')
+            .update({ matched_value: preciseDetails })
+            .eq('user_id', userId)
+            .eq('placement_drive_id', driveId)
+            .eq('college_email_id', email.id);
+        }
+      }
+      continue;
+    }
+    if (evaluation.state !== 'verified_present') continue;
 
     const round = /interview|selection\s+process/i.test(email.subject || '')
       ? 'interview'

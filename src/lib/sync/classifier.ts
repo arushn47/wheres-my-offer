@@ -105,14 +105,39 @@ const CLASSIFICATION_RULES: ClassificationRule[] = [
 
   // --- HIGH CONFIDENCE ---
   {
-    classification: 'shortlist',
+    classification: 'registration_confirmation',
     confidence: 'high',
     match: (s, b) =>
-      (/shortlist(ed)?/i.test(s) &&
-        !/not\s+shortlist/i.test(s) &&
-        !/un-?shortlist/i.test(s)) ||
-      /(?:find\s+the\s+below\s+shortlist|below\s+is\s+the\s+shortlist|find\s+the\s+shortlist|shortlisted\s+candidates|shortlist\s+for\s+next\s+round)/i.test(b) ||
-      /next\s+round\s+of\s+selection/i.test(s),
+      /(successfully\s+registered|registration\s+confirmed|application\s+received|thank\s+you\s+for\s+(registering|applying)|confirmed:\s*(?:your\s+registration|.*placement\s+drive)|confirmation:\s*.*drive\s+registration)/i.test(s + ' ' + b),
+    reason: 'Confirmation language detected',
+  },
+  {
+    classification: 'registration',
+    confidence: 'high',
+    match: (s) =>
+      /(?:eligible\s+for|eligibility\s+for|optional\s+form|drive\s+registration|drive\s+information|drive\s+update|register|registration|apply\s+(?:now|here|for)|application\s+(?:open|link|form|deadline)|notice\s+inviting\s+application|\bnia\b)/i.test(s) &&
+      !/(?:shortlist|course|assessment\s+course|mock\s+test|learning\s+contents|practice\s+assessment|nerd\s+season|codeathon)/i.test(s),
+    reason: 'Subject announces placement drive eligibility, update, or registration',
+  },
+  {
+    classification: 'shortlist',
+    confidence: 'high',
+    match: (s, b) => {
+      // Registration, application, eligibility, and JD circulars are not shortlists,
+      // even if their body describes future evaluation/shortlist stages.
+      const isRegistrationSubject =
+        /(?:^|[:\s-])(?:registration|register|apply|inviting\s+applications?|notice\s+inviting\s+application|\bnia\b|job\s+description|\bjd\b|eligibility|eligible\s+for)(?:$|[:\s-])/i.test(s) &&
+        !/shortlist/i.test(s);
+      if (isRegistrationSubject) return false;
+
+      return (
+        (/shortlist(ed)?/i.test(s) &&
+          !/not\s+shortlist/i.test(s) &&
+          !/un-?shortlist/i.test(s)) ||
+        /(?:find\s+(?:the\s+)?(?:below|attached|enclosed)\s+shortlist|below\s+is\s+the\s+shortlist|find\s+(?:the\s+)?shortlist|list\s+of\s+shortlisted\s+candidates|shortlisted\s+candidates\s+(?:list|sheet|roster)|shortlist\s+for\s+next\s+round|following\s+(?:are\s+the\s+)?(?:shortlisted|selected)\s+candidates)/i.test(b) ||
+        /next\s+round\s+of\s+selection/i.test(s)
+      );
+    },
     reason: 'Email announces candidate shortlist or next round selection',
   },
   {
@@ -215,30 +240,12 @@ const CLASSIFICATION_RULES: ClassificationRule[] = [
 
   // --- MEDIUM CONFIDENCE ---
   {
-    classification: 'registration_confirmation',
-    confidence: 'high',
-    match: (s, b) =>
-      /(successfully\s+registered|registration\s+confirmed|application\s+received|thank\s+you\s+for\s+(registering|applying)|confirmed:\s*(?:your\s+registration|.*placement\s+drive)|confirmation:\s*.*drive\s+registration)/i.test(s + ' ' + b),
-    reason: 'Confirmation language detected',
-  },
-  {
-    classification: 'registration',
-    confidence: 'high',
-    match: (s) =>
-      /(?:eligible\s+for|eligibility\s+for|placement\s+drive|campus\s+drive|optional\s+form|drive\s+information|drive\s+registration|drive\s+update)/i.test(
-        s
-      ) &&
-      !/course|assessment\s+course|mock\s+test|learning\s+contents|practice\s+assessment|nerd\s+season|codeathon/i.test(
-        s
-      ),
-    reason: 'Subject announces placement drive eligibility, update, or registration',
-  },
-  {
     classification: 'registration',
     confidence: 'medium',
     match: (s) =>
-      /(register|registration|apply\s+(now|here|for)|application\s+(open|link|form|deadline))/i.test(s),
-    reason: 'Subject mentions registration or apply',
+      /(?:placement\s+drive|campus\s+drive)/i.test(s) &&
+      !/course|assessment\s+course|mock\s+test|learning\s+contents|practice\s+assessment|nerd\s+season|codeathon/i.test(s),
+    reason: 'Subject mentions placement drive or campus drive',
   },
   {
     classification: 'application_status',
@@ -481,8 +488,8 @@ const SUBJECT_COMPANY_PATTERNS: RegExp[] = [
   // "Company Name - Drive Registration"
   /^((?:[A-Za-z0-9&\s\-\.]|\([^)]+\))+?)\s*[-–—]\s*drive\s+registration/i,
   // "LTIMindtree Registration - Regular Offer - 2027 Batch"
-  // "Company Name Registration - 2027 Batch" / "Company Name - Registration"
-  /^((?:[A-Za-z0-9&\s\-\.]|\([^)]+\))+?)\s*[-–—]?\s*registration\b/i,
+  // "Company Name Registration - 2027 Batch" / "Company Name - Registration" / "Company Name : Registration"
+  /^((?:[A-Za-z0-9&\s\-\.]|\([^)]+\))+?)\s*[:\-–—]?\s*registration\b/i,
   // "Zluri Super Dream Internship Selection List..."
   /^((?:[A-Za-z0-9&\s\-\.]|\([^)]+\))+?)\s*(?:\([^)]+\))?\s+(?:super\s+dream|dream|regular)?\s*[-–—]?\s*(?:internship|placement|ppo|offer)?\s*(?:selection\s+list|shortlist)/i,
   // "M/s.Value Labs Placement Drive"

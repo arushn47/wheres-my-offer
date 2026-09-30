@@ -253,18 +253,35 @@ export default async function CompanyDetailPage(props: {
     : null;
 
   // Determine anchor time for unassigned fallback emails.
+  // Exclude admin_unlinked emails so a mistakenly-assigned July email can't
+  // pull the anchor back months before the actual registration date.
   const anchorEmailTimes = (assignedEmails || [])
-    .filter((em: any) => !placementDriveId || em.placement_drive_id === placementDriveId)
+    .filter((em: any) => {
+      if (!placementDriveId || em.placement_drive_id !== placementDriveId) return false;
+      if (em.assignment_source === 'admin_unlinked') return false;
+      if (em.classification === 'irrelevant' || em.is_relevant === false) return false;
+      return true;
+    })
     .map((em: any) => em.received_at ? new Date(em.received_at).getTime() : 0)
     .filter((t: number) => t > 0);
 
+  // Use sourceEmail (NeoPAT registration mail) as the primary anchor.
+  // Fallback to the LATEST assigned email minus 7 days so stray early-window emails
+  // don't push driveMinAllowedTime back into a previous season.
   const driveStartTime = sourceEmail?.received_at
     ? new Date(sourceEmail.received_at).getTime()
     : anchorEmailTimes.length > 0
-      ? Math.min(...anchorEmailTimes)
+      ? (() => {
+          const maxTime = Math.max(...anchorEmailTimes);
+          // Only include emails within 60 days of the latest email to avoid outlier pull-back
+          const filtered = anchorEmailTimes.filter((t) => t >= maxTime - 60 * 86400000);
+          return Math.min(...filtered);
+        })()
       : application?.applied_at
         ? new Date(application.applied_at).getTime()
-        : null;
+        : targetDrive?.created_at
+          ? new Date(targetDrive.created_at).getTime()
+          : null;
 
   // Allow circulars arriving up to 24h prior to the anchor time (matching sync engine ±24h grace window)
   const driveMinAllowedTime = driveStartTime ? driveStartTime - 24 * 60 * 60 * 1000 : 0;
@@ -277,6 +294,12 @@ export default async function CompanyDetailPage(props: {
     if (excludedEmailIds.has(em.id)) continue;
     if (em.college_email_id && excludedEmailIds.has(em.college_email_id)) continue;
     if (em.canonical_email_id && excludedEmailIds.has(em.canonical_email_id)) continue;
+    // RULE: Reject assigned emails that predate this drive's registration window.
+    // Only the source/registration email itself (which defines the anchor) is exempt.
+    if (driveMinAllowedTime > 0 && em.id !== targetDrive?.source_email_id) {
+      const emTime = em.received_at ? new Date(em.received_at).getTime() : 0;
+      if (emTime > 0 && emTime < driveMinAllowedTime) continue;
+    }
     allEmailsMap.set(em.id, em);
   }
 
@@ -443,34 +466,35 @@ export default async function CompanyDetailPage(props: {
         });
 
         if (isExplicitId || matchesWordBoundary) {
-          // If not an explicit ID linked directly to this drive, enforce drive window & tier compatibility
-          if (!isExplicitId) {
-            const ceTime = ce.received_at
-              ? new Date(ce.received_at).getTime()
-              : (ce.created_at ? new Date(ce.created_at).getTime() : 0);
+          // Enforce the drive's registration date gate on ALL circulars (explicit or matched).
+          // Explicit IDs (from events/candidateMatches/source_college_email_id) are NOT exempt:
+          // if an admin unlinked a July email but events still reference it, it would leak back
+          // without this unconditional check.
+          const ceTime = ce.received_at
+            ? new Date(ce.received_at).getTime()
+            : (ce.created_at ? new Date(ce.created_at).getTime() : 0);
 
-            // 1. RULE: Only circulars arriving on or after the date of drive (with ±24h grace window)
-            if (driveMinAllowedTime > 0 && ceTime > 0 && ceTime < driveMinAllowedTime) {
-              continue;
-            }
+          // 1. RULE: Only circulars arriving on or after the date of drive (with ±24h grace window)
+          if (driveMinAllowedTime > 0 && ceTime > 0 && ceTime < driveMinAllowedTime) {
+            continue;
+          }
 
-            // 2. Reject circulars whose subject explicitly specifies a scheduled date in the distant past
-            const scheduledDate = parseScheduledDate(sub);
-            if (scheduledDate && driveMinAllowedTime > 0 && scheduledDate < driveMinAllowedTime - 7 * 86400000) {
-              continue;
-            }
+          // 2. Reject circulars whose subject explicitly specifies a scheduled date in the distant past
+          const scheduledDate = parseScheduledDate(sub);
+          if (scheduledDate && driveMinAllowedTime > 0 && scheduledDate < driveMinAllowedTime - 7 * 86400000) {
+            continue;
+          }
 
-            // 3. Reject cross-tier mismatch (e.g. Regular Internship circular leaking into Dream Internship drive)
-            const driveCat = (targetDrive?.category || '').toLowerCase();
-            const isDreamDrive = driveCat.includes('dream') || driveCat.includes('super');
-            const isRegularDrive = driveCat.includes('regular');
-            const subLower = sub.toLowerCase();
-            if (isDreamDrive && subLower.includes('regular internship') && !subLower.includes('dream')) {
-              continue;
-            }
-            if (isRegularDrive && (subLower.includes('dream internship') || subLower.includes('super dream'))) {
-              continue;
-            }
+          // 3. Reject cross-tier mismatch (e.g. Regular Internship circular leaking into Dream Internship drive)
+          const driveCat = (targetDrive?.category || '').toLowerCase();
+          const isDreamDrive = driveCat.includes('dream') || driveCat.includes('super');
+          const isRegularDrive = driveCat.includes('regular');
+          const subLower = sub.toLowerCase();
+          if (isDreamDrive && subLower.includes('regular internship') && !subLower.includes('dream')) {
+            continue;
+          }
+          if (isRegularDrive && (subLower.includes('dream internship') || subLower.includes('super dream'))) {
+            continue;
           }
 
           if (normSub) seenCollegeSubjects.add(normSub);
@@ -501,12 +525,13 @@ export default async function CompanyDetailPage(props: {
       .filter((id: unknown): id is string => typeof id === 'string' && id.length > 0)
   ));
   const canonicalBodyById = new Map<string, string>();
+  const canonicalMessageIdById = new Map<string, string>();
   const attachmentByCollegeEmailId = new Map<string, string>();
   if (canonicalIds.length > 0) {
     const [canonicalRes, attachmentRes] = await Promise.all([
       supabase
         .from('college_emails')
-        .select('id, body_text, body_snippet')
+        .select('id, body_text, body_snippet, message_id')
         .in('id', canonicalIds),
       supabase
         .from('college_attachments')
@@ -520,6 +545,7 @@ export default async function CompanyDetailPage(props: {
       for (const canonical of canonicalRes.data || []) {
         const body = canonical.body_text || canonical.body_snippet || '';
         if (body) canonicalBodyById.set(canonical.id, body);
+        if (canonical.message_id) canonicalMessageIdById.set(canonical.id, canonical.message_id);
       }
     }
 
@@ -656,7 +682,7 @@ export default async function CompanyDetailPage(props: {
         classification: em.classification || 'general',
         threadId: em.thread_id || null,
         gmailMessageId: em.gmail_message_id || null,
-        rfcMessageId: em.rfc_message_id || null,
+        rfcMessageId: em.rfc_message_id || (colId ? canonicalMessageIdById.get(colId) : null) || null,
         accountEmail: em.gmail_account_id
           ? accountMap.get(em.gmail_account_id) || null
           : colId
