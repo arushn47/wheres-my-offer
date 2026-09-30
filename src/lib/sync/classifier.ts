@@ -135,6 +135,8 @@ const CLASSIFICATION_RULES: ClassificationRule[] = [
           !/not\s+shortlist/i.test(s) &&
           !/un-?shortlist/i.test(s)) ||
         /(?:find\s+(?:the\s+)?(?:below|attached|enclosed)\s+shortlist|below\s+is\s+the\s+shortlist|find\s+(?:the\s+)?shortlist|list\s+of\s+shortlisted\s+candidates|shortlisted\s+candidates\s+(?:list|sheet|roster)|shortlist\s+for\s+next\s+round|following\s+(?:are\s+the\s+)?(?:shortlisted|selected)\s+candidates)/i.test(b) ||
+        /shortlisted\s+candidates\s+will\s+have\s+(?:pre[\s-]*placement\s*talk|\bppt\b|interview|test|assessment|online\s+test)/i.test(b) ||
+        /(?:shortlist|shortlisted\s+candidates)\s+(?:for\s+)?(?:pre[\s-]*placement\s*talk|\bppt\b|interview|test|assessment)/i.test(b) ||
         /next\s+round\s+of\s+selection/i.test(s)
       );
     },
@@ -358,7 +360,7 @@ export function classifyEmail(
 ): ClassificationResult {
   const subject = email.subject.toLowerCase();
   const canonicalBody = getCanonicalBodyText(email);
-  const body = canonicalBody.toLowerCase().slice(0, 1000);
+  const body = canonicalBody.toLowerCase();
   const sender = email.senderEmail.toLowerCase();
   const fullClassificationText = `${subject}\n${getCurrentMessageText(email).toLowerCase()}`;
   const buildClassification = (

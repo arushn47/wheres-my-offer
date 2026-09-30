@@ -70,15 +70,17 @@ describe('classifier: registration circulars vs shortlists', () => {
     expect(classifyEmail(email3).classification).toBe('shortlist');
   });
 
-  it('classifies applied list emails with forms or rosters as registration', () => {
+  it('classifies applied list emails with shortlist notes as shortlist', () => {
     const malomatia = makeEmail(
       'Kind Attention!! Malomatia applied list!!',
       'Find the below attached applied list.\nAll the applied candidates are informed to fill the details in the below link on or before 1st Oct 2026 (9 AM)\nLink: https://forms.gle/cqAobDBDtdfqA5ot6\n**Only the attached candidates are strictly informed to fill in the details.\nNote: Shortlisted candidates will have Pre-placement talk by tomorrow (4 PM) @ virtual mode'
     );
     const result = classifyEmail(malomatia);
-    expect(result.classification).toBe('registration');
+    expect(result.classification).toBe('shortlist');
     expect(result.companyName).toBe('Malomatia');
+  });
 
+  it('classifies general applied list emails with forms or rosters as registration', () => {
     const ubs = makeEmail(
       'Kind Attn: UBS Applied Students - 2027 Batch',
       'Please find the attached applied students list who have not submitted the additional data (form) in the Neopat'
