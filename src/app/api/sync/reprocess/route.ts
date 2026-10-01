@@ -20,6 +20,7 @@ import {
   resolveDriveByTimingCorrelation,
 } from '@/lib/sync/drive-correlator';
 import { pickRegistrationDeadline } from '@/lib/sync/events';
+import { classifyShortlistEmail } from '@/lib/sync/round-identity';
 
 
 export const dynamic = 'force-dynamic';
@@ -580,11 +581,13 @@ export async function recalculateApplicationStatuses(
           if (bodyMatch.matched) {
             matchedEmailIds.add(email.id);
             const isShortlistNotice = /shortlist|selection|selected|result/i.test(email.subject || '');
-            const round = /interview/i.test(email.subject || '')
-              ? 'interview'
-              : /selection\s*list|final\s*selection|offer/i.test(email.subject || '')
-                ? 'selected'
-                : 'test';
+            const round = classifyShortlistEmail(email.subject || '', emailText) ?? (
+              /interview/i.test(email.subject || '')
+                ? 'interview'
+                : /selection\s*list|final\s*selection|offer/i.test(email.subject || '')
+                  ? 'selected'
+                  : 'test'
+            );
             const isCollegeRef = Boolean(email.college_email_id || email.canonical_email_id || (email as any).sender_email);
             const insertPayload: any = {
               user_id: userId,

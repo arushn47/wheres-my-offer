@@ -163,17 +163,17 @@ export function parseDateTimeWithConfidence(
         ? 2000 + parseInt(numMatch[3], 10)
         : parseInt(numMatch[3], 10);
   } else {
-    // 2. Check Named Month format: "13th August 2026", "2nd Sep 2026", "1st september"
+    // 2. Check Named Month format: "13th August 2026", "2nd Sep 2026", "1st september", "29-September-26"
     const nameMatch =
       text.match(
         new RegExp(
-          `(\\d{1,2})(?:st|nd|rd|th)?\\s+(${MONTH_PATTERN})(?:\\s+(\\d{4}))?`,
+          `(\\d{1,2})(?:st|nd|rd|th)?(?:\\s+|[-/])(${MONTH_PATTERN})(?:(?:\\s+|[-/])(\\d{4}|\\d{2}))?`,
           'i'
         )
       ) ||
       text.match(
         new RegExp(
-          `(${MONTH_PATTERN})\\s+(\\d{1,2})(?:st|nd|rd|th)?(?:,\\s*(\\d{4}))?`,
+          `(${MONTH_PATTERN})(?:\\s+|[-/])(\\d{1,2})(?:st|nd|rd|th)?(?:(?:,\\s*|\\s+|[-/])(\\d{4}|\\d{2}))?`,
           'i'
         )
       );
@@ -182,11 +182,17 @@ export function parseDateTimeWithConfidence(
       if (MONTHS[nameMatch[2]?.toLowerCase()] !== undefined) {
         day = parseInt(nameMatch[1], 10);
         month = MONTHS[nameMatch[2].toLowerCase()];
-        if (nameMatch[3]) year = parseInt(nameMatch[3], 10);
+        if (nameMatch[3]) {
+          const y = parseInt(nameMatch[3], 10);
+          year = y < 100 ? 2000 + y : y;
+        }
       } else if (MONTHS[nameMatch[1]?.toLowerCase()] !== undefined) {
         month = MONTHS[nameMatch[1].toLowerCase()];
         day = parseInt(nameMatch[2], 10);
-        if (nameMatch[3]) year = parseInt(nameMatch[3], 10);
+        if (nameMatch[3]) {
+          const y = parseInt(nameMatch[3], 10);
+          year = y < 100 ? 2000 + y : y;
+        }
       }
     }
   }
@@ -196,10 +202,16 @@ export function parseDateTimeWithConfidence(
   let minutes = 0;
   let hasExplicitTime = false;
 
-  // Strip the matched date portion so "02.09.2026" doesn't get re-matched as time "2:09"
+  // Strip the matched date portion so "02.09.2026" or "29-September-26" doesn't get re-matched as time
   let timeText = text;
-  if (numMatch && numMatch.index !== undefined) {
-    timeText = text.slice(0, numMatch.index) + text.slice(numMatch.index + numMatch[0].length);
+  const matchedDateToken = numMatch || text.match(
+    new RegExp(
+      `(\\d{1,2})(?:st|nd|rd|th)?(?:\\s+|[-/])(${MONTH_PATTERN})(?:(?:\\s+|[-/])(\\d{4}|\\d{2}))?|(${MONTH_PATTERN})(?:\\s+|[-/])(\\d{1,2})(?:st|nd|rd|th)?(?:(?:,\\s*|\\s+|[-/])(\\d{4}|\\d{2}))?`,
+      'i'
+    )
+  );
+  if (matchedDateToken && matchedDateToken.index !== undefined) {
+    timeText = text.slice(0, matchedDateToken.index) + text.slice(matchedDateToken.index + matchedDateToken[0].length);
   }
 
   const timeMatch =
@@ -254,6 +266,29 @@ export function parseDateTime(
   fallbackDate?: Date | null
 ): Date | null {
   return parseDateTimeWithConfidence(text, fallbackDate).date;
+}
+
+/**
+ * Extracts explicit end time from time range expressions (e.g. "4:00 PM to 5:00 PM", "10 AM - 12 PM").
+ */
+export function parseExplicitEndTime(text: string, startDate: Date): Date | null {
+  if (!text || !startDate) return null;
+  const endTimeMatch = text.match(
+    /(?:to|until|-|–|—)\s*\(?\s*(\d{1,2})\s*(?::|\.)?\s*(\d{2})?\s*(am|pm|a\.m\.|p\.m\.|noon|p\b|a\b)/i
+  );
+  if (!endTimeMatch) return null;
+  let endH = parseInt(endTimeMatch[1], 10);
+  const endIndicator = endTimeMatch[3] ? endTimeMatch[3].toLowerCase() : '';
+  const endIsPm = endIndicator.startsWith('p') || endIndicator === 'noon';
+  if (endIsPm && endH < 12) endH += 12;
+  if (!endIsPm && endIndicator && endIndicator !== 'noon' && endH === 12) endH = 0;
+  const endM = endTimeMatch[2] ? parseInt(endTimeMatch[2], 10) : 0;
+  const endHourStr = String(endH).padStart(2, '0');
+  const endMinStr = String(endM).padStart(2, '0');
+  const istDateMs = startDate.getTime() + (5 * 60 + 30) * 60 * 1000;
+  const istDateStr = new Date(istDateMs).toISOString().slice(0, 10);
+  const endD = new Date(`${istDateStr}T${endHourStr}:${endMinStr}:00+05:30`);
+  return !isNaN(endD.getTime()) && endD.getTime() > startDate.getTime() ? endD : null;
 }
 
 // ============================================
@@ -435,14 +470,14 @@ export function extractEvents(email: ParsedEmail): ExtractedEvent[] {
     // GUARD: Only schedule a PPT event if the text contains an EXPLICIT date or explicit time!
     const hasExplicitDateInText =
       parsed.hasExplicitTime ||
-      /\b(?:\d{1,2}(?:st|nd|rd|th)?\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)|\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}|tomm|tomorrow|tmrw)\b/i.test(snippetForPpt);
+      /\b(?:\d{1,2}(?:st|nd|rd|th)?[\s\-/]+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)|\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}|tomm|tomorrow|tmrw)\b/i.test(snippetForPpt);
 
     if (parsed.date && hasExplicitDateInText) {
       events.push({
         eventType: 'ppt',
         title: 'Pre-Placement Talk (PPT)',
         startTime: parsed.date,
-        endTime: deriveEventEndTime('ppt', 'Pre-Placement Talk (PPT)', parsed.date),
+        endTime: parseExplicitEndTime(snippetForPpt, parsed.date) || deriveEventEndTime('ppt', 'Pre-Placement Talk (PPT)', parsed.date),
         venue,
         mode: determineMode(snippetForPpt, venue),
         confidence: 'high',
@@ -463,24 +498,32 @@ export function extractEvents(email: ParsedEmail): ExtractedEvent[] {
     );
     if (visitBlockMatch && visitBlockMatch[1]) {
       const block = visitBlockMatch[1];
-      const blockDateMatch = block.match(/(?:\b\d{1,2}(?:st|nd|rd|th)?\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)|\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})/i);
+      const blockDateMatch = block.match(
+        new RegExp(
+          `(?:\b\\d{1,2}(?:st|nd|rd|th)?(?:\\s+|[-/])(?:${MONTH_PATTERN})|\\d{1,2}[\\/\\-\\.]\\d{1,2}[\\/\\-\\.]\\d{2,4})`,
+          'i'
+        )
+      );
       const visitDatePrefix = blockDateMatch ? blockDateMatch[0] : '';
 
-      const pptInVisit = block.match(/(?:ppt|pre[\s-]*placement\s*talk)\s*[:\-–—\t*]*\s*([^\r\n*]{1,60})/i);
+      const pptInVisit = block.match(/(?:ppt|pre[\s-]*placement\s*talk)\s*[:\-–—\t*]*\s*([^\r\n]{1,80})/i);
       if (pptInVisit && pptInVisit[1]) {
-        const pptText = !/\d{1,2}[\/\-\.]\d{1,2}|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\b/i.test(pptInVisit[1]) && visitDatePrefix
-          ? `${visitDatePrefix} ${pptInVisit[1]}`
-          : pptInVisit[1];
+        const cleanPptText = pptInVisit[1].replace(/\*/g, '').trim();
+        const hasDateInPpt = new RegExp(`(?:\\d{1,2}[\\/\\-\\.]\\d{1,2}|\\b(?:${MONTH_PATTERN})\\b)`, 'i').test(cleanPptText);
+        const pptText = !hasDateInPpt && visitDatePrefix
+          ? `${visitDatePrefix} ${cleanPptText}`
+          : cleanPptText;
         const parsedPpt = parseDateTimeWithConfidence(pptText, refDate);
         if (parsedPpt.date && !events.some((e) => e.eventType === 'ppt')) {
-          const pptVenue = extractVenue(pptInVisit[1]) || null;
+          const pptVenue = extractVenue(cleanPptText) || null;
+          const explicitEndTime = parseExplicitEndTime(cleanPptText, parsedPpt.date);
           events.push({
             eventType: 'ppt',
             title: 'Pre-Placement Talk (PPT)',
             startTime: parsedPpt.date,
-            endTime: deriveEventEndTime('ppt', 'Pre-Placement Talk (PPT)', parsedPpt.date),
+            endTime: explicitEndTime || deriveEventEndTime('ppt', 'Pre-Placement Talk (PPT)', parsedPpt.date),
             venue: pptVenue,
-            mode: determineMode(pptInVisit[1], pptVenue),
+            mode: determineMode(cleanPptText, pptVenue),
             confidence: parsedPpt.hasExplicitTime ? 'high' : 'medium',
             hasExplicitTime: parsedPpt.hasExplicitTime,
           });

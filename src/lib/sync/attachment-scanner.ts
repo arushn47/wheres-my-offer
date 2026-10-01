@@ -11,6 +11,7 @@ import {
   notifyShortlistAbsent,
   notifyShortlistMatch,
 } from '@/lib/notifications/service';
+import { classifyShortlistEmail } from '@/lib/sync/round-identity';
 
 /**
  * Scans `.xlsx` / `.xls` attachments on circular emails linked to placement drives
@@ -151,10 +152,7 @@ export async function scanAndPersistCandidateMatches(
           placement_drive_id: email.placement_drive_id,
           neo_id: userNeoId || userEmail,
           match_type: 'xlsx_cell',
-          matched_round_type: /interview|selection\s+process/i.test(email.subject || '') ? 'interview'
-            : /final\s*selection|selection\s*list/i.test(email.subject || '') ? 'selected'
-              : /online\s+test|coding\s+test|assessment|test\s+shortlist/i.test(email.subject || '') ? 'test'
-                : null,
+          matched_round_type: classifyShortlistEmail(email.subject || '', ''),
           matched_value: excelMatch.details,
           confidence: 'high',
         };
@@ -574,13 +572,7 @@ export async function scanSharedCollegeCandidateMatches(
     }
     if (evaluation.state !== 'verified_present') continue;
 
-    const round = /interview|selection\s+process/i.test(email.subject || '')
-      ? 'interview'
-      : /final\s*selection|selection\s*list/i.test(email.subject || '')
-        ? 'selected'
-        : /online\s+test|coding\s+test|assessment|test\s+shortlist/i.test(email.subject || '')
-          ? 'test'
-          : null;
+    const round = classifyShortlistEmail(email.subject || '', '');
     const { error } = await supabase.from('candidate_matches').insert({
       user_id: userId,
       placement_drive_id: driveId,

@@ -126,9 +126,10 @@ export default async function CompanyDetailPage(props: {
   }
   const placementDriveId = targetDrive?.id || null;
 
-  // Collect all excluded email IDs across drives for this company
+  // Collect excluded email IDs for the active drive (scoped to target drive if resolved)
+  const relevantDrives = targetDrive ? [targetDrive] : (companyDrives || []);
   const excludedEmailIds = new Set<string>();
-  for (const d of (companyDrives || [])) {
+  for (const d of relevantDrives) {
     if (Array.isArray((d as any).excluded_email_ids)) {
       for (const exId of (d as any).excluded_email_ids) {
         if (exId) excludedEmailIds.add(exId);
@@ -367,7 +368,7 @@ export default async function CompanyDetailPage(props: {
 
   // Resolve all college circulars relevant to this drive
   const collegeEmailIds = new Set<string>();
-  for (const d of (companyDrives || [])) {
+  for (const d of relevantDrives) {
     if ((d as any).source_college_email_id && !excludedEmailIds.has((d as any).source_college_email_id)) {
       collegeEmailIds.add((d as any).source_college_email_id);
     }
@@ -385,7 +386,7 @@ export default async function CompanyDetailPage(props: {
 
   // Also resolve college circulars explicitly linked to this drive by drive number
   const driveNumbers = Array.from(new Set(
-    (companyDrives || []).flatMap((d: any) => [d.drive_number, d.normalized_drive_number].filter(Boolean) as string[])
+    relevantDrives.flatMap((d: any) => [d.drive_number, d.normalized_drive_number].filter(Boolean) as string[])
   ));
 
   for (const dNum of driveNumbers) {

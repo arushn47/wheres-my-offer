@@ -8,8 +8,10 @@ export * from '@/lib/stages';
 import {
   STAGES,
   STAGE_ACTIVE_STYLES,
-  EventLike,
+  type EventLike,
+  type DerivedStage,
   getEffectiveStage,
+  deriveStagesFromEvents,
 } from '@/lib/stages';
 
 export interface StageStepperProps {
@@ -41,6 +43,51 @@ export function StageStepper({
   const isWithdrawn = (effective.effectiveStatus === 'withdrawn' || effective.effectiveStatus === 'declined');
   const isRegistrationOpen = (effective.effectiveStatus === 'registration_open');
   const isNotApplied = (effective.effectiveStatus === 'not_applied');
+
+  // ── Derive dynamic stage list from events (multi-round / non-standard pipelines) ──
+  // Only derive when we have real event data. Falls back to static STAGES if empty.
+  // NOTE: Dynamic stages are display-only — they never feed back into status logic.
+  const allEvents: EventLike[] = [
+    ...(latestEvent ? [latestEvent] : []),
+    ...(events || []),
+  ];
+  const derivedStages = (allEvents.length > 0 && !isWithdrawn && !isRegistrationOpen && !isNotApplied)
+    ? deriveStagesFromEvents(allEvents)
+    : undefined;
+
+  // Use derived stages when the pipeline is genuinely non-standard:
+  //   • Drive has a Group Discussion event (GD sits between Test and Interview in some companies)
+  //   • Any event has round_number >= 2 (multi-round test or multi-round interview)
+  //   • Otherwise fall back to the standard 5-stage static display
+  const hasGdEvent = allEvents.some((e) =>
+    /group_discussion/i.test(e.event_type || e.eventType || '')
+  );
+  const hasMultiRound = allEvents.some((e) => (e.round_number ?? 1) >= 2);
+  const hasDynamicPipeline = derivedStages != null && (hasGdEvent || hasMultiRound);
+  const stageList: (typeof STAGES[0] | DerivedStage)[] = hasDynamicPipeline ? derivedStages! : STAGES;
+
+  // ── Compute eliminatedStageIndex for dynamic pipeline ──────────────────────
+  // For dynamic pipelines, find which stage index the candidate was eliminated at
+  // by matching effective.eliminatedStageId against derived stage IDs.
+  const eliminatedStageId = effective.eliminatedStageId;
+  let dynamicEliminatedIdx = -1;
+  if (hasDynamicPipeline && eliminatedStage !== -1 && eliminatedStageId) {
+    const idx = stageList.findIndex((s) => s.id === eliminatedStageId);
+    dynamicEliminatedIdx = idx >= 0 ? idx : eliminatedStage;
+  } else if (hasDynamicPipeline && eliminatedStage !== -1) {
+    // Fallback: map legacy eliminatedStage index proportionally
+    dynamicEliminatedIdx = Math.min(eliminatedStage, stageList.length - 1);
+  }
+  const activeEliminatedStage = hasDynamicPipeline ? dynamicEliminatedIdx : eliminatedStage;
+
+  // For dynamic pipelines, current stage index needs to be mapped too.
+  // Use the eliminatedStageId if known, else proportional mapping.
+  const activeFurthestPassed = hasDynamicPipeline
+    ? Math.min(furthestPassed, stageList.length - 1)
+    : furthestPassed;
+  const activeCurrentStage = hasDynamicPipeline
+    ? Math.min(currentStage, stageList.length - 1)
+    : currentStage;
 
   // Dedicated UI Banner for Registration Open
   if (isRegistrationOpen) {
@@ -191,36 +238,57 @@ export function StageStepper({
       data-testid="stage-stepper"
       className={cn('flex items-center w-full min-w-0 select-none', className)}
     >
-      {STAGES.map((s, i) => {
-        const isEliminated = i === eliminatedStage;
+      {stageList.map((s, i) => {
+        const isEliminated = i === activeEliminatedStage;
 
         // Is this the currently active round or milestone?
         const isCurrent =
           !isEliminated &&
           !isWithdrawn &&
-          eliminatedStage === -1 &&
-          i === currentStage;
+          activeEliminatedStage === -1 &&
+          i === activeCurrentStage;
 
         // Historical passed stage (completed before current stage)
-        const isHistoricalPassed = !isEliminated && !isCurrent && i < currentStage && i <= furthestPassed;
+        const isHistoricalPassed = !isEliminated && !isCurrent && i < activeCurrentStage && i <= activeFurthestPassed;
 
         // Has this stage been completed (either in past or as current completed milestone)?
-        const isCompleted = !isEliminated && i <= furthestPassed;
+        const isCompleted = !isEliminated && i <= activeFurthestPassed;
 
+        // ── Display label for this stage ───────────────────────────────────────
+        // For dynamic pipelines: use stage.label / stage.shortLabel directly (already set from events).
+        // For static pipeline: apply legacy override labels for eliminated stages.
         let displayLabel = compact ? s.shortLabel : s.label;
-        if (isEliminated) {
+        if (!hasDynamicPipeline && !isEliminated) {
+          if (i === 1 && effective.isPptCompleted) {
+            displayLabel = compact ? 'PPT Done' : 'PPT Completed';
+          }
+        } else if (!hasDynamicPipeline && isEliminated) {
           if (i === 0) {
             displayLabel = compact ? 'Screening' : 'Screened Out';
           } else if (i === 2) {
             displayLabel = compact ? 'Shortlist' : 'Not Shortlisted';
           } else if (i === 3) {
-            displayLabel = compact ? 'Eliminated' : 'Eliminated (Test)';
+            // Use the structured elimination label when available for precision
+            const elimLabel = effective.eliminationLabel;
+            displayLabel = elimLabel
+              ? (compact ? elimLabel.split(' ').slice(-2).join(' ') : elimLabel)
+              : (compact ? 'Eliminated' : 'Eliminated (Test)');
           } else if (i === 4) {
-            displayLabel = compact ? 'Not Selected' : 'Not Selected (Interview)';
+            const elimLabel = effective.eliminationLabel;
+            displayLabel = elimLabel
+              ? (compact ? 'Not Selected' : elimLabel)
+              : (compact ? 'Not Selected' : 'Not Selected (Interview)');
           }
+        } else if (hasDynamicPipeline && isEliminated) {
+          // Dynamic pipeline: eliminated stage label is always the stage's own label
+          // (the elimination is precisely at this stage)
+          displayLabel = compact ? s.shortLabel : s.label;
         }
 
-        const activeStyle = STAGE_ACTIVE_STYLES[i] || STAGE_ACTIVE_STYLES[0];
+        // Map stage index to STAGE_ACTIVE_STYLES (clamp to avoid out-of-bounds).
+        const stageStyleKeys = Object.keys(STAGE_ACTIVE_STYLES).length;
+        const styleIdx = Math.min(i, stageStyleKeys - 1);
+        const activeStyle = STAGE_ACTIVE_STYLES[styleIdx] || STAGE_ACTIVE_STYLES[0];
 
         return (
           <div key={s.id} className="flex flex-1 items-center last:flex-none min-w-0">
@@ -245,7 +313,7 @@ export function StageStepper({
                         ? activeStyle.circle
                         : isHistoricalPassed
                           ? 'border-emerald-500/35 bg-emerald-500/10 text-emerald-400/80'
-                          : isWithdrawn && i <= furthestPassed
+                          : isWithdrawn && i <= activeFurthestPassed
                             ? 'border-zinc-600 bg-zinc-800 text-zinc-300'
                             : 'border-zinc-700 bg-[#141418] text-zinc-400'
                   )}
@@ -270,14 +338,14 @@ export function StageStepper({
                 {displayLabel}
               </span>
             </div>
-            {i < STAGES.length - 1 && (
+            {i < stageList.length - 1 && (
               <div
                 className={cn(
                   'mx-1 sm:mx-1.5 h-px flex-1 transition-colors',
                   compact ? 'mb-3.5' : 'mb-0 sm:mb-4',
-                  eliminatedStage !== -1 && i === eliminatedStage - 1
+                  activeEliminatedStage !== -1 && i === activeEliminatedStage - 1
                     ? 'bg-rose-500/70'
-                    : i < currentStage
+                    : i < activeCurrentStage
                       ? 'bg-emerald-500/45'
                       : 'bg-zinc-700/70'
                 )}

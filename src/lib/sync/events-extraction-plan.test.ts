@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { extractJobDetails } from './events';
+import { extractJobDetails, extractEvents } from './events';
 
 describe('plan extraction examples', () => {
   it('extracts OJ Commerce roles, CTC, and office work mode', () => {
@@ -74,5 +74,35 @@ describe('plan extraction examples', () => {
       Disclaimer: This message was sent from Vellore Institute of Technology.
     `);
     expect(details.stipend).toBe('₹20,000/month');
+  });
+
+  it('extracts PPT with hyphenated date and 2-digit year from Date of Visit table in registration circular', () => {
+    const events = extractEvents({
+      gmailMessageId: 'msg-ubs',
+      threadId: null,
+      sender: 'CDC <vitlions2027@vitbhopal.ac.in>',
+      senderEmail: 'vitlions2027@vitbhopal.ac.in',
+      subject: 'UBS Super Dream Internship Offer - 2027 Batch Registration Link',
+      receivedAt: new Date('2026-09-29T06:36:16.000Z'),
+      bodySnippet: '',
+      bodyPlain: `
+        Name of the Company: UBS
+        Category: Super Dream Internship
+        Date of Visit:
+        *Pre-placement talk:* 29-September-26; 4:00 PM to 5:00 PM
+        *Interview:* 6-October-26; 10:00 AM onwards
+        Eligible Branches: B.Tech & M.Tech (CS/IT Related)
+        Last date for Registration: 30th September 2026 11.00 am
+      `,
+      bodyHtml: '',
+      hasAttachments: false,
+      attachments: [],
+      labels: [],
+    });
+
+    const ppt = events.find((e) => e.eventType === 'ppt');
+    expect(ppt).toBeDefined();
+    expect(ppt?.startTime).toEqual(new Date('2026-09-29T10:30:00.000Z')); // 4:00 PM IST
+    expect(ppt?.endTime).toEqual(new Date('2026-09-29T11:30:00.000Z'));   // 5:00 PM IST
   });
 });

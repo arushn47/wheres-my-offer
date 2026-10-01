@@ -13,6 +13,15 @@ import { evaluateCachedShortlistRosters } from '@/lib/sync/shortlist-verificatio
 import { removeDriveEvents } from '@/lib/sync/drive-events';
 import { shouldReplaceRegistrationDeadline } from '@/lib/sync/events';
 import { mergePdfJobDetails } from '@/lib/sync/pdf-parser';
+import {
+  type RoundType,
+  classifyShortlistEmail,
+  extractExplicitPredecessor,
+  getPredecessorRequirement,
+  buildEliminationToken,
+  extractExplicitOrdinal,
+  isRescheduleEmail,
+} from '@/lib/sync/round-identity';
 
 // existingApp select: add `registration_deadline`
 /**
@@ -42,20 +51,9 @@ function htmlToPlainText(html: string | undefined | null): string {
     .trim();
 }
 
-type ShortlistRound = 'test' | 'interview' | 'selected';
-
-function announcedShortlistRound(subject: string, body: string): ShortlistRound | null {
-  // Round order: ppt (open attendance; no shortlist) → test → interview → selected.
-  // A missing test shortlist is NOT an elimination; interview requires a test match,
-  // and final selection requires an interview match. An ambiguous "next round"/"result"
-  // has no provable predecessor and must not cause rejection.
-  if (/interview|selection\s+process/i.test(subject) ||
-    (/next\s+round/i.test(subject) && /interview|in[\s-]*person|f2f/i.test(body))) return 'interview';
-  if (/final\s*selection|offer\s*(?:letter|release)|selection\s*list/i.test(subject) &&
-    !/interview|test/i.test(subject)) return 'selected';
-  if (/online\s+test|coding\s+test|assessment|test\s+(?:shortlist|link|invitation|schedule)/i.test(subject)) return 'test';
-  return null;
-}
+// RoundType is imported from round-identity.ts; ShortlistRound is kept as an alias
+// for backward compatibility with any remaining references in this file.
+type ShortlistRound = RoundType;
 
 /**
  * Checks if the user's Neo ID or identity is mentioned in an email (subject, plain body, or HTML table).
@@ -250,10 +248,16 @@ export async function processEmailForEventsAndStatus(
       identityTokens,
     })
     : null;
-  const announcedRound = announcedShortlistRound(email.subject, fullText);
-  const previousRound: ShortlistRound | null =
-    announcedRound === 'interview' ? 'test' :
-      announcedRound === 'selected' ? 'interview' : null;
+  const announcedRound = classifyShortlistEmail(email.subject, fullText);
+  const emailExplicitPredecessor = extractExplicitPredecessor(email.subject, fullText);
+  // predecessorTypes: the matched_round_type values that must exist for a meaningful elimination.
+  // null → predecessor check is conditional on text evidence not found → use conservative path.
+  // [] → no predecessor required (first competitive round).
+  // [...] → query candidate_matches for these types.
+  const predecessorTypes = getPredecessorRequirement(announcedRound, emailExplicitPredecessor);
+  // Keep previousRound as a compat alias (used by the hasPreviousRoundMatch query below)
+  const previousRound: RoundType | null =
+    predecessorTypes && predecessorTypes.length > 0 ? predecessorTypes[0] : null;
 
   // Body-level ID matches in application/registration rosters are not
   // candidate participation evidence. This must run before status promotion.
@@ -611,7 +615,105 @@ export async function processEmailForEventsAndStatus(
         }
       }
 
-      // Check if duplicate event exists for this company + event_type on the same calendar day
+      // ── Round identity: extract explicit ordinal + reschedule detection ──────
+      const emailReceivedAt = email.receivedAt
+        ? (typeof email.receivedAt === 'string' ? email.receivedAt : new Date(email.receivedAt).toISOString())
+        : null;
+      const emailSubjectForOrdinal = email.subject || '';
+      const emailBodyForOrdinal   = fullText.slice(0, 800);
+      const isReschedule = !isDeadlineEvent && isRescheduleEmail(emailSubjectForOrdinal, emailBodyForOrdinal);
+      const explicitOrdinal = isDeadlineEvent
+        ? null
+        : extractExplicitOrdinal(emailSubjectForOrdinal, emailBodyForOrdinal);
+      const explicitRoundNumber = explicitOrdinal?.roundNumber ?? null;
+      const explicitRoundLabel  = explicitOrdinal?.roundLabel  ?? null;
+
+      // ── Fetch all sibling events for round number reconciliation ─────────────
+      // Siblings = all events for the same (drive, event_type) regardless of round.
+      // We only re-rank unlabeled siblings (round_label IS NULL).
+      // Labeled siblings (round_label IS NOT NULL) have authoritative explicit ordinals.
+      type SiblingEvent = { id: string; round_number: number; round_label: string | null; source_email_received_at: string | null; is_rescheduled: boolean };
+      let siblings: SiblingEvent[] = [];
+      if (!isDeadlineEvent) {
+        const { data: siblingData } = await supabase
+          .from('events')
+          .select('id, round_number, round_label, source_email_received_at, is_rescheduled')
+          .eq('user_id', userId)
+          .eq('placement_drive_id', targetDriveId)
+          .eq('event_type', event.eventType);
+        siblings = (siblingData || []) as SiblingEvent[];
+      }
+
+      // ── AssignRoundNumber algorithm ──────────────────────────────────────────
+      // Determines round_number for the new/updated event and reconciles siblings.
+      // Step 1: Explicit ordinal wins absolutely.
+      // Step 2-4: Unlabeled events are ranked by source_email_received_at ASC.
+      let assignedRoundNumber = 1;
+      if (!isDeadlineEvent) {
+        if (explicitRoundNumber !== null) {
+          // Explicit ordinal: trust it directly.
+          assignedRoundNumber = explicitRoundNumber;
+        } else {
+          // Unlabeled: rank by source_email_received_at ASC among unlabeled siblings.
+          const unlabeledSiblings = siblings.filter((s) => s.round_label === null);
+          // Build augmented set: existing unlabeled siblings + the new email's received_at.
+          const augmented: { receivedAt: string | null; existingId?: string }[] = [
+            ...unlabeledSiblings.map((s) => ({
+              receivedAt: s.source_email_received_at,
+              existingId: s.id,
+            })),
+            { receivedAt: emailReceivedAt },  // the incoming event (no existingId)
+          ];
+          // Sort by receivedAt ASC (null → treated as very large = last).
+          augmented.sort((a, b) => {
+            if (!a.receivedAt && !b.receivedAt) return 0;
+            if (!a.receivedAt) return 1;
+            if (!b.receivedAt) return -1;
+            return a.receivedAt < b.receivedAt ? -1 : a.receivedAt > b.receivedAt ? 1 : 0;
+          });
+          // Explicit-labeled siblings occupy certain slot numbers; skip those.
+          const labeledSlots = new Set(siblings.filter((s) => s.round_label !== null).map((s) => s.round_number));
+          let nextSlot = 1;
+          const availableSlots: number[] = [];
+          while (availableSlots.length < augmented.length) {
+            if (!labeledSlots.has(nextSlot)) availableSlots.push(nextSlot);
+            nextSlot++;
+          }
+          // Find the rank of the new event (no existingId) in the sorted list.
+          const newEventIdx = augmented.findIndex((a) => a.existingId === undefined);
+          assignedRoundNumber = availableSlots[newEventIdx] ?? 1;
+
+          // Step 5: Reconcile existing unlabeled siblings whose stored round_number changed.
+          const siblingsToReconcile: { id: string; newRound: number }[] = [];
+          for (let i = 0; i < augmented.length; i++) {
+            const entry = augmented[i];
+            if (!entry.existingId) continue;  // this is the new event; skip
+            const siblingStoredRound = siblings.find((s) => s.id === entry.existingId)?.round_number;
+            if (siblingStoredRound !== availableSlots[i]) {
+              siblingsToReconcile.push({ id: entry.existingId, newRound: availableSlots[i] });
+            }
+          }
+          // Reconcile in two passes to avoid UNIQUE constraint conflicts:
+          // Pass 1: move conflicting siblings to a temporary negative round (–round_number).
+          // Pass 2: assign the correct round numbers.
+          // Actually: use large temp numbers (1000+) to avoid conflicts during swap.
+          for (const rec of siblingsToReconcile) {
+            await supabase
+              .from('events')
+              .update({ round_number: 1000 + siblingsToReconcile.indexOf(rec) })
+              .eq('id', rec.id);
+          }
+          for (const rec of siblingsToReconcile) {
+            await supabase
+              .from('events')
+              .update({ round_number: rec.newRound })
+              .eq('id', rec.id);
+          }
+        }
+      }
+
+      // Check if duplicate event exists for this company + event_type on the same calendar day.
+      // For reschedule emails: match by round_number (not calendar day) since the date is changing.
       const startTimeIso = event.startTime ? event.startTime.toISOString() : null;
       const startOfDay = event.startTime
         ? new Date(
@@ -632,14 +734,26 @@ export async function processEmailForEventsAndStatus(
         ).toISOString()
         : null;
 
-      let eventQuery = supabase
-        .from('events')
-        .select('id, start_time, venue, mode, college_email_id')
-        .eq('user_id', userId)
-        .eq('placement_drive_id', targetDriveId)
-        .eq('event_type', event.eventType);
+      // For reschedule emails, match by round_number. For normal emails, match by date-window.
+      let existingEvents: { id: string; start_time: string | null; venue: string | null; mode: string | null; college_email_id: string | null }[] | null = null;
+      if (isReschedule && siblings.length > 0) {
+        // Identify the event row this reschedule is targeting (by round_number).
+        const targetSibling = siblings.find((s) => s.round_number === assignedRoundNumber) ?? siblings[0];
+        existingEvents = [{
+          id: targetSibling.id,
+          start_time: null,
+          venue: null,
+          mode: null,
+          college_email_id: null,
+        }];
+      } else if (!isDeadlineEvent) {
+        let eventQuery = supabase
+          .from('events')
+          .select('id, start_time, venue, mode, college_email_id')
+          .eq('user_id', userId)
+          .eq('placement_drive_id', targetDriveId)
+          .eq('event_type', event.eventType);
 
-      if (!isDeadlineEvent) {
         if (startOfDay && endOfDay) {
           eventQuery = eventQuery
             .gte('start_time', startOfDay)
@@ -649,14 +763,24 @@ export async function processEmailForEventsAndStatus(
         } else if (!event.startTime) {
           eventQuery = eventQuery.is('start_time', null);
         }
+        const { data } = await eventQuery.limit(1);
+        existingEvents = data as typeof existingEvents;
+      } else {
+        // Deadline events: use old logic
+        let eventQuery = supabase
+          .from('events')
+          .select('id, start_time, venue, mode, college_email_id')
+          .eq('user_id', userId)
+          .eq('placement_drive_id', targetDriveId)
+          .eq('event_type', event.eventType);
+        const { data } = await eventQuery.limit(1);
+        existingEvents = data as typeof existingEvents;
       }
-
-      const { data: existingEvents } = await eventQuery.limit(1);
 
       const { data: compRec } = await supabase.from('companies').select('name').eq('id', companyId).single();
       const displayComp = compRec?.name || email.subject.replace(/^(?:fwd|re|fw)\s*:\s*/i, '').slice(0, 40);
       const finalTitle = `${displayComp} - ${event.title}`;
-      
+
       const eventInsertPayload: any = {
         user_id: userId,
         placement_drive_id: targetDriveId,
@@ -668,6 +792,11 @@ export async function processEmailForEventsAndStatus(
         mode: event.mode,
         confidence: event.confidence,
         college_email_id: isCollegeBroadcast ? emailDbId : null,
+        // Round identity columns
+        round_number: isDeadlineEvent ? 1 : assignedRoundNumber,
+        round_label: isDeadlineEvent ? null : explicitRoundLabel,
+        source_email_received_at: isDeadlineEvent ? null : emailReceivedAt,
+        is_rescheduled: isReschedule,
       };
 
       if (existingEvents && existingEvents.length > 0) {
@@ -684,6 +813,20 @@ export async function processEmailForEventsAndStatus(
               updatePayload.college_email_id = emailDbId;
             }
           }
+        } else if (isReschedule) {
+          // Reschedule: update start_time (and end_time if provided) but NEVER touch
+          // source_email_received_at or round_number — the round identity was established
+          // by the original announcement email.
+          if (startTimeIso) {
+            updatePayload.start_time = startTimeIso;
+          }
+          if (event.endTime) {
+            updatePayload.end_time = event.endTime.toISOString();
+          }
+          if (event.venue && event.venue !== 'Campus / Offline') {
+            updatePayload.venue = event.venue;
+          }
+          updatePayload.is_rescheduled = true;
         } else {
           if (startTimeIso && event.hasExplicitTime) {
             updatePayload.start_time = startTimeIso;
@@ -701,7 +844,6 @@ export async function processEmailForEventsAndStatus(
             updatePayload.mode = event.mode;
           }
         }
-
 
         if (Object.keys(updatePayload).length > 0) {
           await supabase
@@ -849,16 +991,18 @@ export async function processEmailForEventsAndStatus(
     }
   }
 
-  // Read only a positive match for the immediately preceding round of this drive.
-  // Legacy/ambiguous NULL round tags do not prove elimination.
+  // Read matches for all predecessor round types required by this announcement.
+  // predecessorTypes === null → conditional on text evidence not found → conservative (hasPreviousRoundMatch = false).
+  // predecessorTypes === [] → no predecessor required (first competitive round) → hasPreviousRoundMatch irrelevant.
+  // predecessorTypes === ['test', ...] → query for those specific round types.
   let hasPreviousRoundMatch = false;
-  if (previousRound) {
+  if (predecessorTypes !== null && predecessorTypes.length > 0) {
     const { data: previousMatches, error: previousMatchError } = await supabase
       .from('candidate_matches')
       .select('id, emails!inner(received_at)')
       .eq('user_id', userId)
       .eq('placement_drive_id', targetDriveId)
-      .eq('matched_round_type', previousRound)
+      .in('matched_round_type', predecessorTypes)
       .neq('match_type', 'xlsx_applied_list');
     if (previousMatchError) throw previousMatchError;
     hasPreviousRoundMatch = (previousMatches || []).some((match) => {
@@ -1152,7 +1296,13 @@ export async function processEmailForEventsAndStatus(
     // Accumulate notes: travel requirement + AI review flags occupy the same column.
     // Build them separately and join so neither overwrites the other.
     const noteParts: string[] = [];
-    if (newStatus === 'rejected' && hasConfirmedShortlistMatch) {
+    if (newStatus === 'rejected' && hasConfirmedShortlistMatch && announcedRound) {
+      // Write structured elimination token so getEffectiveStage() can derive
+      // the human-readable label at read time without guessing.
+      // Format: "eliminated_at:<roundType>" on its own line.
+      noteParts.push(buildEliminationToken(announcedRound));
+    } else if (newStatus === 'rejected' && hasConfirmedShortlistMatch) {
+      // announcedRound is null (ambiguous) — fall back to legacy prose for compatibility
       if (['interview_scheduled', 'interview_completed'].includes(currentStatus)) {
         noteParts.push('Interviewed · Not Selected');
       } else {

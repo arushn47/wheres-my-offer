@@ -1073,61 +1073,76 @@ export default function CompanyDetailClient({
                             </p>
 
                             {/* Compact positive shortlist evidence — filename + exact sheet/row location */}
-                            {matchedCandidate && (() => {
-                              const matchInfo = parseCandidateMatchDetails(matchedCandidate.matchedValue, matchedCandidate.neoId || company.candidateRegId);
-                              if (!matchInfo) return null;
-                              const preciseLocation = matchedCandidate.matchLocation || matchInfo.location;
+                            {(() => {
+                              const matchInfo = matchedCandidate
+                                ? parseCandidateMatchDetails(matchedCandidate.matchedValue, matchedCandidate.neoId || company.candidateRegId)
+                                : null;
+                              const isAttachmentAlreadyShown = Boolean(
+                                matchInfo &&
+                                email.attachmentName &&
+                                (matchInfo.filename.toLowerCase() === email.attachmentName.toLowerCase() ||
+                                  email.attachmentName.toLowerCase().includes(matchInfo.filename.toLowerCase()) ||
+                                  matchInfo.filename.toLowerCase().includes(email.attachmentName.toLowerCase()) ||
+                                  /\.(xlsx|xls|csv)$/i.test(email.attachmentName))
+                              );
 
                               return (
-                                <div
-                                  data-testid={`excel-evidence-${idx}`}
-                                  className="mt-2 flex min-w-0 items-center gap-2 rounded-lg border border-emerald-500/15 bg-emerald-500/[0.035] px-2.5 py-2 text-[10px]"
-                                >
-                                  <FileSpreadsheet className="h-3.5 w-3.5 shrink-0 text-emerald-400" />
-                                  <span className="truncate text-zinc-300" title={matchInfo.filename}>Shortlist match · {matchInfo.filename}</span>
-                                  {preciseLocation && preciseLocation !== 'Verified Record' && (
-                                    <span
-                                      className="hidden shrink-0 rounded bg-emerald-500/10 px-1.5 py-0.5 font-mono text-[9px] font-semibold text-emerald-300 xs:inline"
-                                      title={preciseLocation}
+                                <>
+                                  {matchedCandidate && matchInfo && (() => {
+                                    const preciseLocation = matchedCandidate.matchLocation || matchInfo.location;
+                                    return (
+                                      <div
+                                        data-testid={`excel-evidence-${idx}`}
+                                        className="mt-2 flex min-w-0 items-center gap-2 rounded-lg border border-emerald-500/15 bg-emerald-500/[0.035] px-2.5 py-2 text-[10px]"
+                                      >
+                                        <FileSpreadsheet className="h-3.5 w-3.5 shrink-0 text-emerald-400" />
+                                        <span className="truncate text-zinc-300" title={matchInfo.filename}>Shortlist match · {matchInfo.filename}</span>
+                                        {preciseLocation && preciseLocation !== 'Verified Record' && (
+                                          <span
+                                            className="hidden shrink-0 rounded bg-emerald-500/10 px-1.5 py-0.5 font-mono text-[9px] font-semibold text-emerald-300 xs:inline"
+                                            title={preciseLocation}
+                                          >
+                                            {preciseLocation}
+                                          </span>
+                                        )}
+                                        {matchInfo.venue && <span className="hidden shrink-0 text-zinc-500 sm:inline">{matchInfo.venue}</span>}
+                                      </div>
+                                    );
+                                  })()}
+
+                                  {/* A single quiet absence-of-match note, only for actual shortlist rosters. */}
+                                  {isNotShortlisted ? (
+                                    <div
+                                      data-testid={`not-shortlisted-evidence-${idx}`}
+                                      className="mt-2 flex min-w-0 items-center gap-2 rounded-lg border border-rose-500/30 bg-rose-500/[0.07] px-2.5 py-2 text-[10px] text-rose-200"
                                     >
-                                      {preciseLocation}
-                                    </span>
-                                  )}
-                                  {matchInfo.venue && <span className="hidden shrink-0 text-zinc-500 sm:inline">{matchInfo.venue}</span>}
-                                </div>
+                                      <FileSpreadsheet className="h-3.5 w-3.5 shrink-0 text-rose-400" />
+                                      <span className="truncate" title={email.attachmentName || email.subject}>
+                                        {email.attachmentName && (isRosterWorkbook(email.attachmentName) || isShortlistRosterAttachment(email.attachmentName))
+                                          ? `Not listed in ${email.attachmentName}`
+                                          : /selection\s*list|final\s*selection|selected\s*candidates/i.test(email.subject)
+                                            ? 'Not listed in selection list'
+                                            : 'Not listed in shortlist'}
+                                      </span>
+                                    </div>
+                                  ) : (email.attachmentName && !isAttachmentAlreadyShown) ? (
+                                    <div
+                                      data-testid={`attachment-doc-${idx}`}
+                                      className="mt-2 flex min-w-0 items-center gap-2 rounded-lg border border-zinc-800/80 bg-zinc-900/40 px-2.5 py-2 text-[10px] text-zinc-400"
+                                    >
+                                      {/\.(xlsx|xls|csv)$/i.test(email.attachmentName) ? (
+                                        <FileSpreadsheet className="h-3.5 w-3.5 shrink-0 text-zinc-400" />
+                                      ) : (
+                                        <FileText className="h-3.5 w-3.5 shrink-0 text-zinc-400" />
+                                      )}
+                                      <span className="truncate text-zinc-300" title={email.attachmentName}>
+                                        {email.attachmentName}
+                                      </span>
+                                    </div>
+                                  ) : null}
+                                </>
                               );
                             })()}
-
-                            {/* A single quiet absence-of-match note, only for actual shortlist rosters. */}
-                            {isNotShortlisted ? (
-                              <div
-                                data-testid={`not-shortlisted-evidence-${idx}`}
-                                className="mt-2 flex min-w-0 items-center gap-2 rounded-lg border border-rose-500/30 bg-rose-500/[0.07] px-2.5 py-2 text-[10px] text-rose-200"
-                              >
-                                <FileSpreadsheet className="h-3.5 w-3.5 shrink-0 text-rose-400" />
-                                <span className="truncate" title={email.attachmentName || email.subject}>
-                                  {email.attachmentName && (isRosterWorkbook(email.attachmentName) || isShortlistRosterAttachment(email.attachmentName))
-                                    ? `Not listed in ${email.attachmentName}`
-                                    : /selection\s*list|final\s*selection|selected\s*candidates/i.test(email.subject)
-                                      ? 'Not listed in selection list'
-                                      : 'Not listed in shortlist'}
-                                </span>
-                              </div>
-                            ) : email.attachmentName ? (
-                              <div
-                                data-testid={`attachment-doc-${idx}`}
-                                className="mt-2 flex min-w-0 items-center gap-2 rounded-lg border border-zinc-800/80 bg-zinc-900/40 px-2.5 py-2 text-[10px] text-zinc-400"
-                              >
-                                {/\.(xlsx|xls|csv)$/i.test(email.attachmentName) ? (
-                                  <FileSpreadsheet className="h-3.5 w-3.5 shrink-0 text-zinc-400" />
-                                ) : (
-                                  <FileText className="h-3.5 w-3.5 shrink-0 text-zinc-400" />
-                                )}
-                                <span className="truncate text-zinc-300" title={email.attachmentName}>
-                                  {email.attachmentName}
-                                </span>
-                              </div>
-                            ) : null}
 
                             {/* Action links row: Direct link to original Gmail thread */}
                             <div className="mt-3.5 flex flex-col xs:flex-row xs:items-center justify-between gap-2 pt-2.5 border-t border-zinc-800/60">

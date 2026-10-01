@@ -32,7 +32,9 @@ export function isShortlistMatchEvidence(match: {
   matchedRoundType?: string | null;
 }): boolean {
   if (!match.matchType || match.matchType === 'xlsx_applied_list') return false;
-  if (match.matchedRoundType && ['test', 'interview', 'selected'].includes(match.matchedRoundType)) return true;
+  // All known competitive round types (original + new)
+  const competitiveRoundTypes = ['test', 'test_r2', 'gd', 'ppt', 'interview', 'interview_r2', 'selected'];
+  if (match.matchedRoundType && competitiveRoundTypes.includes(match.matchedRoundType)) return true;
   if (!['xlsx_cell', 'pdf_text', 'docx_text'].includes(match.matchType)) return false;
   return !/applied[\s_-]*list|opt[\s_-]*in[\s_-]*list|opt_in|registration[\s_-]*list|applied[\s_-]*(?:student|candidate)/i.test(
     match.matchedValue || ''

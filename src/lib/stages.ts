@@ -1,4 +1,5 @@
 import { deriveEventEndTime } from '@/lib/event-duration';
+import { parseEliminationToken, deriveStageId, deriveStageLabelFromId } from '@/lib/sync/round-identity';
 
 export interface StageDefinition {
   id: string;
@@ -66,6 +67,8 @@ export interface EventLike {
   startTime?: string | Date | null;
   end_time?: string | Date | null;
   endTime?: string | Date | null;
+  /** Round number within this event type for this drive (1-based). Populated after migration. */
+  round_number?: number | null;
 }
 
 export interface EffectiveStageResult {
@@ -83,6 +86,10 @@ export interface EffectiveStageResult {
   isTestOngoing?: boolean;
   isPptOngoing?: boolean;
   isInterviewOngoing?: boolean;
+  /** Canonical stage ID where elimination occurred, e.g. 'group_discussion_r1'. null if not eliminated or round unknown. */
+  eliminatedStageId?: string | null;
+  /** Human-readable label for the elimination round, e.g. 'Eliminated in Group Discussion'. null if not eliminated or unknown. */
+  eliminationLabel?: string | null;
 }
 
 /**
@@ -97,6 +104,8 @@ export function getEffectiveStage(
   notes?: string | null,
   manualOverride?: boolean
 ): EffectiveStageResult {
+  // Parse elimination context from notes (structured token or legacy freeform)
+  const eliminationCtx = parseEliminationToken(notes);
   const s = (status || '').toLowerCase();
 
   const allEvents: EventLike[] = [
@@ -166,11 +175,42 @@ export function getEffectiveStage(
   const isInterviewCompleted = hasInterview && intEvents.every(isEventPast);
 
   const notesText = notes || '';
-  const isNotesInterview = /eliminated.*interview|interview.*eliminated|interviewed.*not\s*selected|rejected.*interview/i.test(notesText);
-  const isNotesTest = /eliminated.*test|test.*eliminated|rejected.*test|test.*rejected/i.test(notesText);
+  const isNotesInterview =
+    eliminationCtx.roundType === 'interview' || eliminationCtx.roundType === 'interview_r2' ||
+    /eliminated.*interview|interview.*eliminated|interviewed.*not\s*selected|rejected.*interview/i.test(notesText);
+  const isNotesTest =
+    eliminationCtx.roundType === 'test' || eliminationCtx.roundType === 'test_r2' ||
+    /eliminated.*test|test.*eliminated|rejected.*test|test.*rejected/i.test(notesText);
   const notShortlistedSubtitle = isPptCompleted
     ? 'Not Shortlisted · Post-PPT'
     : 'Not Shortlisted · In Screening';
+
+  // Derive eliminatedStageId from events when elimination label provides a round type.
+  // This maps the round type to the actual event in the drive (if present).
+  const computeEliminatedStageId = (): string | null => {
+    if (!eliminationCtx.roundType) return null;
+    const ROUND_TYPE_TO_EVENT_TYPE: Partial<Record<string, string>> = {
+      test:         'online_test',
+      test_r2:      'online_test',
+      gd:           'group_discussion',
+      ppt:          'ppt',
+      interview:    'technical_interview',
+      interview_r2: 'technical_interview',
+    };
+    const targetEventType = ROUND_TYPE_TO_EVENT_TYPE[eliminationCtx.roundType];
+    if (!targetEventType) return null;
+    // For r2 variants, look for round_number=2 events; otherwise round_number=1.
+    const targetRoundNumber = eliminationCtx.roundType.endsWith('_r2') ? 2 : 1;
+    // Find the matching event to get its round_number (prefer explicit match).
+    const matchingEvent = allEvents.find((e) => {
+      const et = (e.event_type || e.eventType || '').toLowerCase();
+      if (et !== targetEventType) return false;
+      if (e.round_number != null) return e.round_number === targetRoundNumber;
+      return true; // fallback: accept first matching type
+    });
+    if (!matchingEvent) return deriveStageId(targetEventType, targetRoundNumber);
+    return deriveStageId(targetEventType, matchingEvent.round_number ?? targetRoundNumber);
+  };
 
   // ─── MANUAL OVERRIDE FAST PATH ──────────────────────────────────────────
   // If the application status was manually set by the user, honor it strictly!
@@ -189,6 +229,8 @@ export function getEffectiveStage(
         isTestCompleted,
         isPptCompleted,
         isInterviewCompleted,
+      eliminatedStageId: null,
+      eliminationLabel: null,
       };
     }
 
@@ -205,6 +247,8 @@ export function getEffectiveStage(
         isTestCompleted,
         isPptCompleted,
         isInterviewCompleted,
+      eliminatedStageId: null,
+      eliminationLabel: null,
       };
     }
 
@@ -221,6 +265,8 @@ export function getEffectiveStage(
         isTestCompleted,
         isPptCompleted,
         isInterviewCompleted,
+      eliminatedStageId: null,
+      eliminationLabel: null,
       };
     }
 
@@ -237,6 +283,8 @@ export function getEffectiveStage(
         isTestCompleted,
         isPptCompleted,
         isInterviewCompleted,
+      eliminatedStageId: null,
+      eliminationLabel: null,
       };
     }
 
@@ -253,6 +301,8 @@ export function getEffectiveStage(
         isTestCompleted,
         isPptCompleted,
         isInterviewCompleted,
+      eliminatedStageId: null,
+      eliminationLabel: null,
       };
     }
 
@@ -288,6 +338,8 @@ export function getEffectiveStage(
           isTestCompleted,
           isPptCompleted,
           isInterviewCompleted,
+        eliminatedStageId: null,
+        eliminationLabel: null,
         };
       }
 
@@ -303,6 +355,8 @@ export function getEffectiveStage(
         isTestCompleted,
         isPptCompleted,
         isInterviewCompleted,
+      eliminatedStageId: null,
+      eliminationLabel: null,
       };
     }
 
@@ -319,6 +373,8 @@ export function getEffectiveStage(
         isTestCompleted,
         isPptCompleted,
         isInterviewCompleted,
+      eliminatedStageId: null,
+      eliminationLabel: null,
       };
     }
 
@@ -335,6 +391,8 @@ export function getEffectiveStage(
         isTestCompleted,
         isPptCompleted,
         isInterviewCompleted: true,
+      eliminatedStageId: null,
+      eliminationLabel: null,
       };
     }
 
@@ -368,6 +426,8 @@ export function getEffectiveStage(
         isTestCompleted: true,
         isPptCompleted,
         isInterviewCompleted,
+      eliminatedStageId: null,
+      eliminationLabel: null,
       };
     }
 
@@ -402,6 +462,8 @@ export function getEffectiveStage(
         isTestCompleted,
         isPptCompleted: true,
         isInterviewCompleted,
+      eliminatedStageId: null,
+      eliminationLabel: null,
       };
     }
 
@@ -437,6 +499,8 @@ export function getEffectiveStage(
         isTestCompleted,
         isPptCompleted: true,
         isInterviewCompleted,
+      eliminatedStageId: null,
+      eliminationLabel: null,
       };
     }
     if (isPptOngoing) {
@@ -468,6 +532,8 @@ export function getEffectiveStage(
         isTestCompleted,
         isPptCompleted,
         isInterviewCompleted,
+      eliminatedStageId: null,
+      eliminationLabel: null,
       };
     }
     return {
@@ -501,23 +567,29 @@ export function getEffectiveStage(
       isTestCompleted,
       isPptCompleted,
       isInterviewCompleted,
+      eliminatedStageId: null,
+      eliminationLabel: null,
     };
   }
 
   // 2. Eliminated in Interview Round (Interviewed · Not Selected)
   if (s === 'rejected_interview' || (s === 'rejected' && isNotesInterview)) {
+    const elStageId = computeEliminatedStageId();
+    const elLabel = eliminationCtx.label || 'Interviewed · Not Selected';
     return {
       stageIndex: 4,
       effectiveStatus: 'rejected_interview',
       eliminatedStage: 4,
-      furthestPassedStage: 3, // Passed Applied (0), PPT (1), Test (2), and Interview (3)
-      statusSubtitle: 'Interviewed · Not Selected',
+      furthestPassedStage: 3,
+      statusSubtitle: elLabel,
       hasPpt,
       hasTest,
       hasInterview,
       isTestCompleted,
       isPptCompleted,
       isInterviewCompleted,
+      eliminatedStageId: elStageId,
+      eliminationLabel: elLabel,
     };
   }
 
@@ -527,51 +599,83 @@ export function getEffectiveStage(
     s === 'test_eliminated' ||
     (s === 'rejected' && isNotesTest)
   ) {
+    const elStageId = computeEliminatedStageId();
+    const elLabel = eliminationCtx.label || 'Eliminated in Test Round';
     return {
       stageIndex: 3,
       effectiveStatus: 'rejected_test',
       eliminatedStage: 3,
-      furthestPassedStage: 2, // Passed Applied (0), PPT (1), and Test (2)
-      statusSubtitle: 'Eliminated in Test Round',
+      furthestPassedStage: 2,
+      statusSubtitle: elLabel,
       hasPpt,
       hasTest,
       hasInterview,
       isTestCompleted,
       isPptCompleted,
       isInterviewCompleted,
+      eliminatedStageId: elStageId,
+      eliminationLabel: elLabel,
     };
   }
 
-  // 4. Generic Rejected fallback (no notes, no events -> screened out before test)
+  // 4. Generic Rejected fallback (no notes, no events → screened out before test)
   if (s === 'rejected') {
-    if (hasInterview && isInterviewCompleted) {
-      return {
-        stageIndex: 4,
-        effectiveStatus: 'rejected_interview',
-        eliminatedStage: 4,
-        furthestPassedStage: 3,
-        statusSubtitle: 'Interviewed · Not Selected',
-        hasPpt,
-        hasTest,
-        hasInterview,
-        isTestCompleted,
-        isPptCompleted,
-        isInterviewCompleted,
-      };
-    }
-    if (hasTest && isTestCompleted) {
+    // GD elimination — has its own stageIndex between test and interview
+    if (eliminationCtx.roundType === 'gd') {
+      const elStageId = computeEliminatedStageId();
+      const elLabel = eliminationCtx.label || 'Eliminated in Group Discussion';
       return {
         stageIndex: 3,
         effectiveStatus: 'rejected_test',
         eliminatedStage: 3,
         furthestPassedStage: 2,
-        statusSubtitle: 'Eliminated in Test Round',
+        statusSubtitle: elLabel,
         hasPpt,
         hasTest,
         hasInterview,
         isTestCompleted,
         isPptCompleted,
         isInterviewCompleted,
+        eliminatedStageId: elStageId,
+        eliminationLabel: elLabel,
+      };
+    }
+    if (hasInterview && isInterviewCompleted) {
+      const elStageId = computeEliminatedStageId();
+      const elLabel = eliminationCtx.label || 'Interviewed · Not Selected';
+      return {
+        stageIndex: 4,
+        effectiveStatus: 'rejected_interview',
+        eliminatedStage: 4,
+        furthestPassedStage: 3,
+        statusSubtitle: elLabel,
+        hasPpt,
+        hasTest,
+        hasInterview,
+        isTestCompleted,
+        isPptCompleted,
+        isInterviewCompleted,
+        eliminatedStageId: elStageId,
+        eliminationLabel: elLabel,
+      };
+    }
+    if (hasTest && isTestCompleted) {
+      const elStageId = computeEliminatedStageId();
+      const elLabel = eliminationCtx.label || 'Eliminated in Test Round';
+      return {
+        stageIndex: 3,
+        effectiveStatus: 'rejected_test',
+        eliminatedStage: 3,
+        furthestPassedStage: 2,
+        statusSubtitle: elLabel,
+        hasPpt,
+        hasTest,
+        hasInterview,
+        isTestCompleted,
+        isPptCompleted,
+        isInterviewCompleted,
+        eliminatedStageId: elStageId,
+        eliminationLabel: elLabel,
       };
     }
     return {
@@ -586,6 +690,8 @@ export function getEffectiveStage(
       isTestCompleted,
       isPptCompleted,
       isInterviewCompleted,
+      eliminatedStageId: null,
+      eliminationLabel: null,
     };
   }
 
@@ -640,6 +746,8 @@ export function getEffectiveStage(
         isTestCompleted,
         isPptCompleted,
         isInterviewCompleted,
+      eliminatedStageId: null,
+      eliminationLabel: null,
       };
     }
 
@@ -707,6 +815,8 @@ export function getEffectiveStage(
         isTestCompleted,
         isPptCompleted,
         isInterviewCompleted: true,
+      eliminatedStageId: null,
+      eliminationLabel: null,
       };
     }
 
@@ -757,6 +867,8 @@ export function getEffectiveStage(
         isTestCompleted: true,
         isPptCompleted,
         isInterviewCompleted,
+      eliminatedStageId: null,
+      eliminationLabel: null,
       };
     }
 
@@ -807,6 +919,8 @@ export function getEffectiveStage(
         isTestCompleted,
         isPptCompleted: true,
         isInterviewCompleted,
+      eliminatedStageId: null,
+      eliminationLabel: null,
       };
     }
 
@@ -886,7 +1000,84 @@ export function getEffectiveStage(
     isTestCompleted,
     isPptCompleted,
     isInterviewCompleted,
+    eliminatedStageId: null,
+    eliminationLabel: null,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Derived stages builder — for multi-round / non-standard pipelines
+// ---------------------------------------------------------------------------
+
+export interface DerivedStage extends StageDefinition {
+  eventType?: string;
+  roundNumber?: number;
+}
+
+const SKIP_EVENT_TYPES = new Set([
+  'registration_deadline',
+  'result',
+  'joining_date',
+  'other',
+]);
+
+/**
+ * Builds an ordered list of stages from the events known for a placement drive.
+ * Visual order is by start_time ASC (NULL last), as a display hint only.
+ * When no events exist, returns undefined so callers can fall back to STAGES.
+ *
+ * The returned stages are display-only — they are never fed back into status logic.
+ */
+export function deriveStagesFromEvents(
+  events: EventLike[]
+): DerivedStage[] | undefined {
+  const relevant = events.filter((e) => {
+    const t = (e.event_type || e.eventType || '').toLowerCase();
+    return t && !SKIP_EVENT_TYPES.has(t);
+  });
+  if (relevant.length === 0) return undefined;
+
+  // Sort by start_time ASC for visual ordering only (NULL → end)
+  const sorted = [...relevant].sort((a, b) => {
+    const ta = a.start_time || a.startTime;
+    const tb = b.start_time || b.startTime;
+    if (!ta && !tb) return 0;
+    if (!ta) return 1;
+    if (!tb) return -1;
+    return new Date(ta).getTime() - new Date(tb).getTime();
+  });
+
+  const stages: DerivedStage[] = [
+    { id: 'applied', label: 'Applied', shortLabel: 'Applied' },
+  ];
+
+  // Track how many of each event type we've seen (for round numbering display)
+  const seen = new Map<string, number>();
+
+  for (const event of sorted) {
+    const eventType = (event.event_type || event.eventType || '').toLowerCase();
+    if (!eventType) continue;
+
+    // round_number from DB is authoritative; fall back to increment counter
+    const dbRound = event.round_number ?? null;
+    const seenCount = seen.get(eventType) ?? 0;
+    const displayRound = dbRound ?? (seenCount + 1);
+    seen.set(eventType, Math.max(seenCount + 1, displayRound));
+
+    const stageId = deriveStageId(eventType, displayRound);
+    const { label, shortLabel } = deriveStageLabelFromId(stageId);
+
+    stages.push({
+      id: stageId,
+      label,
+      shortLabel,
+      eventType,
+      roundNumber: displayRound,
+    });
+  }
+
+  stages.push({ id: 'offer', label: 'Selected / Offer', shortLabel: 'Offer' });
+  return stages;
 }
 
 export function getStageStatusLabel(status: string, stageIndex: number): string {
