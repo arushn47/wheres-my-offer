@@ -268,18 +268,16 @@ export default function DashboardClient({
   return (
     <div data-testid="dashboard-page" className="mx-auto max-w-7xl space-y-5 sm:space-y-6 w-full min-w-0">
       {/* Onboarding Alert Banner if missing requirements */}
-      {(!hasCollegeAccount || !hasNeoId) && (
+      {!hasNeoId && (
         <div className="rounded-2xl border border-amber-500/30 bg-amber-500/5 p-3.5 sm:p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 sm:gap-4">
           <div className="flex items-start gap-3">
             <ShieldAlert className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
             <div>
               <h4 className="text-xs sm:text-sm font-semibold text-zinc-200">
-                {!hasCollegeAccount ? 'Link your College Gmail to unlock test circulars' : 'Add your Registration ID'}
+                Add your Registration ID
               </h4>
               <p className="text-[11px] sm:text-xs text-zinc-400 mt-0.5">
-                {!hasCollegeAccount
-                  ? 'Connect your @vitstudent.ac.in account in Settings so the engine can parse shortlists and test links.'
-                  : "Add your roll number in Settings so Where's My Offer? can match your name in shortlist Excel files."}
+                Add your roll number in Settings so Where's My Offer? can match your name in shortlist Excel files.
               </p>
             </div>
           </div>

@@ -391,7 +391,7 @@ export default function SettingsClient({
       <Card
         icon={Mail}
         title="Connected Gmail Inboxes"
-        desc="Dual inboxes are read-only. Access tokens are AES-256 encrypted and revocable anytime."
+        desc="College email connection is no longer required (global pipeline handles circulars). Access tokens are encrypted and revocable anytime."
         testid="gmail-card"
       >
         <div className="space-y-3 sm:space-y-4">
@@ -468,7 +468,7 @@ export default function SettingsClient({
                         </span>
                       ) : (
                         <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-[9px] font-bold text-amber-300">
-                          Optional
+                          Not Required
                         </span>
                       )}
                     </div>
@@ -496,7 +496,7 @@ export default function SettingsClient({
                 )}
               </div>
               <div className="pt-2 border-t border-white/[0.04] flex items-center justify-between text-[11px] text-zinc-500">
-                <span>Shared archive matching when available</span>
+                <span>Centrally synced by system admins</span>
                 <span className="font-mono text-zinc-400">{selectedCampus}</span>
               </div>
             </div>
