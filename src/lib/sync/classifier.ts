@@ -173,7 +173,7 @@ const CLASSIFICATION_RULES: ClassificationRule[] = [
     confidence: 'high',
     match: (s, b) =>
       ((/(online\s+test|coding\s+test|online\s+assessment|aptitude\s+test|test\s+schedule|test\s+link|assessment\s+(?:test|link|scheduled|window)|thanks\s+for\s+taking\s+(?:the\s+)?assessment)/i.test(s) ||
-        (/\bapplied\s+(?:students?|candidates?)\b/i.test(s) && /(?:online\s+assessment|\boa\b|online\s+test|coding\s+test|assessment\s+link|attend\s+the\s+test)/i.test(b))) &&
+        (/\bapplied\s+(?:students?|candidates?)\b/i.test(s) && /(?:online\s+assessment|\boa\b|online\s+test|coding\s+test|assessment\s+link|attend\s+the\s+test|fresh\s+link|test\s+link|test\s+today)/i.test(b))) &&
       !/(?:ppt|pre[\s-]*placement\s*talk).*(?:online\s+test|coding\s+test|assessment)/i.test(s)),
     reason: 'Subject or applied candidates notice mentions online test or assessment',
   },

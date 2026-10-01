@@ -231,10 +231,23 @@ export function parseDateTimeWithConfidence(
 
   // 4. If no explicit calendar date was found, only resolve supported relative dates.
   if (day === null || month === null) {
-    const hasRecognizedRelativeDate = /tomm|tomorrow|tmrw|next\s+day/i.test(text);
-    if (fallbackDate && hasRecognizedRelativeDate) {
+    const hasTomorrow = /tomm|tomorrow|tmrw|next\s+day/i.test(text);
+    const hasToday = /\btoday\b/i.test(text);
+    if (fallbackDate && hasTomorrow) {
       const ref = new Date(fallbackDate);
       ref.setDate(ref.getDate() + 1);
+      day = ref.getDate();
+      month = ref.getMonth();
+      year = ref.getFullYear();
+    } else if (fallbackDate && hasToday) {
+      // "fresh link for test today" — use the email's received date
+      const ref = new Date(fallbackDate);
+      day = ref.getDate();
+      month = ref.getMonth();
+      year = ref.getFullYear();
+    } else if (fallbackDate && hasExplicitTime) {
+      // If we found an explicit time (e.g. "7:00 PM") but no date, default to the received date.
+      const ref = new Date(fallbackDate);
       day = ref.getDate();
       month = ref.getMonth();
       year = ref.getFullYear();
@@ -550,11 +563,28 @@ export function extractEvents(email: ParsedEmail): ExtractedEvent[] {
   // prospective test dates are tentative campus drive milestones, NOT confirmed test invitations.
   // Also guard against emails that are purely about filling a Google Form or where the test is already completed!
   const testMatch = cleanNormalizedText.match(
-    /(?:(?:online|coding|aptitude|assessment|written)?\s*test(?:\s+date)?|date\s+of\s+visit[\s\S]{0,40}?\btest)\s*[:\-–—\t]?\s*([^\r\n]{1,100})/i
+    /(?:(?:online|coding|aptitude|assessment|written)?\s*test(?:\s+(?:date|link|1|2|3|round))?|date\s+of\s+visit[\s\S]{0,40}?\btest|test\s+link)\s*[:\-–—\t]?\s*([^\r\n]{1,100})/i
   );
-  const snippetForTest = testMatch ? testMatch[0] : cleanNormalizedText;
+
+  // For bare test-link emails ("Link - https://tests.mettl.com … Time - 7:00 PM"),
+  // build a tight snippet from around the platform URL + nearest time expression.
+  const testLinkMatch = cleanNormalizedText.match(
+    /(?:link\s*[-–:]?\s*)?(?:https?:\/\/)?(?:tests?\.mettl\.com|app\.mettl\.com|hackerrank\.com|hackerearth\.com|amcat\.in|shl\.com)[^\s]{0,80}/i
+  );
+  let snippetForTest: string;
+  if (testMatch) {
+    snippetForTest = testMatch[0];
+  } else if (testLinkMatch && testLinkMatch.index !== undefined) {
+    // Grab 120 chars before and after the URL to capture the adjacent time/date
+    const start = Math.max(0, testLinkMatch.index - 120);
+    const end = Math.min(cleanNormalizedText.length, testLinkMatch.index + testLinkMatch[0].length + 120);
+    snippetForTest = cleanNormalizedText.slice(start, end);
+  } else {
+    snippetForTest = cleanNormalizedText;
+  }
+
   const hasTestKeyword =
-    /(?:online|coding|aptitude|assessment|written)\s*test|hackerrank|hackerearth|mettl|amcat/i.test(cleanNormalizedText) ||
+    /(?:online|coding|aptitude|assessment|written)\s*test|test\s+link|fresh\s+link|hackerrank|hackerearth|mettl|amcat/i.test(cleanNormalizedText) ||
     Boolean(testMatch);
 
   if (
@@ -568,9 +598,12 @@ export function extractEvents(email: ParsedEmail): ExtractedEvent[] {
 
     const hasExplicitDate =
       parsed.hasExplicitTime ||
-      /\b(?:\d{1,2}(?:st|nd|rd|th)?\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)|\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}|tomm|tomorrow|tmrw)\b/i.test(snippetForTest);
+      /\b(?:\d{1,2}(?:st|nd|rd|th)?\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)|\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}|tomm|tomorrow|tmrw|today)\b/i.test(snippetForTest);
 
-    if (parsed.date && (hasExplicitDate || /hiring\s+test|coding\s+test\s+invitation|test\s+is\s+scheduled/i.test(cleanNormalizedText))) {
+    // Also treat bare platform-link emails as confirmed test invitations
+    const isBareTestLinkEmail = Boolean(testLinkMatch) && Boolean(testMatch || /\btoday\b|time\s*[-–:]|\d{1,2}:\d{2}\s*(?:am|pm)/i.test(cleanNormalizedText));
+
+    if (parsed.date && (hasExplicitDate || isBareTestLinkEmail || /hiring\s+test|coding\s+test\s+invitation|test\s+is\s+scheduled/i.test(cleanNormalizedText))) {
       events.push({
         eventType: 'online_test',
         title: /coding/i.test(cleanNormalizedText) ? 'Coding Test' : 'Online Assessment',
