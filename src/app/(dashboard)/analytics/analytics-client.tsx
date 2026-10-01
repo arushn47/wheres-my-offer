@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import Link from 'next/link';
 import { StatusChip } from '@/components/ui/status-chip';
+import { parseEliminationToken } from '@/lib/sync/round-identity';
 
 export interface AnalyticsDrive {
   id: string;
@@ -157,9 +158,31 @@ export default function AnalyticsClient({
       );
 
       const hasMatch = shortlistedDriveIds.has(driveId);
-      const hasEliminatedRoundNote =
-        /eliminated in (test|interview|assessment)/i.test(drive.notes || '') ||
-        ['rejected_test', 'rejected_interview', 'test_eliminated', 'interview_eliminated'].includes(s);
+      const elimCtx = parseEliminationToken(drive.notes);
+
+      // Offers Won:
+      const isSelected = ['selected', 'offer', 'offer_received'].includes(s);
+
+      // Interviews Reached: Candidate progressed to or scheduled for interview rounds
+      const isInterviewed =
+        [
+          'interview',
+          'interview_scheduled',
+          'interview_ongoing',
+          'interview_completed',
+          'rejected_interview',
+          'interview_eliminated',
+        ].includes(s) ||
+        hasInterviewEvent ||
+        elimCtx.roundType === 'interview' ||
+        elimCtx.roundType === 'interview_r2' ||
+        isSelected;
+
+      // Assessments Cleared: Candidate cleared test/OA and reached interview, GD, or direct selection
+      const isAssessmentCleared =
+        isInterviewed ||
+        elimCtx.roundType === 'gd' ||
+        isSelected;
 
       // Shortlisted for OA / Test:
       const isShortlistedForOA =
@@ -169,49 +192,13 @@ export default function AnalyticsClient({
           'test_scheduled',
           'test_ongoing',
           'test_completed',
-          'interview',
-          'interview_scheduled',
-          'interview_ongoing',
-          'interview_completed',
-          'selected',
-          'offer',
-          'offer_received',
         ].includes(s) ||
         hasTestEvent ||
         hasMatch ||
-        hasEliminatedRoundNote ||
-        (s === 'rejected' && (hasTestEvent || /test|assessment|interview/i.test(drive.notes || '')));
-
-      // Assessments Cleared:
-      const isAssessmentCleared =
-        [
-          'interview',
-          'interview_scheduled',
-          'interview_ongoing',
-          'interview_completed',
-          'selected',
-          'offer',
-          'offer_received',
-        ].includes(s) ||
-        hasInterviewEvent ||
-        /interview/i.test(drive.notes || '');
-
-      // Interviews Reached:
-      const isInterviewed =
-        [
-          'interview',
-          'interview_scheduled',
-          'interview_ongoing',
-          'interview_completed',
-          'selected',
-          'offer',
-          'offer_received',
-        ].includes(s) ||
-        hasInterviewEvent ||
-        /interview/i.test(drive.notes || '');
-
-      // Offers Won:
-      const isSelected = ['selected', 'offer', 'offer_received'].includes(s);
+        elimCtx.roundType === 'test' ||
+        elimCtx.roundType === 'test_r2' ||
+        ['rejected_test', 'test_eliminated'].includes(s) ||
+        isAssessmentCleared;
 
       if (isShortlistedForOA) shortlisted++;
       if (isAssessmentCleared) clearedAssessment++;
@@ -261,14 +248,20 @@ export default function AnalyticsClient({
         ? (appliedCtcs.reduce((a, b) => a + b, 0) / appliedCtcs.length).toFixed(1)
         : null;
 
+    // Monotonic clamping: downstream stages can never exceed upstream stages
+    const finalShortlisted = Math.min(shortlisted, applied);
+    const finalClearedAssessment = Math.min(clearedAssessment, finalShortlisted);
+    const finalInterviewed = Math.min(interviewed, finalClearedAssessment);
+    const finalSelected = Math.min(selected, finalInterviewed);
+
     return {
       appliedCount: applied,
       withdrawnCount: withdrawn,
       notAppliedCount: notApplied,
-      shortlistedCount: shortlisted,
-      clearedAssessmentCount: clearedAssessment,
-      interviewCount: interviewed,
-      offerCount: selected,
+      shortlistedCount: finalShortlisted,
+      clearedAssessmentCount: finalClearedAssessment,
+      interviewCount: finalInterviewed,
+      offerCount: finalSelected,
       rejectedCount: rejected,
       superDreamCount: superDream,
       dreamCount: dream,
