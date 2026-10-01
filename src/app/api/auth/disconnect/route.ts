@@ -30,7 +30,7 @@ export async function POST(request: Request) {
   // Verify the account belongs to this user
   const { data: account } = await supabase
     .from('gmail_accounts')
-    .select('id, user_id')
+    .select('id, user_id, email, account_type, access_token_encrypted, refresh_token_encrypted, token_expiry')
     .eq('id', gmail_account_id)
     .eq('user_id', session.userId)
     .single();
@@ -42,6 +42,16 @@ export async function POST(request: Request) {
     );
   }
 
+  // Deregister watch from Google's servers before clearing tokens
+  try {
+    const { createGmailClient } = await import('@/lib/gmail/client');
+    const { stopGmailWatch } = await import('@/lib/gmail/watch');
+    const { gmail } = await createGmailClient(account as any);
+    await stopGmailWatch(gmail);
+  } catch (watchErr) {
+    console.warn(`[Disconnect] Failed to stop Gmail watch for ${account.email}:`, watchErr);
+  }
+
   // Clear tokens and mark as disconnected
   const { error } = await supabase
     .from('gmail_accounts')
@@ -50,6 +60,7 @@ export async function POST(request: Request) {
       refresh_token_encrypted: null,
       token_expiry: null,
       is_connected: false,
+      watch_expires_at: null,
     })
     .eq('id', gmail_account_id);
 

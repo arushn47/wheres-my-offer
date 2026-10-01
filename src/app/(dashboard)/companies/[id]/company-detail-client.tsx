@@ -676,7 +676,7 @@ export default function CompanyDetailClient({
         onClick={() => router.back()}
         className="flex items-center gap-2 text-xs font-semibold text-zinc-500 transition-colors hover:text-zinc-200 cursor-pointer"
       >
-        <ArrowLeft className="h-4 w-4" /> Back to pipeline
+        <ArrowLeft className="h-4 w-4" /> Back to all drives
       </button>
 
       {/* Header Card */}

@@ -78,24 +78,58 @@ export async function recalculateApplicationStatuses(
   const canonicalByMsgId = new Map<string, string>();
   if (options?.preloadedCanonicalMap) {
     for (const [k, v] of options.preloadedCanonicalMap) canonicalByMsgId.set(k, v);
-  } else {
-    const { data: canonicalsWithBody } = await supabase
-      .from('college_emails')
-      .select('id, message_id, body_text, body_snippet')
-      .not('message_id', 'is', null)
-      .or('body_text.not.is.null,body_snippet.not.is.null');
+  }
 
-    for (const c of canonicalsWithBody || []) {
-      const text = c.body_text || c.body_snippet || '';
-      if (text) {
-        if (c.message_id && !canonicalByMsgId.has(c.message_id.toLowerCase().trim())) {
-          canonicalByMsgId.set(c.message_id.toLowerCase().trim(), text);
+  // Fetch all emails for this user (paginated)
+  const rawEmailChunks: any[] = [];
+  const pageSize = 1000;
+  let page = 0;
+  while (true) {
+    const { data: chunk, error: chunkErr } = await supabase
+      .from('personal_emails')
+      .select('id, subject, sender, body_snippet, gmail_account_id, gmail_message_id, canonical_email_id, college_email_id, college_emails!personal_emails_college_email_id_fkey(body_text, body_snippet), rfc_message_id, classification, placement_drive_id, received_at, assignment_state, assignment_source')
+      .eq('user_id', userId)
+      .order('received_at', { ascending: true })
+      .range(page * pageSize, (page + 1) * pageSize - 1);
+
+    if (chunkErr) {
+      console.error('[recalculateApplicationStatuses] Error loading personal_emails:', chunkErr);
+      break;
+    }
+    if (!chunk || chunk.length === 0) break;
+    rawEmailChunks.push(...chunk);
+    if (chunk.length < pageSize) break;
+    page++;
+  }
+
+  // Targeted RFC lookup: only query college_emails for RFC message IDs that lack foreign-key canonical bodies
+  if (!options?.preloadedCanonicalMap && rawEmailChunks.length > 0) {
+    const missingRfcIds = Array.from(new Set(
+      rawEmailChunks
+        .filter((e) => {
+          const canonical = Array.isArray(e.college_emails) ? e.college_emails[0] : e.college_emails;
+          return (!canonical?.body_text && !canonical?.body_snippet) && Boolean(e.rfc_message_id);
+        })
+        .map((e) => e.rfc_message_id.toLowerCase().trim())
+    ));
+
+    if (missingRfcIds.length > 0) {
+      for (let from = 0; from < missingRfcIds.length; from += 200) {
+        const { data: canonicalsWithBody } = await supabase
+          .from('college_emails')
+          .select('id, message_id, body_snippet')
+          .in('message_id', missingRfcIds.slice(from, from + 200));
+
+        for (const c of canonicalsWithBody || []) {
+          const text = c.body_snippet || '';
+          if (text && c.message_id && !canonicalByMsgId.has(c.message_id.toLowerCase().trim())) {
+            canonicalByMsgId.set(c.message_id.toLowerCase().trim(), text);
+          }
         }
       }
     }
   }
 
-  // Fetch all emails for this user (paginated)
   const allEmails: Array<{
     id: string;
     subject: string | null;
@@ -112,44 +146,24 @@ export async function recalculateApplicationStatuses(
     assignment_state?: string | null;
     assignment_source?: string | null;
     has_canonical_body?: boolean;
-  }> = [];
-
-  const pageSize = 1000;
-  let page = 0;
-  while (true) {
-    const { data: chunk, error: chunkErr } = await supabase
-      .from('personal_emails')
-      .select('id, subject, sender, body_snippet, gmail_account_id, gmail_message_id, canonical_email_id, college_email_id, college_emails!personal_emails_college_email_id_fkey(body_text, body_snippet), rfc_message_id, classification, placement_drive_id, received_at, assignment_state, assignment_source')
-      .eq('user_id', userId)
-      .order('received_at', { ascending: true })
-      .range(page * pageSize, (page + 1) * pageSize - 1);
-
-    if (chunkErr) {
-      console.error('[recalculateApplicationStatuses] Error loading personal_emails:', chunkErr);
-      break;
+  }> = rawEmailChunks.map((email: any) => {
+    const canonical = Array.isArray(email.college_emails)
+      ? email.college_emails[0]
+      : email.college_emails;
+    let fullBody = canonical?.body_text || canonical?.body_snippet || null;
+    if (!fullBody && email.rfc_message_id) {
+      fullBody = canonicalByMsgId.get(email.rfc_message_id.toLowerCase().trim()) || null;
     }
-    if (!chunk || chunk.length === 0) break;
-    allEmails.push(...chunk.map((email: any) => {
-      const canonical = Array.isArray(email.college_emails)
-        ? email.college_emails[0]
-        : email.college_emails;
-      let fullBody = canonical?.body_text || canonical?.body_snippet || null;
-      if (!fullBody && email.rfc_message_id) {
-        fullBody = canonicalByMsgId.get(email.rfc_message_id.toLowerCase().trim()) || null;
-      }
-      const hasCanonicalBody = Boolean(fullBody && fullBody.length > 500);
-      if (!fullBody) {
-        fullBody = email.body_snippet || '';
-      }
-      return {
-        ...email,
-        body_snippet: fullBody,
-        has_canonical_body: hasCanonicalBody,
-      };
-    }));
-    if (chunk.length < pageSize) break;
-    page++;
-  }
+    const hasCanonicalBody = Boolean(fullBody && fullBody.length > 500);
+    if (!fullBody) {
+      fullBody = email.body_snippet || '';
+    }
+    return {
+      ...email,
+      body_snippet: fullBody,
+      has_canonical_body: hasCanonicalBody,
+    };
+  });
 
   if (!options?.skipBodyRecovery) {
     const recoveredBodies = await recoverTruncatedEmailBodies(allEmails);
@@ -183,7 +197,7 @@ export async function recalculateApplicationStatuses(
     while (true) {
       const { data: cChunk, error: cErr } = await supabase
         .from('college_emails')
-        .select('id, subject, sender_email, received_at, created_at, body_snippet, body_text, classification, parsed_company_name, parsed_drive_numbers')
+        .select('id, subject, sender_email, received_at, created_at, body_snippet, classification, parsed_company_name, parsed_drive_numbers')
         .order('received_at', { ascending: true })
         .range(clgPage * pageSize, (clgPage + 1) * pageSize - 1);
 
@@ -198,7 +212,7 @@ export async function recalculateApplicationStatuses(
         subject: ce.subject,
         sender: ce.sender_email,
         received_at: ce.received_at || ce.created_at,
-        body_snippet: ce.body_text || ce.body_snippet || '',
+        body_snippet: ce.body_snippet || '',
         classification: ce.classification,
         parsed_company_name: ce.parsed_company_name,
         parsed_drive_numbers: ce.parsed_drive_numbers || [],
@@ -206,7 +220,7 @@ export async function recalculateApplicationStatuses(
         college_email_id: ce.id,
         canonical_email_id: ce.id,
         assignment_source: 'college_broadcast',
-        has_canonical_body: Boolean(ce.body_text && ce.body_text.length > 500),
+        has_canonical_body: Boolean(ce.body_snippet && ce.body_snippet.length > 500),
       })));
 
       if (cChunk.length < pageSize) break;
@@ -1712,16 +1726,53 @@ export async function performReprocess(
 
   // 2. Fetch ALL stored emails for this user with automatic pagination.
   // Full content lives in college_emails after body_snippet was capped at 500 chars.
-  const { data: canonicalBodies } = await supabase
-    .from('college_emails')
-    .select('message_id, body_text, body_snippet')
-    .not('message_id', 'is', null)
-    .or('body_text.not.is.null,body_snippet.not.is.null');
+  const rawReprocessEmails: any[] = [];
+  const pageSize = 1000;
+  let page = 0;
+  while (true) {
+    const { data: chunk, error: chunkErr } = await supabase
+      .from('personal_emails')
+      .select('id, subject, sender, body_snippet, gmail_account_id, gmail_message_id, canonical_email_id, college_email_id, is_relevant, college_emails!personal_emails_college_email_id_fkey(body_text, body_snippet), rfc_message_id, classification, placement_drive_id, received_at, assignment_state, assignment_source')
+      .eq('user_id', userId)
+      .order('received_at', { ascending: true })
+      .range(page * pageSize, (page + 1) * pageSize - 1);
+
+    if (chunkErr) {
+      console.error('[performReprocess] Error loading personal_emails:', chunkErr);
+      break;
+    }
+    if (!chunk || chunk.length === 0) break;
+    rawReprocessEmails.push(...chunk);
+    if (chunk.length < pageSize) break;
+    page++;
+  }
+
+  // Targeted RFC lookup: only query college_emails for RFC message IDs that lack foreign-key canonical bodies
   const bodyByMessageId = new Map<string, string>();
-  for (const canonical of canonicalBodies || []) {
-    const key = canonical.message_id?.toLowerCase().trim();
-    const text = canonical.body_text || canonical.body_snippet;
-    if (key && text && !bodyByMessageId.has(key)) bodyByMessageId.set(key, text);
+  if (rawReprocessEmails.length > 0) {
+    const missingRfcIds = Array.from(new Set(
+      rawReprocessEmails
+        .filter((e) => {
+          const canonical = Array.isArray(e.college_emails) ? e.college_emails[0] : e.college_emails;
+          return (!canonical?.body_text && !canonical?.body_snippet) && Boolean(e.rfc_message_id);
+        })
+        .map((e) => e.rfc_message_id.toLowerCase().trim())
+    ));
+
+    if (missingRfcIds.length > 0) {
+      for (let from = 0; from < missingRfcIds.length; from += 200) {
+        const { data: canonicalBodies } = await supabase
+          .from('college_emails')
+          .select('message_id, body_snippet')
+          .in('message_id', missingRfcIds.slice(from, from + 200));
+
+        for (const canonical of canonicalBodies || []) {
+          const key = canonical.message_id?.toLowerCase().trim();
+          const text = canonical.body_snippet;
+          if (key && text && !bodyByMessageId.has(key)) bodyByMessageId.set(key, text);
+        }
+      }
+    }
   }
 
   const emails: Array<{
@@ -1740,36 +1791,17 @@ export async function performReprocess(
     is_relevant?: boolean | null;
     gmail_account_id?: string | null;
     gmail_message_id?: string | null;
-  }> = [];
-
-  const pageSize = 1000;
-  let page = 0;
-  while (true) {
-    const { data: chunk, error: chunkErr } = await supabase
-      .from('personal_emails')
-      .select('id, subject, sender, body_snippet, gmail_account_id, gmail_message_id, canonical_email_id, college_email_id, is_relevant, college_emails!personal_emails_college_email_id_fkey(body_text, body_snippet), rfc_message_id, classification, placement_drive_id, received_at, assignment_state, assignment_source')
-      .eq('user_id', userId)
-      .order('received_at', { ascending: true })
-      .range(page * pageSize, (page + 1) * pageSize - 1);
-
-    if (chunkErr) {
-      console.error('[performReprocess] Error loading personal_emails:', chunkErr);
-      break;
+    has_canonical_body?: boolean;
+  }> = rawReprocessEmails.map((email: any) => {
+    const canonical = Array.isArray(email.college_emails) ? email.college_emails[0] : email.college_emails;
+    let fullBody = canonical?.body_text || canonical?.body_snippet ||
+      (email.rfc_message_id ? bodyByMessageId.get(email.rfc_message_id.toLowerCase().trim()) : null) || null;
+    const hasCanonicalBody = Boolean(fullBody && fullBody.length > 500);
+    if (!fullBody) {
+      fullBody = email.body_snippet || '';
     }
-    if (!chunk || chunk.length === 0) break;
-    emails.push(...chunk.map((email: any) => {
-      const canonical = Array.isArray(email.college_emails) ? email.college_emails[0] : email.college_emails;
-      let fullBody = canonical?.body_text || canonical?.body_snippet ||
-        (email.rfc_message_id ? bodyByMessageId.get(email.rfc_message_id.toLowerCase().trim()) : null) || null;
-      const hasCanonicalBody = Boolean(fullBody && fullBody.length > 500);
-      if (!fullBody) {
-        fullBody = email.body_snippet || '';
-      }
-      return { ...email, body_snippet: fullBody, has_canonical_body: hasCanonicalBody };
-    }));
-    if (chunk.length < pageSize) break;
-    page++;
-  }
+    return { ...email, body_snippet: fullBody, has_canonical_body: hasCanonicalBody };
+  });
 
   const recoveredBodies = await recoverTruncatedEmailBodies(emails);
   for (const email of emails) {
@@ -1797,7 +1829,7 @@ export async function performReprocess(
   while (true) {
     const { data: cChunk, error: cErr } = await supabase
       .from('college_emails')
-      .select('id, subject, sender_email, received_at, created_at, body_snippet, body_text, classification, parsed_company_name, parsed_drive_numbers')
+      .select('id, subject, sender_email, received_at, created_at, body_snippet, classification, parsed_company_name, parsed_drive_numbers')
       .order('received_at', { ascending: true })
       .range(clgPage * pageSize, (clgPage + 1) * pageSize - 1);
 
@@ -1812,11 +1844,11 @@ export async function performReprocess(
       subject: ce.subject,
       sender: ce.sender_email,
       received_at: ce.received_at || ce.created_at,
-      body_snippet: ce.body_text || ce.body_snippet || '',
+      body_snippet: ce.body_snippet || '',
       classification: ce.classification,
       parsed_company_name: ce.parsed_company_name,
       parsed_drive_numbers: ce.parsed_drive_numbers || [],
-      has_canonical_body: Boolean(ce.body_text && ce.body_text.length > 500),
+      has_canonical_body: Boolean(ce.body_snippet && ce.body_snippet.length > 500),
       canonical_email_id: ce.id,
       college_email_id: ce.id,
     })));

@@ -53,6 +53,16 @@ export async function DELETE() {
     if (accounts && accounts.length > 0) {
       for (const acc of accounts) {
         try {
+          // Stop push watch on Google's servers before revoking tokens
+          try {
+            const { createGmailClient } = await import('@/lib/gmail/client');
+            const { stopGmailWatch } = await import('@/lib/gmail/watch');
+            const { gmail } = await createGmailClient(acc as any);
+            await stopGmailWatch(gmail);
+          } catch (watchErr) {
+            console.warn(`[Account Deletion] Failed to stop Gmail watch for ${acc.email}:`, watchErr);
+          }
+
           const tokenToRevoke = acc.refresh_token_encrypted
             ? decrypt(acc.refresh_token_encrypted)
             : acc.access_token_encrypted

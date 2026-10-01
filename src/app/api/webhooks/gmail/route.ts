@@ -111,25 +111,35 @@ export async function POST(req: NextRequest) {
       .single();
 
     if (error || !account) {
-      console.warn(`No connected account found for email ${emailAddress}`);
-      await supabase.rpc('fail_gmail_pubsub_message', {
+      console.warn(`[Pub/Sub] No connected account found for email ${emailAddress} — acknowledging terminal state`);
+      await supabase.rpc('complete_gmail_pubsub_message', {
         p_subscription: subscription,
         p_message_id: messageId,
         p_run_id: runId,
-        p_error: 'No connected Gmail account found',
       });
-      return NextResponse.json({ message: 'Account not found' }, { status: 200 });
+      return NextResponse.json({ message: 'Account not found (acknowledged)' }, { status: 200 });
     }
 
     // Keep the invocation alive after acknowledging Pub/Sub. The lease in
     // runSync still deduplicates concurrent/replayed notifications.
-    // No user-specific fallback address: the shared College ingest runs on whichever
-    // College inbox a notification arrived for (the ingester itself picks the first
-    // connected College inbox unless SHARED_COLLEGE_EMAIL overrides it).
-    const sharedCollegeInbox = (process.env.SHARED_COLLEGE_EMAIL || '').toLowerCase();
+    const sharedCollegeInbox = (process.env.SHARED_COLLEGE_EMAIL || 'arush.23bce10472@vitbhopal.ac.in').toLowerCase();
     const isSharedCollegeSource =
       account.account_type === 'college' &&
-      (!sharedCollegeInbox || emailAddress.toLowerCase() === sharedCollegeInbox);
+      emailAddress.toLowerCase() === sharedCollegeInbox;
+
+    // Non-designated student college inboxes do not trigger shared ingests.
+    // Acknowledge immediately to avoid spinning background jobs or retries.
+    if (account.account_type === 'college' && !isSharedCollegeSource) {
+      await supabase.rpc('complete_gmail_pubsub_message', {
+        p_subscription: subscription,
+        p_message_id: messageId,
+        p_run_id: runId,
+      });
+      return NextResponse.json({
+        success: true,
+        message: `Ignored non-primary College inbox ${emailAddress}`,
+      }, { status: 200 });
+    }
 
     console.log(`[Pub/Sub] Triggering ${isSharedCollegeSource ? 'shared College ingest' : 'Personal sync'} for ${emailAddress} at historyId ${historyId}`);
     after(async () => {
@@ -145,8 +155,6 @@ export async function POST(req: NextRequest) {
           console.log(`[Shared College Ingest] ${emailAddress}:`, { runs, ...result });
         } else if (account.account_type === 'personal') {
           await runSync(account.user_id);
-        } else {
-          console.warn(`[Pub/Sub] Ignoring non-primary College inbox ${emailAddress}; set SHARED_COLLEGE_EMAIL to pin the ingest source.`);
         }
         const { error: completeError } = await supabase.rpc('complete_gmail_pubsub_message', {
           p_subscription: subscription,
@@ -155,14 +163,33 @@ export async function POST(req: NextRequest) {
         });
         if (completeError) throw completeError;
       } catch (syncErr) {
-        console.error(`[Pub/Sub] Background sync failed for user ${account.user_id}:`, syncErr);
-        await supabase.rpc('fail_gmail_pubsub_message', {
-          p_subscription: subscription,
-          p_message_id: messageId,
-          p_run_id: runId,
-          p_error: syncErr instanceof Error ? syncErr.message : String(syncErr),
-        });
-        throw syncErr;
+        const errorMsg = syncErr instanceof Error ? syncErr.message : String(syncErr);
+        console.error(`[Pub/Sub] Background sync failed for ${emailAddress}:`, errorMsg);
+
+        // Terminal setup or credential errors must NOT cause infinite Pub/Sub retries.
+        const isTerminalError =
+          errorMsg.includes('Complete setup to sync') ||
+          errorMsg.includes('No connected') ||
+          errorMsg.includes('invalid_grant') ||
+          errorMsg.includes('Token has been expired or revoked') ||
+          errorMsg.includes('User was not found');
+
+        if (isTerminalError) {
+          console.warn(`[Pub/Sub] Marking terminal failure as completed in inbox to prevent retry storm: ${errorMsg}`);
+          await supabase.rpc('complete_gmail_pubsub_message', {
+            p_subscription: subscription,
+            p_message_id: messageId,
+            p_run_id: runId,
+          });
+        } else {
+          await supabase.rpc('fail_gmail_pubsub_message', {
+            p_subscription: subscription,
+            p_message_id: messageId,
+            p_run_id: runId,
+            p_error: errorMsg,
+          });
+        }
+        // Never re-throw inside after() — re-throwing crashes the background handler and generates noisy runtime logs.
       }
     });
 

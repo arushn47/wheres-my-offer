@@ -84,8 +84,29 @@ export async function renewExpiringWatches(
 
   let renewed = 0;
   let failed = 0;
+  const sharedCollegeInbox = (process.env.SHARED_COLLEGE_EMAIL || 'arush.23bce10472@vitbhopal.ac.in').toLowerCase();
 
   for (const account of accounts) {
+    const isPersonal = account.account_type === 'personal';
+    const isDesignatedCollege = account.account_type === 'college' && account.email.toLowerCase() === sharedCollegeInbox;
+
+    if (!isPersonal && !isDesignatedCollege) {
+      // Non-designated student college accounts must NOT have active push watches
+      try {
+        const { createGmailClient } = await import('@/lib/gmail/client');
+        const { gmail } = await createGmailClient(account as any);
+        await stopGmailWatch(gmail);
+        await supabase
+          .from('gmail_accounts')
+          .update({ watch_expires_at: null })
+          .eq('id', account.id);
+        console.log(`[Watch Renewal] Stopped watch for non-designated college inbox ${account.email}`);
+      } catch (err) {
+        console.warn(`[Watch Renewal] Could not stop watch for ${account.email}:`, err);
+      }
+      continue;
+    }
+
     try {
       const { createGmailClient } = await import('@/lib/gmail/client');
       const { gmail } = await createGmailClient(account as any);

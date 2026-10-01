@@ -460,25 +460,48 @@ export async function fanOutSharedCollegeArchiveToUser(userId: string): Promise<
     circulars.push(...((data || []) as SharedCircularRow[]));
     if (!data || data.length < 1000) break;
   }
-  if (circulars.length === 0) return { examined: 0, applied: 0, skipped: 0 };
-  const { data: cachedAttachments, error: attachmentError } = await supabase
-    .from('college_attachments')
-    .select('college_email_id,attachment_id,filename,size_bytes,extracted_rows,parse_status')
-    .eq('parse_status', 'complete')
-    .not('extracted_rows', 'is', null);
-  if (attachmentError) throw attachmentError;
+  // Find which circulars match this user's eligible drives before fetching attachments
+  const candidateCircularIds = new Set<string>();
+  for (const drive of drives) {
+    const company = companyMap.get(drive.company_id);
+    if (!company) continue;
+    for (const circular of circulars) {
+      const direct = drive.source_college_email_id === circular.id;
+      const driveNumbers = (circular.parsed_drive_numbers || []).map((number: string) => normalizeDriveNumber(number));
+      const normalizedDriveNumber = normalizeDriveNumber(drive.normalized_drive_number || drive.drive_number || '');
+      const numberMatch = Boolean(normalizedDriveNumber && driveNumbers.includes(normalizedDriveNumber));
+      const companyMatch = Boolean(circular.parsed_company_name && circular.parsed_company_name.toLowerCase().trim() === company.name.toLowerCase().trim());
+      const sameCompanyDrives = (drivesResult.data || []).filter((candidate) => candidate.company_id === drive.company_id);
+      if (direct || numberMatch || (companyMatch && sameCompanyDrives.length === 1)) {
+        candidateCircularIds.add(circular.id);
+      }
+    }
+  }
+
   const attachmentsByEmail = new Map<string, ParsedAttachment[]>();
-  for (const row of cachedAttachments || []) {
-    const list = attachmentsByEmail.get(row.college_email_id) || [];
-    list.push({
-      attachmentId: row.attachment_id,
-      filename: row.filename || 'shared.xlsx',
-      mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      size: row.size_bytes || 0,
-      extractedRows: row.extracted_rows || undefined,
-      parseStatus: row.parse_status,
-    });
-    attachmentsByEmail.set(row.college_email_id, list);
+  if (candidateCircularIds.size > 0) {
+    const candidateIdsArray = Array.from(candidateCircularIds);
+    for (let from = 0; from < candidateIdsArray.length; from += 200) {
+      const { data: cachedAttachments, error: attachmentError } = await supabase
+        .from('college_attachments')
+        .select('college_email_id,attachment_id,filename,size_bytes,extracted_rows,parse_status')
+        .eq('parse_status', 'complete')
+        .not('extracted_rows', 'is', null)
+        .in('college_email_id', candidateIdsArray.slice(from, from + 200));
+      if (attachmentError) throw attachmentError;
+      for (const row of cachedAttachments || []) {
+        const list = attachmentsByEmail.get(row.college_email_id) || [];
+        list.push({
+          attachmentId: row.attachment_id,
+          filename: row.filename || 'shared.xlsx',
+          mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          size: row.size_bytes || 0,
+          extractedRows: row.extracted_rows || undefined,
+          parseStatus: row.parse_status,
+        });
+        attachmentsByEmail.set(row.college_email_id, list);
+      }
+    }
   }
 
   let examined = 0;

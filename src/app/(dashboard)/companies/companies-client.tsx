@@ -21,6 +21,7 @@ import {
   AlertCircle,
   Calendar,
 } from 'lucide-react';
+import { useSearchParams } from 'next/navigation';
 import { cn, timeAgo, formatDate, formatStipend, getDriveMode } from '@/lib/utils';
 import { StatusChip, CategoryBadge } from '@/components/ui/status-chip';
 import { DriveModeBadge } from '@/components/ui/drive-mode-badge';
@@ -379,27 +380,44 @@ export default function CompaniesClient({
   userCampus = 'VIT Bhopal',
 }: CompaniesClientProps) {
   const { isSyncing, statusUpdatesPending, statusUpdatePhase, syncProgress } = useSync();
-  // Pure local React state - NO URL search params or router updates to avoid lag, dropped keystrokes, and URL churning
-  const [filter, setFilter] = useState<string>('active');
-  const [q, setQ] = useState<string>('');
+  const searchParams = useSearchParams();
 
-  // Clean any legacy/existing query params from the browser URL on mount without triggering a page reload
-  useEffect(() => {
-    if (typeof window !== 'undefined' && window.location.search) {
-      window.history.replaceState(null, '', window.location.pathname);
+  // Pure local React state initialized from URL params
+  const [filter, setFilter] = useState<string>(searchParams?.get('filter') || 'active');
+  const [q, setQ] = useState<string>(searchParams?.get('q') || '');
+
+  const updateUrl = (newFilter: string, newQ: string) => {
+    if (typeof window !== 'undefined') {
+      const url = new URL(window.location.href);
+      if (newFilter && newFilter !== 'active') {
+        url.searchParams.set('filter', newFilter);
+      } else {
+        url.searchParams.delete('filter');
+      }
+      
+      if (newQ) {
+        url.searchParams.set('q', newQ);
+      } else {
+        url.searchParams.delete('q');
+      }
+      
+      window.history.replaceState(null, '', url.pathname + url.search);
     }
-  }, []);
+  };
 
   const handleFilterChange = (newFilter: string) => {
     setFilter(newFilter);
+    updateUrl(newFilter, q);
   };
 
   const handleSearchChange = (val: string) => {
     setQ(val);
+    updateUrl(filter, val);
   };
 
   const handleClearSearch = () => {
     setQ('');
+    updateUrl(filter, '');
   };
 
   const filteredCompanies = useMemo(() => {

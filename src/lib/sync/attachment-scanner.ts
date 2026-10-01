@@ -284,12 +284,12 @@ export async function scanSharedCollegeCandidateMatches(
     filename: string | null;
     size_bytes: number | null;
     parse_status: string;
-    extracted_rows: unknown;
+    extracted_rows?: unknown;
   }> = [];
   for (let from = 0; ; from += 1000) {
     const { data, error } = await supabase
       .from('college_attachments')
-      .select('college_email_id, filename, size_bytes, parse_status, extracted_rows')
+      .select('college_email_id, filename, size_bytes, parse_status')
       .range(from, from + 999);
     if (error) throw error;
     cachedAttachments.push(...(data || []));
@@ -320,23 +320,6 @@ export async function scanSharedCollegeCandidateMatches(
     }
   }
 
-  const parsedRowsByFile = new Map<string, unknown>();
-  for (const attachment of cachedAttachments) {
-    if (attachment.parse_status !== 'complete' || !attachment.extracted_rows) continue;
-    const key = `${(attachment.filename || '').toLowerCase().trim()}|${attachment.size_bytes || 0}`;
-    if (!parsedRowsByFile.has(key)) parsedRowsByFile.set(key, attachment.extracted_rows);
-  }
-  const resolveRosterContent = (attachment: (typeof cachedAttachments)[number]) => {
-    if (attachment.parse_status === 'complete' && attachment.extracted_rows) {
-      return { parseStatus: attachment.parse_status, extractedRows: attachment.extracted_rows };
-    }
-    const parsedTwin = parsedRowsByFile.get(
-      `${(attachment.filename || '').toLowerCase().trim()}|${attachment.size_bytes || 0}`
-    );
-    return parsedTwin
-      ? { parseStatus: 'complete', extractedRows: parsedTwin }
-      : { parseStatus: attachment.parse_status, extractedRows: attachment.extracted_rows };
-  };
   const canonicalIdsWithAttachments = new Set((cachedAttachments || []).map((attachment) => attachment.college_email_id));
   // Circulars that already produced a user-scoped event participate in verification even
   // without a stored attachment row (e.g. body-text shortlists or attachment rows lost to
@@ -481,6 +464,59 @@ export async function scanSharedCollegeCandidateMatches(
       });
     }
   }
+
+  // Phase 2: Targeted fetch of extracted_rows only for candidate circular attachments in workItems
+  const candidateEmailIds = Array.from(new Set(Array.from(workItems.values()).map(({ email }) => email.id)));
+  const parsedRowsByFile = new Map<string, unknown>();
+
+  if (candidateEmailIds.length > 0) {
+    const candidateAttachments = cachedAttachments.filter((att) => candidateEmailIds.includes(att.college_email_id));
+    const twinFilenames = candidateAttachments
+      .filter((att) => att.filename && att.parse_status !== 'complete')
+      .map((att) => att.filename as string);
+
+    let rowsQuery = supabase
+      .from('college_attachments')
+      .select('college_email_id, filename, size_bytes, parse_status, extracted_rows')
+      .eq('parse_status', 'complete')
+      .not('extracted_rows', 'is', null);
+
+    if (twinFilenames.length > 0) {
+      rowsQuery = rowsQuery.or(`college_email_id.in.(${candidateEmailIds.join(',')}),filename.in.(${twinFilenames.map((f) => `"${f}"`).join(',')})`);
+    } else {
+      rowsQuery = rowsQuery.in('college_email_id', candidateEmailIds);
+    }
+
+    const { data: rowsData, error: rowsError } = await rowsQuery;
+    if (rowsError) throw rowsError;
+
+    const rowsByEmailAndFile = new Map<string, unknown>();
+    for (const row of rowsData || []) {
+      const emailFileKey = `${row.college_email_id}|${(row.filename || '').toLowerCase().trim()}`;
+      rowsByEmailAndFile.set(emailFileKey, row.extracted_rows);
+      const twinKey = `${(row.filename || '').toLowerCase().trim()}|${row.size_bytes || 0}`;
+      if (!parsedRowsByFile.has(twinKey)) parsedRowsByFile.set(twinKey, row.extracted_rows);
+    }
+
+    for (const att of cachedAttachments) {
+      const emailFileKey = `${att.college_email_id}|${(att.filename || '').toLowerCase().trim()}`;
+      if (rowsByEmailAndFile.has(emailFileKey)) {
+        att.extracted_rows = rowsByEmailAndFile.get(emailFileKey);
+      }
+    }
+  }
+
+  const resolveRosterContent = (attachment: (typeof cachedAttachments)[number]) => {
+    if (attachment.parse_status === 'complete' && attachment.extracted_rows) {
+      return { parseStatus: attachment.parse_status, extractedRows: attachment.extracted_rows };
+    }
+    const parsedTwin = parsedRowsByFile.get(
+      `${(attachment.filename || '').toLowerCase().trim()}|${attachment.size_bytes || 0}`
+    );
+    return parsedTwin
+      ? { parseStatus: 'complete', extractedRows: parsedTwin }
+      : { parseStatus: attachment.parse_status, extractedRows: attachment.extracted_rows };
+  };
 
   let matchesCreated = 0;
   for (const { driveId, email } of workItems.values()) {

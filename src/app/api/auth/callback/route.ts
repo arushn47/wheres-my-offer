@@ -214,10 +214,14 @@ export async function GET(request: Request) {
     if (gmailError) {
       console.error('Failed to store Gmail account:', gmailError);
     } else if (process.env.GOOGLE_PUBSUB_TOPIC) {
-      // Automatically register mailbox with Google Cloud Pub/Sub for push notifications
-      const { setupGmailWatch } = await import('@/lib/gmail/watch');
-      const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
-      const watchResult = await setupGmailWatch(gmail, process.env.GOOGLE_PUBSUB_TOPIC);
+      const sharedCollegeInbox = (process.env.SHARED_COLLEGE_EMAIL || 'arush.23bce10472@vitbhopal.ac.in').toLowerCase();
+      const shouldWatch = accountType === 'personal' || (userInfo.email && userInfo.email.toLowerCase() === sharedCollegeInbox);
+
+      if (shouldWatch) {
+        // Automatically register mailbox with Google Cloud Pub/Sub for push notifications
+        const { setupGmailWatch } = await import('@/lib/gmail/watch');
+        const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+        const watchResult = await setupGmailWatch(gmail, process.env.GOOGLE_PUBSUB_TOPIC);
       if (watchResult) {
         // expiration is a Unix timestamp in milliseconds returned as a string by Gmail API
         const watchExpiresAt = new Date(Number(watchResult.expiration)).toISOString();
@@ -243,6 +247,7 @@ export async function GET(request: Request) {
         console.log(`[Pub/Sub] Registered Gmail watch for ${userInfo.email} at historyId ${watchResult.historyId}, expires ${watchExpiresAt}`);
       }
     }
+  }
 
     // 3. Create or refresh the session JWT
     if (!existingUserId) {
