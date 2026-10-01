@@ -79,75 +79,80 @@ export async function POST(req: NextRequest) {
 
             let totalUpdated = 0;
 
-            for (let i = 0; i < usersToProcess.length; i++) {
-              const u = usersToProcess[i];
-              const displayName = u.name || u.email.split('@')[0];
+            const CONCURRENCY = 5;
+            for (let i = 0; i < usersToProcess.length; i += CONCURRENCY) {
+              const chunk = usersToProcess.slice(i, i + CONCURRENCY);
+              
+              await Promise.all(chunk.map(async (u, chunkIdx) => {
+                const globalIndex = i + chunkIdx;
+                const displayName = u.name || u.email.split('@')[0];
 
-              sendEvent('user_start', {
-                userIndex: i + 1,
-                totalUsers: usersToProcess.length,
-                userId: u.id,
-                userName: displayName,
-                userEmail: u.email,
-                message: `Reprocessing ${displayName} (${i + 1} of ${usersToProcess.length})…`,
-              });
-
-              try {
-                const result = await performReprocess(u.id, (p) => {
-                  sendEvent('stage', {
-                    userIndex: i + 1,
-                    totalUsers: usersToProcess.length,
-                    userId: u.id,
-                    userName: displayName,
-                    step: p.step,
-                    totalSteps: p.totalSteps,
-                    message: p.message,
-                  });
-                });
-
-                const appsUpdated = result?.updatedApplications ?? 0;
-                totalUpdated += appsUpdated;
-                summary.push({
-                  userId: u.id,
-                  email: u.email,
-                  userName: displayName,
-                  updatedApplications: appsUpdated,
-                  neoPatDrivesCount: result?.neoPatDrivesCount ?? 0,
-                  collegeCircularsLinked: result?.collegeCircularsLinked ?? 0,
-                });
-
-                sendEvent('user_complete', {
-                  userIndex: i + 1,
+                sendEvent('user_start', {
+                  userIndex: globalIndex + 1,
                   totalUsers: usersToProcess.length,
                   userId: u.id,
                   userName: displayName,
                   userEmail: u.email,
-                  updatedApplications: appsUpdated,
-                  neoPatDrivesCount: result?.neoPatDrivesCount ?? 0,
-                  collegeCircularsLinked: result?.collegeCircularsLinked ?? 0,
-                  message: `${displayName}: updated ${appsUpdated} applications (${result?.neoPatDrivesCount ?? 0} drives).`,
-                });
-              } catch (err: any) {
-                console.error(`[Admin Reprocess All Stream] Error for ${u.email}:`, err);
-                summary.push({
-                  userId: u.id,
-                  email: u.email,
-                  userName: displayName,
-                  updatedApplications: 0,
-                  neoPatDrivesCount: 0,
-                  collegeCircularsLinked: 0,
-                  error: err.message,
+                  message: `Reprocessing ${displayName} (${globalIndex + 1} of ${usersToProcess.length})…`,
                 });
 
-                sendEvent('user_error', {
-                  userIndex: i + 1,
-                  totalUsers: usersToProcess.length,
-                  userId: u.id,
-                  userName: displayName,
-                  error: err.message,
-                  message: `Error reprocessing ${displayName}: ${err.message}`,
-                });
-              }
+                try {
+                  const result = await performReprocess(u.id, (p) => {
+                    sendEvent('stage', {
+                      userIndex: globalIndex + 1,
+                      totalUsers: usersToProcess.length,
+                      userId: u.id,
+                      userName: displayName,
+                      step: p.step,
+                      totalSteps: p.totalSteps,
+                      message: p.message,
+                    });
+                  });
+
+                  const appsUpdated = result?.updatedApplications ?? 0;
+                  totalUpdated += appsUpdated;
+                  summary.push({
+                    userId: u.id,
+                    email: u.email,
+                    userName: displayName,
+                    updatedApplications: appsUpdated,
+                    neoPatDrivesCount: result?.neoPatDrivesCount ?? 0,
+                    collegeCircularsLinked: result?.collegeCircularsLinked ?? 0,
+                  });
+
+                  sendEvent('user_complete', {
+                    userIndex: globalIndex + 1,
+                    totalUsers: usersToProcess.length,
+                    userId: u.id,
+                    userName: displayName,
+                    userEmail: u.email,
+                    updatedApplications: appsUpdated,
+                    neoPatDrivesCount: result?.neoPatDrivesCount ?? 0,
+                    collegeCircularsLinked: result?.collegeCircularsLinked ?? 0,
+                    message: `${displayName}: updated ${appsUpdated} applications (${result?.neoPatDrivesCount ?? 0} drives).`,
+                  });
+                } catch (err: any) {
+                  console.error(`[Admin Reprocess All Stream] Error for ${u.email}:`, err);
+                  summary.push({
+                    userId: u.id,
+                    email: u.email,
+                    userName: displayName,
+                    updatedApplications: 0,
+                    neoPatDrivesCount: 0,
+                    collegeCircularsLinked: 0,
+                    error: err.message,
+                  });
+
+                  sendEvent('user_error', {
+                    userIndex: globalIndex + 1,
+                    totalUsers: usersToProcess.length,
+                    userId: u.id,
+                    userName: displayName,
+                    error: err.message,
+                    message: `Error reprocessing ${displayName}: ${err.message}`,
+                  });
+                }
+              }));
             }
 
             sendEvent('complete', {
@@ -195,29 +200,32 @@ export async function POST(req: NextRequest) {
 
     let totalUpdated = 0;
 
-    for (const u of usersToProcess) {
-      try {
-        const result = await performReprocess(u.id);
-        const appsUpdated = result?.updatedApplications ?? 0;
-        totalUpdated += appsUpdated;
-        summary.push({
-          userId: u.id,
-          email: u.email,
-          updatedApplications: appsUpdated,
-          neoPatDrivesCount: result?.neoPatDrivesCount ?? 0,
-          collegeCircularsLinked: result?.collegeCircularsLinked ?? 0,
-        });
-      } catch (err: any) {
-        console.error(`[Admin Reprocess All] Error for user ${u.email}:`, err);
-        summary.push({
-          userId: u.id,
-          email: u.email,
-          updatedApplications: 0,
-          neoPatDrivesCount: 0,
-          collegeCircularsLinked: 0,
-          error: err.message,
-        });
-      }
+    for (let i = 0; i < usersToProcess.length; i += 5) {
+      const chunk = usersToProcess.slice(i, i + 5);
+      await Promise.all(chunk.map(async (u) => {
+        try {
+          const result = await performReprocess(u.id);
+          const appsUpdated = result?.updatedApplications ?? 0;
+          totalUpdated += appsUpdated;
+          summary.push({
+            userId: u.id,
+            email: u.email,
+            updatedApplications: appsUpdated,
+            neoPatDrivesCount: result?.neoPatDrivesCount ?? 0,
+            collegeCircularsLinked: result?.collegeCircularsLinked ?? 0,
+          });
+        } catch (err: any) {
+          console.error(`[Admin Reprocess All] Error for user ${u.email}:`, err);
+          summary.push({
+            userId: u.id,
+            email: u.email,
+            updatedApplications: 0,
+            neoPatDrivesCount: 0,
+            collegeCircularsLinked: 0,
+            error: err.message,
+          });
+        }
+      }));
     }
 
     return NextResponse.json({
