@@ -135,6 +135,17 @@ export function isPlacementOfficeMessageAllowed(input: RelevanceInput): {
     return { isAllowed: true, category: 'shortlist', reason: 'shortlist roster / student IDs / spreadsheet detected' };
   }
 
+  // 3b. Inline shortlist announcement — "Shortlist is as follows.\n\nInfosys"
+  // The placement office sometimes pastes just the company name inline with no spreadsheet/IDs.
+  // Require: explicit "shortlist is as follows" phrasing + an identifiable company name.
+  const hasInlineShortlistAnnouncement =
+    /shortlist\s+(?:is\s+as\s+follows|for\s+(?:next|the)\s+round|below|above|attached|released|published|out|confirmed)/i.test(fullText) ||
+    /(?:following|below)\s+(?:is\s+)?(?:the\s+)?shortlist/i.test(fullText);
+  const hasCompanyMention = COMPANY_HINT.test(fullText);
+  if (hasShortlistText && hasInlineShortlistAnnouncement && hasCompanyMention) {
+    return { isAllowed: true, category: 'shortlist', reason: 'inline shortlist announcement with company mention detected' };
+  }
+
   // 4. Category B: Test Schedule
   const hasTestSchedule = TEST_SCHEDULE_PATTERNS.some((p) => p.test(fullText));
   const hasScheduleDetails = SCHEDULE_TIMING_PATTERN.test(fullText);
@@ -146,6 +157,19 @@ export function isPlacementOfficeMessageAllowed(input: RelevanceInput): {
   const hasInterviewSchedule = INTERVIEW_SCHEDULE_PATTERNS.some((p) => p.test(fullText));
   if (hasInterviewSchedule && (hasScheduleDetails || hasGoogleSheetRoster || hasRegNumbers)) {
     return { isAllowed: true, category: 'interview_schedule', reason: 'interview schedule / slot detected' };
+  }
+
+  // 6. Category D: Next-round / round-confirmation announcements.
+  // e.g. "The next round will happen soon. Maybe on Saturday or Sunday."
+  // e.g. "The next round is expected from 28th September onwards. Compulsory for all shortlisted students."
+  // These don't use test/interview vocabulary but ARE placement-critical for shortlisted students.
+  const hasNextRoundAnnouncement =
+    /\b(?:next\s+round|upcoming\s+round|further\s+round|subsequent\s+round)\b/i.test(fullText) &&
+    /\b(?:shortlisted|selected|cleared|qualified|compulsory\s+for\s+(?:all\s+)?shortlisted|all\s+shortlisted)\b/i.test(fullText);
+  const hasRoundDateHint = SCHEDULE_TIMING_PATTERN.test(fullText) ||
+    /\b(?:saturday|sunday|monday|tuesday|wednesday|thursday|friday|tomorrow|today|this\s+week|next\s+week|\d{1,2}(?:st|nd|rd|th)?\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)|from\s+\d{1,2}(?:th|st|nd|rd)?\s+(?:sept?|oct|nov|dec|jan|feb|mar|apr|may|jun|jul|aug))/i.test(fullText);
+  if (hasNextRoundAnnouncement && (hasRoundDateHint || hasCompanyMention)) {
+    return { isAllowed: true, category: 'shortlist', reason: 'next-round confirmation for shortlisted students detected' };
   }
 
   return {

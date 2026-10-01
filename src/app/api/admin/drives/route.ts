@@ -21,7 +21,7 @@ export async function GET() {
     // 1. Fetch all placement_drives across all users. Aliases come from
     // drive_resolutions (drive-scoped) — companies.aliases is shared by sibling
     // drives and would wrongly show/edit across drive groups.
-    const [drivesRes, companiesRes, emailsRes, appsRes, resolutionsRes] = await Promise.all([
+    const [drivesRes, companiesRes, emailsRes, appsRes, resolutionsRes, collegeEmailsRes] = await Promise.all([
       supabase
         .from('placement_drives')
         .select('id, company_id, drive_number, normalized_drive_number, drive_name, role, category, ctc, stipend, location, updated_at')
@@ -37,8 +37,12 @@ export async function GET() {
         .select('id, placement_drive_id, status'),
       supabase
         .from('drive_resolutions')
-        .select('drive_number, company_base_name, resolved_via'),
+        .select('drive_number, company_base_name, resolved_via, notes'),
+      supabase
+        .from('college_emails')
+        .select('id, placement_drive_id, received_at'),
     ]);
+
 
     if (drivesRes.error) {
       console.error('[Admin Drives API] Error querying drives:', drivesRes.error);
@@ -48,20 +52,40 @@ export async function GET() {
     const drives = drivesRes.data || [];
     const companies = companiesRes.data || [];
     const emails = emailsRes.data || [];
+    const collegeEmails = collegeEmailsRes.data || [];
     const apps = appsRes.data || [];
 
-    // Drive-scoped aliases: drive_number(lowercased) -> alias terms (manual only)
+
+    // Drive-scoped aliases from drive_resolutions (manual_review rows).
+    // New saves encode aliases as JSON in notes: "Configured from Admin Panel\naliases_json:[...]"
+    // Legacy rows only have company_base_name. Both are read here.
     const driveAliasesMap = new Map<string, string[]>();
     for (const res of resolutionsRes.data || []) {
       if (res.resolved_via !== 'manual_review') continue;
-      const num = (res.drive_number || '').toLowerCase().trim();
-      if (!num || !res.company_base_name) continue;
-      const list = driveAliasesMap.get(num) || [];
-      if (!list.includes(res.company_base_name)) list.push(res.company_base_name);
-      driveAliasesMap.set(num, list);
+      const rawNum = (res.drive_number || '').trim();
+      if (!rawNum) continue;
+      const num = (normalizeDriveNumber(rawNum) || rawNum).toLowerCase();
+
+      // Try aliases_json from notes first (new format)
+      let aliases: string[] = [];
+      const notesLine = (res.notes || '').split('\n').find((l: string) => l.trim().startsWith('aliases_json:'));
+      if (notesLine) {
+        try {
+          const parsed = JSON.parse(notesLine.trim().slice('aliases_json:'.length));
+          if (Array.isArray(parsed)) aliases = parsed.filter((s: unknown) => typeof s === 'string' && (s as string).trim().length > 0);
+        } catch { /* Malformed JSON — fall through */ }
+      }
+
+      // Legacy fallback: company_base_name when no aliases_json present
+      if (aliases.length === 0 && res.company_base_name) {
+        aliases = [res.company_base_name];
+      }
+
+      if (aliases.length > 0) driveAliasesMap.set(num, aliases);
     }
 
-    // Map companyId to Company Name and Aliases
+
+    // Map companyId to Company Name and Aliases (the primary alias store)
     const companyMap = new Map<string, string>();
     const companyAliasesMap = new Map<string, string[]>();
     for (const c of companies) {
@@ -73,7 +97,9 @@ export async function GET() {
 
     // Map placementDriveId to emails count and latest email date
     const emailsPerDrive = new Map<string, { count: number; latestDate: string | null }>();
-    for (const e of emails) {
+    const allEmailsForCounting = [...emails, ...collegeEmails];
+    
+    for (const e of allEmailsForCounting) {
       if (e.placement_drive_id) {
         const current = emailsPerDrive.get(e.placement_drive_id) || { count: 0, latestDate: null };
         const newLatest = !current.latestDate || (e.received_at && e.received_at > current.latestDate)
@@ -85,6 +111,7 @@ export async function GET() {
         });
       }
     }
+
 
     // Map placementDriveId to apps count
     const appsPerDrive = new Map<string, number>();
@@ -125,7 +152,8 @@ export async function GET() {
       const existing = groupMap.get(key);
       // Prefer drive-scoped aliases; fall back to company aliases only when the
       // drive has none of its own AND no sibling drive has customized theirs.
-      const driveScopeKey = (d.drive_number || d.normalized_drive_number || '').toLowerCase().trim();
+      const driveScopeKey = normalizeDriveNumber(d.drive_number || d.normalized_drive_number || '') ||
+        (d.drive_number || d.normalized_drive_number || '').toLowerCase().trim();
       const companyAliases = driveScopeKey && driveAliasesMap.has(driveScopeKey)
         ? driveAliasesMap.get(driveScopeKey)!
         : (d.company_id ? companyAliasesMap.get(d.company_id) || [] : []);

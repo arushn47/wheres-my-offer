@@ -60,6 +60,12 @@ export function classifyExcelFile(filename: string): 'shortlist' | 'applied_list
  * @param userNeoId User's configured Neo ID (e.g. alphanumeric candidate registration ID)
  * @param userEmail User's email (e.g. student email address)
  */
+import {
+  buildCandidateIdentity,
+  matchesCandidateRow,
+  type UserCandidateIdentity,
+} from '@/lib/sync/user-identity';
+
 export async function scanExcelAttachmentsForNeoId(
   gmail: gmail_v1.Gmail,
   messageId: string,
@@ -71,7 +77,8 @@ export async function scanExcelAttachmentsForNeoId(
    * "Test is Scheduled"). In this context, even Excel files without "shortlist" in their filename
    * should be treated as actual shortlists — CDC doesn't always name files consistently.
    */
-  isShortlistContext: boolean = false
+  isShortlistContext: boolean = false,
+  candidateIdentity?: UserCandidateIdentity
 ): Promise<ExcelMatchResult | null> {
   const excelAttachments = attachments.filter((att) =>
     /\.(xlsx|xls|csv)$/i.test(att.filename)
@@ -81,23 +88,12 @@ export async function scanExcelAttachmentsForNeoId(
     return null;
   }
 
-  // Identifiers to search for
-  const searchTokens: string[] = [];
-  if (userNeoId && userNeoId.length >= 4) {
-    searchTokens.push(userNeoId.toUpperCase().trim());
-  }
+  const identity = candidateIdentity || buildCandidateIdentity({
+    neoId: userNeoId,
+    emails: [userEmail],
+  });
 
-  // Extract reg number from email (e.g. "23BCE10472")
-  const regMatch = userEmail.match(/([0-9]{2}[a-z]{3}[0-9]{4,5})/i);
-  if (regMatch && regMatch[1]) {
-    searchTokens.push(regMatch[1].toUpperCase().trim());
-  }
-
-  // Include user email address
-  if (userEmail && userEmail.includes('@')) {
-    searchTokens.push(userEmail.toLowerCase().trim());
-    searchTokens.push(userEmail.toUpperCase().trim());
-  }
+  const searchTokens = identity.searchTokens;
 
   if (searchTokens.length === 0) {
     return null;
@@ -221,14 +217,15 @@ export async function scanSharedCollegeAttachmentsForNeoId(
   collegeEmailId: string,
   userNeoId: string | null,
   userEmail: string,
-  isShortlistContext = false
+  isShortlistContext = false,
+  candidateIdentity?: UserCandidateIdentity
 ): Promise<ExcelMatchResult | null> {
-  const searchTokens = [
-    ...(userNeoId && userNeoId.length >= 4 ? [userNeoId.toUpperCase().trim()] : []),
-  ];
-  const regMatch = userEmail.match(/([0-9]{2}[a-z]{3}[0-9]{4,5})/i);
-  if (regMatch?.[1]) searchTokens.push(regMatch[1].toUpperCase().trim());
-  if (userEmail.includes('@')) searchTokens.push(userEmail.toLowerCase().trim(), userEmail.toUpperCase().trim());
+  const identity = candidateIdentity || buildCandidateIdentity({
+    neoId: userNeoId,
+    emails: [userEmail],
+  });
+
+  const searchTokens = identity.searchTokens;
   if (searchTokens.length === 0) return null;
 
   const { data: attachmentRows, error } = await supabase
@@ -278,6 +275,32 @@ export async function scanSharedCollegeAttachmentsForNeoId(
       };
       if (isActualShortlist) return result;
       if (!appliedListMatch) appliedListMatch = result;
+    }
+
+    if (!appliedListMatch) {
+      for (const sheet of sheets) {
+        for (let rowIndex = 0; rowIndex < sheet.rows.length; rowIndex++) {
+          const row = sheet.rows[rowIndex];
+          if (!Array.isArray(row)) continue;
+          const rowMatch = matchesCandidateRow(row as (string | null | undefined)[], identity);
+          if (rowMatch.matched) {
+            const fileType = classifyExcelFile(attachment.filename || '');
+            const isActualShortlist = fileType === 'shortlist' || (isShortlistContext && fileType !== 'applied_list');
+            const result: ExcelMatchResult = {
+              matched: true,
+              scanStatus: 'matched',
+              filename: attachment.filename || 'shortlist.xlsx',
+              matchedNeoId: rowMatch.matchedValue,
+              details: `Matched in ${attachment.filename} (${sheet.sheetName}!row ${rowIndex + 1})`,
+              venueOrRoom: null,
+              isActualShortlist,
+            };
+            if (isActualShortlist) return result;
+            if (!appliedListMatch) appliedListMatch = result;
+            break;
+          }
+        }
+      }
     }
   }
 

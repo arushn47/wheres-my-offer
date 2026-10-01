@@ -13,6 +13,9 @@ import {
   getEffectiveStage,
   deriveStagesFromEvents,
 } from '@/lib/stages';
+import { parseAnnouncedProcessToken } from '@/lib/sync/round-identity';
+
+
 
 export interface StageStepperProps {
   status: string;
@@ -24,6 +27,86 @@ export interface StageStepperProps {
   compact?: boolean;
   className?: string;
 }
+
+export function getPipelineStages({
+  effective,
+  currentStage,
+  furthestPassed,
+  eliminatedStage,
+  allEvents = [],
+  notes,
+}: {
+  effective: ReturnType<typeof getEffectiveStage>;
+  currentStage: number;
+  furthestPassed: number;
+  eliminatedStage: number;
+  allEvents?: EventLike[];
+  notes?: string | null;
+}): Array<{ id: string; label: string; shortLabel: string }> {
+
+  // ── Announced process pipeline (high-confidence structured rounds from circular) ──
+  // When a circular explicitly lists the recruitment schedule (e.g. Axxela:
+  // "Test 1 (Online)" -> "Test 2 (in campus)" -> "Game Round" -> "Interview"),
+  // we render those exact rounds so candidates see the actual process they're going
+  // through instead of the generic template.
+  const announcedRounds = parseAnnouncedProcessToken(notes);
+  if (announcedRounds && announcedRounds.length >= 2) {
+    const pipeline: Array<{ id: string; label: string; shortLabel: string }> = [
+      { id: 'applied', label: 'Applied', shortLabel: 'Applied' },
+    ];
+    for (const r of announcedRounds) {
+      pipeline.push({ id: r.id, label: r.label, shortLabel: r.shortLabel });
+    }
+    pipeline.push({ id: 'offer', label: 'Selected / Offer', shortLabel: 'Offer' });
+    return pipeline;
+  }
+
+  // ── Standard pipeline (fallback when no announced process is detected) ────────
+  // Applied -> PPT -> Test -> Interview -> Offer
+  //
+  // User Requirement:
+  // "if test round is done without ppt then remove ppt not remove further rounds, keep a basic ui atleast"
+  //
+  // 1. Keep the standard basic recruitment UI intact — do NOT remove upcoming future rounds.
+  // 2. If the recruitment process has reached Test or beyond WITHOUT ever having a PPT event,
+  //    we omit the PPT circle from the pipeline.
+  // 3. Otherwise (e.g. at Applied stage, or when PPT did occur/is scheduled), PPT is included.
+  const hasPptEvent = Boolean(
+    effective.hasPpt ||
+    effective.isPptCompleted ||
+    currentStage === 1 ||
+    eliminatedStage === 1 ||
+    allEvents.some((e) => /ppt|pre[\s-]*placement/i.test(e.event_type || e.eventType || ''))
+  );
+
+  const hasReachedTestOrBeyond = Boolean(
+    currentStage >= 2 ||
+    furthestPassed >= 2 ||
+    eliminatedStage >= 2 ||
+    effective.hasTest ||
+    effective.hasInterview ||
+    effective.isTestCompleted ||
+    effective.isInterviewCompleted
+  );
+
+  const includePpt = hasReachedTestOrBeyond ? hasPptEvent : true;
+
+  const stageList: Array<{ id: string; label: string; shortLabel: string }> = [
+    { id: 'applied', label: 'Applied', shortLabel: 'Applied' },
+  ];
+
+  if (includePpt) {
+    stageList.push({ id: 'ppt', label: 'PPT Scheduled', shortLabel: 'PPT' });
+  }
+
+  // Always keep future rounds so candidates see their recruitment roadmap
+  stageList.push({ id: 'test', label: 'Shortlisted for Test', shortLabel: 'Test' });
+  stageList.push({ id: 'interview', label: 'Shortlisted for Interview', shortLabel: 'Interview' });
+  stageList.push({ id: 'offer', label: 'Selected / Offer', shortLabel: 'Offer' });
+
+  return stageList;
+}
+
 
 export function StageStepper({
   status,
@@ -44,50 +127,115 @@ export function StageStepper({
   const isRegistrationOpen = (effective.effectiveStatus === 'registration_open');
   const isNotApplied = (effective.effectiveStatus === 'not_applied');
 
-  // ── Derive dynamic stage list from events (multi-round / non-standard pipelines) ──
-  // Only derive when we have real event data. Falls back to static STAGES if empty.
-  // NOTE: Dynamic stages are display-only — they never feed back into status logic.
   const allEvents: EventLike[] = [
     ...(latestEvent ? [latestEvent] : []),
     ...(events || []),
   ];
-  const derivedStages = (allEvents.length > 0 && !isWithdrawn && !isRegistrationOpen && !isNotApplied)
-    ? deriveStagesFromEvents(allEvents)
-    : undefined;
 
-  // Use derived stages when the pipeline is genuinely non-standard:
-  //   • Drive has a Group Discussion event (GD sits between Test and Interview in some companies)
-  //   • Any event has round_number >= 2 (multi-round test or multi-round interview)
-  //   • Otherwise fall back to the standard 5-stage static display
-  const hasGdEvent = allEvents.some((e) =>
-    /group_discussion/i.test(e.event_type || e.eventType || '')
-  );
-  const hasMultiRound = allEvents.some((e) => (e.round_number ?? 1) >= 2);
-  const hasDynamicPipeline = derivedStages != null && (hasGdEvent || hasMultiRound);
-  const stageList: (typeof STAGES[0] | DerivedStage)[] = hasDynamicPipeline ? derivedStages! : STAGES;
+  const stageList = getPipelineStages({
+    effective,
+    currentStage,
+    furthestPassed,
+    eliminatedStage,
+    allEvents,
+    notes,
+  });
 
-  // ── Compute eliminatedStageIndex for dynamic pipeline ──────────────────────
-  // For dynamic pipelines, find which stage index the candidate was eliminated at
-  // by matching effective.eliminatedStageId against derived stage IDs.
-  const eliminatedStageId = effective.eliminatedStageId;
-  let dynamicEliminatedIdx = -1;
-  if (hasDynamicPipeline && eliminatedStage !== -1 && eliminatedStageId) {
-    const idx = stageList.findIndex((s) => s.id === eliminatedStageId);
-    dynamicEliminatedIdx = idx >= 0 ? idx : eliminatedStage;
-  } else if (hasDynamicPipeline && eliminatedStage !== -1) {
-    // Fallback: map legacy eliminatedStage index proportionally
-    dynamicEliminatedIdx = Math.min(eliminatedStage, stageList.length - 1);
+  // Pre-parse announced rounds once for use in both mapIndexToStageId and
+  // getEliminatedStageId so we don't call parseAnnouncedProcessToken repeatedly.
+  const announcedRoundsForMap = parseAnnouncedProcessToken(notes);
+  const isAnnouncedPipeline = announcedRoundsForMap && announcedRoundsForMap.length >= 2;
+
+  // ── Map static 5-stage indices to our dynamic pipeline ──────────────────────
+  // When an announced process is active (stageList built from round tokens),
+  // we map semantic type indices to the first announced round of that type.
+  // Fallback: standard 5-stage index mapping.
+  const mapIndexToStageId = (idx: number): string => {
+    if (idx === 0) return 'applied';
+    if (idx === 4) return 'offer';
+    if (isAnnouncedPipeline && announcedRoundsForMap) {
+      // idx 1 → PPT or first test, idx 2 → test, idx 3 → interview
+      // Map by finding the first announced round of the matching semantic type
+      if (idx === 1) {
+        const firstPpt = announcedRoundsForMap.find(r => r.roundType === 'ppt');
+        if (firstPpt) return firstPpt.id;
+        const firstTest = announcedRoundsForMap.find(r => r.roundType === 'test');
+        if (firstTest) return firstTest.id;
+      }
+      if (idx === 2) {
+        const firstTest = announcedRoundsForMap.find(r => r.roundType === 'test');
+        if (firstTest) return firstTest.id;
+      }
+      if (idx === 3) {
+        const firstInterview = announcedRoundsForMap.find(r => r.roundType === 'interview');
+        if (firstInterview) return firstInterview.id;
+      }
+    }
+    // Standard mapping
+    if (idx === 1) return 'ppt';
+    if (idx === 2) return 'test';
+    if (idx === 3) return 'interview';
+    return 'applied';
+  };
+
+  const activeStageId = mapIndexToStageId(currentStage);
+  const furthestPassedStageId = furthestPassed !== -1 ? mapIndexToStageId(furthestPassed) : null;
+
+  const eliminatedStageId = (() => {
+    if (eliminatedStage === -1) return null;
+    // Announced pipeline: resolve by round type
+    if (isAnnouncedPipeline && announcedRoundsForMap) {
+      if (effective.eliminatedStageId) {
+        // Try to find exact match in announced rounds
+        const exactMatch = announcedRoundsForMap.find(r => r.id === effective.eliminatedStageId);
+        if (exactMatch) return exactMatch.id;
+        // Fall back to type-based match
+        if (effective.eliminatedStageId.startsWith('interview')) {
+          const r = announcedRoundsForMap.find(r => r.roundType === 'interview');
+          if (r) return r.id;
+        }
+        if (effective.eliminatedStageId.startsWith('test')) {
+          const r = announcedRoundsForMap.find(r => r.roundType === 'test');
+          if (r) return r.id;
+        }
+      }
+      if (effective.effectiveStatus === 'rejected_interview') {
+        const r = announcedRoundsForMap.find(r => r.roundType === 'interview');
+        if (r) return r.id;
+      }
+      if (effective.effectiveStatus === 'rejected_test' || effective.effectiveStatus === 'not_shortlisted') {
+        const r = announcedRoundsForMap.find(r => r.roundType === 'test');
+        if (r) return r.id;
+      }
+    }
+    // Standard pipeline elimination mapping
+    if (effective.eliminatedStageId) {
+      if (effective.eliminatedStageId.startsWith('interview')) return 'interview';
+      if (effective.eliminatedStageId.startsWith('test')) return 'test';
+      if (effective.eliminatedStageId.startsWith('ppt')) return 'ppt';
+      if (effective.eliminatedStageId.startsWith('applied')) return 'applied';
+    }
+    if (effective.effectiveStatus === 'rejected_interview') return 'interview';
+    if (effective.effectiveStatus === 'rejected_test' || effective.effectiveStatus === 'not_shortlisted') return 'test';
+    if (eliminatedStage === 0) return 'applied';
+    if (eliminatedStage === 1) return 'ppt';
+    if (eliminatedStage === 2 || eliminatedStage === 3) return 'test';
+    if (eliminatedStage === 4) return 'interview';
+    return mapIndexToStageId(eliminatedStage);
+  })();
+
+  let activeCurrentStage = stageList.findIndex(s => s.id === activeStageId);
+  if (activeCurrentStage === -1) activeCurrentStage = 0;
+
+  let activeFurthestPassed = -1;
+  if (furthestPassedStageId) {
+    activeFurthestPassed = stageList.findIndex(s => s.id === furthestPassedStageId);
   }
-  const activeEliminatedStage = hasDynamicPipeline ? dynamicEliminatedIdx : eliminatedStage;
 
-  // For dynamic pipelines, current stage index needs to be mapped too.
-  // Use the eliminatedStageId if known, else proportional mapping.
-  const activeFurthestPassed = hasDynamicPipeline
-    ? Math.min(furthestPassed, stageList.length - 1)
-    : furthestPassed;
-  const activeCurrentStage = hasDynamicPipeline
-    ? Math.min(currentStage, stageList.length - 1)
-    : currentStage;
+  let activeEliminatedStage = -1;
+  if (eliminatedStageId) {
+    activeEliminatedStage = stageList.findIndex(s => s.id === eliminatedStageId);
+  }
 
   // Dedicated UI Banner for Registration Open
   if (isRegistrationOpen) {
@@ -255,35 +403,75 @@ export function StageStepper({
         const isCompleted = !isEliminated && i <= activeFurthestPassed;
 
         // ── Display label for this stage ───────────────────────────────────────
-        // For dynamic pipelines: use stage.label / stage.shortLabel directly (already set from events).
-        // For static pipeline: apply legacy override labels for eliminated stages.
         let displayLabel = compact ? s.shortLabel : s.label;
-        if (!hasDynamicPipeline && !isEliminated) {
-          if (i === 1 && effective.isPptCompleted) {
-            displayLabel = compact ? 'PPT Done' : 'PPT Completed';
+        
+        // Append explicit round/test numbers if there are multiple events of this type
+        // to address user feedback: "if there are 2 tests or interviews dont need to show two diff circles but you could mention the test no"
+        if (s.id === 'test' && effective.hasTest) {
+          const testCount = allEvents.filter(e => /online_test|coding_test|assessment/i.test(e.event_type || e.eventType || '')).length;
+          if (testCount > 1) {
+            displayLabel = compact ? `Test (${testCount})` : `Test (Round ${testCount})`;
           }
-        } else if (!hasDynamicPipeline && isEliminated) {
-          if (i === 0) {
+        }
+        if (s.id === 'interview' && effective.hasInterview) {
+          const intCount = allEvents.filter(e => /interview/i.test(e.event_type || e.eventType || '')).length;
+          if (intCount > 1) {
+            displayLabel = compact ? `Interview (${intCount})` : `Interview (Round ${intCount})`;
+          }
+        }
+
+        // Locate this stage in the announced rounds list if applicable
+        const announcedRound = isAnnouncedPipeline
+          ? announcedRoundsForMap!.find(r => r.id === s.id)
+          : null;
+
+        if (!isEliminated) {
+          if (announcedRound) {
+            const isRoundCompleted = isHistoricalPassed || (isCurrent && (
+              (announcedRound.roundType === 'test' && (effective.isTestCompleted || status === 'test_completed')) ||
+              (announcedRound.roundType === 'interview' && (effective.isInterviewCompleted || status === 'interview_completed')) ||
+              (announcedRound.roundType === 'ppt' && (effective.isPptCompleted || status === 'ppt_completed')) ||
+              isCompleted
+            ));
+
+            if (isRoundCompleted) {
+              displayLabel = compact ? `${announcedRound.shortLabel} Done` : `${announcedRound.shortLabel} Completed`;
+            } else if (isCurrent) {
+              // Keep the announced round's own label as active label
+              displayLabel = compact ? announcedRound.shortLabel : announcedRound.label;
+            }
+          } else {
+            // Standard pipeline completed state labels
+            if (s.id === 'ppt' && effective.isPptCompleted) {
+              displayLabel = compact ? 'PPT Done' : 'PPT Completed';
+            } else if (s.id === 'test' && (effective.isTestCompleted || status === 'test_completed')) {
+              displayLabel = compact ? 'Test Done' : 'Test Completed';
+            }
+          }
+        } else if (isEliminated) {
+          if (announcedRound) {
+            // Announced pipeline elimination: use the round's own label
+            const elimLabel = effective.eliminationLabel;
+            displayLabel = elimLabel
+              ? (compact ? `Not in ${announcedRound.shortLabel}` : elimLabel)
+              : (compact ? `Out at ${announcedRound.shortLabel}` : `Eliminated at ${announcedRound.label}`);
+          } else if (s.id === 'applied') {
             displayLabel = compact ? 'Screening' : 'Screened Out';
-          } else if (i === 2) {
-            displayLabel = compact ? 'Shortlist' : 'Not Shortlisted';
-          } else if (i === 3) {
-            // Use the structured elimination label when available for precision
+          } else if (s.id === 'test') {
             const elimLabel = effective.eliminationLabel;
             displayLabel = elimLabel
               ? (compact ? elimLabel.split(' ').slice(-2).join(' ') : elimLabel)
               : (compact ? 'Eliminated' : 'Eliminated (Test)');
-          } else if (i === 4) {
+          } else if (s.id === 'interview') {
             const elimLabel = effective.eliminationLabel;
             displayLabel = elimLabel
               ? (compact ? 'Not Selected' : elimLabel)
               : (compact ? 'Not Selected' : 'Not Selected (Interview)');
+          } else {
+            displayLabel = compact ? s.shortLabel : s.label;
           }
-        } else if (hasDynamicPipeline && isEliminated) {
-          // Dynamic pipeline: eliminated stage label is always the stage's own label
-          // (the elimination is precisely at this stage)
-          displayLabel = compact ? s.shortLabel : s.label;
         }
+
 
         // Map stage index to STAGE_ACTIVE_STYLES (clamp to avoid out-of-bounds).
         const stageStyleKeys = Object.keys(STAGE_ACTIVE_STYLES).length;

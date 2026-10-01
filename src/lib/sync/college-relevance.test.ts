@@ -123,6 +123,44 @@ https://docs.google.com/spreadsheets/d/e/2PACX-1vSWJs6oYttVYhM53fPnOQ5FIpzRX9E8e
       expect(result.isRelevant).toBe(true);
       expect(result.category).toBe('interview_schedule');
     });
+
+    it('admits inline shortlist announcement even with no student IDs or attachment (e.g. "Shortlist is as follows.\\n\\nInfosys")', () => {
+      const input = {
+        subject: 'Infosys next round',
+        body: `Dear lions and lionesses
+
+The Infosys next round will happen soon. Maybe on Saturday or Sunday. Please report to the campus at the earliest.
+
+Shortlist is as follows.
+
+Infosys
+
+Competency Evaluation:
+During the interview, candidates will be evaluated on the following competencies:
+1. Programming skills through live coding
+2. Technical proficiency
+3. Behavioral attributes`,
+        hasAttachments: false,
+      };
+      const result = scoreCollegeMessageRelevance(input, PLACEMENT_OFFICE);
+      expect(result.isRelevant).toBe(true);
+      expect(result.category).toBe('shortlist');
+    });
+
+    it('admits next-round date confirmation for shortlisted students (e.g. "next round 28th Sept onwards, compulsory for all shortlisted students")', () => {
+      const input = {
+        subject: 'Re: Infosys next round 28th Sept onwards',
+        body: `Dear Lions and Lionesses
+
+The next round is expected from 28th September onwards. The confirmation will come on 27th morning 10 am. All the travelling students are requested to come back to the campus. Compulsory for all shortlisted students to attend or come after 20 days.
+
+If a recat is needed, we will give the recat. JioBP students at Infosys can proceed to JIOBP.`,
+        hasAttachments: false,
+      };
+      const result = scoreCollegeMessageRelevance(input, PLACEMENT_OFFICE);
+      expect(result.isRelevant).toBe(true);
+      expect(result.category).toBe('shortlist');
+    });
   });
 
   describe('general chatter and circulars', () => {

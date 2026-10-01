@@ -67,13 +67,26 @@ const gsheetCache = new Map<string, GSheetMatchResult | null>();
 /**
  * Scans a Google Sheet pubhtml link for the candidate's identifiers.
  */
+import {
+  buildCandidateIdentity,
+  matchesCandidateRow,
+  type UserCandidateIdentity,
+} from '@/lib/sync/user-identity';
+
 export async function scanGoogleSheetForCandidate(
   pubhtmlUrl: string,
   userEmail: string,
   userNeoId: string | null,
-  userName?: string | null
+  userName?: string | null,
+  candidateIdentity?: UserCandidateIdentity
 ): Promise<GSheetMatchResult | null> {
-  const cacheKey = `${pubhtmlUrl}::${userEmail}::${userNeoId}`;
+  const identity = candidateIdentity || buildCandidateIdentity({
+    emails: [userEmail],
+    neoId: userNeoId,
+    name: userName,
+  });
+
+  const cacheKey = `${pubhtmlUrl}::${identity.emails.join(',')}::${identity.neoId || ''}::${identity.regNo || ''}::${identity.fullName || ''}`;
   if (gsheetCache.has(cacheKey)) {
     return gsheetCache.get(cacheKey) || null;
   }
@@ -104,12 +117,6 @@ export async function scanGoogleSheetForCandidate(
 
     const sheetsToScan = sheets.length > 0 ? sheets : [{ name: 'Shortlist', pageUrl: pubhtmlUrl, gid: '0' }];
 
-    const emailLower = (userEmail || '').toLowerCase().trim();
-    const neoIdUpper = (userNeoId || '').toUpperCase().trim();
-    const regMatch = (userEmail || '').match(/([0-9]{2}[a-z]{3}[0-9]{4,5})/i);
-    const regNo = regMatch ? regMatch[1].toUpperCase().trim() : '';
-    const nameParts = (userName || '').trim().split(/\s+/).filter(Boolean);
-
     for (const s of sheetsToScan) {
       let sheetHtml = html;
       if (sheets.length > 0 && s.pageUrl !== pubhtmlUrl) {
@@ -134,15 +141,21 @@ export async function scanGoogleSheetForCandidate(
         }
       }
 
-      const hasEmail = emailLower && sheetHtml.toLowerCase().includes(emailLower);
-      const hasNeoId = neoIdUpper && neoIdUpper.length >= 4 && sheetHtml.toUpperCase().includes(neoIdUpper);
-      const hasRegNo = regNo && regNo.length >= 7 && sheetHtml.toUpperCase().includes(regNo);
-      let hasName = false;
-      if (nameParts.length >= 2) {
-        hasName = sheetHtml.includes(nameParts[0]) && sheetHtml.includes(nameParts[nameParts.length - 1]);
-      }
+      const sheetLower = sheetHtml.toLowerCase();
+      const hasEmail = identity.emails.some((e) => e && sheetLower.includes(e));
+      const hasNeoId = Boolean(identity.neoId && identity.neoId.length >= 4 && sheetHtml.toUpperCase().includes(identity.neoId));
+      const hasRegNo = Boolean(identity.regNo && identity.regNo.length >= 7 && sheetHtml.toUpperCase().includes(identity.regNo));
+      const hasFullName = Boolean(identity.fullName && identity.fullName.length >= 4 && sheetLower.includes(identity.fullName.toLowerCase()));
+      const hasSplitName = Boolean(
+        identity.firstName &&
+        identity.lastName &&
+        identity.firstName.length >= 3 &&
+        identity.lastName.length >= 3 &&
+        sheetLower.includes(identity.firstName.toLowerCase()) &&
+        sheetLower.includes(identity.lastName.toLowerCase())
+      );
 
-      if (hasEmail || hasNeoId || hasRegNo || hasName) {
+      if (hasEmail || hasNeoId || hasRegNo || hasFullName || hasSplitName) {
         // Parse actual table rows with cells to inspect allocation columns
         const trRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
         let trMatch;
@@ -173,22 +186,18 @@ export async function scanGoogleSheetForCandidate(
           });
         }
 
-        // Search for user's row
-        const userRow = rows.find((r) => {
-          return r.some((c) => {
-            const cl = c.toLowerCase();
-            const cu = c.toUpperCase();
-            if (emailLower && cl === emailLower) return true;
-            if (neoIdUpper && neoIdUpper.length >= 4 && cu === neoIdUpper) return true;
-            if (regNo && regNo.length >= 7 && cu === regNo) return true;
-            if (nameParts.length >= 2 && c.includes(nameParts[0]) && c.includes(nameParts[nameParts.length - 1])) {
-              return true;
-            }
-            return false;
-          });
-        });
+        // Search for user's row using universal candidate identity
+        let matchedRowInfo: { row: string[]; matchedValue: string } | null = null;
+        for (const row of rows) {
+          const m = matchesCandidateRow(row, identity);
+          if (m.matched) {
+            matchedRowInfo = { row, matchedValue: m.matchedValue };
+            break;
+          }
+        }
 
-        if (userRow) {
+        if (matchedRowInfo) {
+          const userRow = matchedRowInfo.row;
           // If the sheet has allocation columns (Venue, Seat, etc.), the student MUST have a non-empty allocation!
           // Placement cell often includes all applied students but only assigns venue/seat to shortlisted students.
           if (allocationColIndices.length > 0) {
@@ -211,7 +220,7 @@ export async function scanGoogleSheetForCandidate(
             matched: true,
             sheetName: s.name,
             details: `Matched in Google Sheet (${s.name}): ${userRow.filter(Boolean).join(', ')}`,
-            matchedValue: emailLower || neoIdUpper || regNo || userName || '',
+            matchedValue: matchedRowInfo.matchedValue,
             slot,
             eventDate,
           };

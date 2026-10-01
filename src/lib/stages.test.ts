@@ -37,3 +37,100 @@ describe('not-shortlisted stage with PPT evidence', () => {
     expect(result.isPptCompleted).toBe(true);
   });
 });
+
+import { getPipelineStages } from '@/components/companies/stage-stepper';
+
+describe('getPipelineStages dynamic recruitment pipeline', () => {
+  it('omits PPT when test round is completed without PPT (e.g. Axxela)', () => {
+    const events = [{
+      event_type: 'online_test',
+      start_time: new Date(Date.now() - 24 * 60 * 60 * 1000),
+      end_time: new Date(Date.now() - 22 * 60 * 60 * 1000),
+    }];
+    const effective = getEffectiveStage('test_completed', null, events);
+    const stages = getPipelineStages({
+      effective,
+      currentStage: effective.stageIndex,
+      furthestPassed: effective.furthestPassedStage,
+      eliminatedStage: effective.eliminatedStage,
+      allEvents: events,
+    });
+
+    // PPT should be omitted, future rounds (Interview, Offer) preserved!
+    expect(stages.map(s => s.id)).toEqual(['applied', 'test', 'interview', 'offer']);
+  });
+
+  it('keeps PPT and future rounds when company is at Applied stage (basic UI)', () => {
+    const effective = getEffectiveStage('applied', null, []);
+    const stages = getPipelineStages({
+      effective,
+      currentStage: effective.stageIndex,
+      furthestPassed: effective.furthestPassedStage,
+      eliminatedStage: effective.eliminatedStage,
+      allEvents: [],
+    });
+
+    // Full 5 stages preserved
+    expect(stages.map(s => s.id)).toEqual(['applied', 'ppt', 'test', 'interview', 'offer']);
+  });
+
+  it('keeps PPT and future rounds when PPT is scheduled (e.g. LTM)', () => {
+    const events = [{
+      event_type: 'ppt',
+      start_time: new Date(Date.now() + 48 * 60 * 60 * 1000),
+    }];
+    const effective = getEffectiveStage('ppt_scheduled', null, events);
+    const stages = getPipelineStages({
+      effective,
+      currentStage: effective.stageIndex,
+      furthestPassed: effective.furthestPassedStage,
+      eliminatedStage: effective.eliminatedStage,
+      allEvents: events,
+    });
+
+    expect(stages.map(s => s.id)).toEqual(['applied', 'ppt', 'test', 'interview', 'offer']);
+  });
+
+  it('keeps PPT when company had PPT and is now at Test stage', () => {
+    const events = [
+      {
+        event_type: 'ppt',
+        start_time: new Date(Date.now() - 72 * 60 * 60 * 1000),
+        end_time: new Date(Date.now() - 70 * 60 * 60 * 1000),
+      },
+      {
+        event_type: 'online_test',
+        start_time: new Date(Date.now() + 24 * 60 * 60 * 1000),
+      },
+    ];
+    const effective = getEffectiveStage('test_scheduled', null, events);
+    const stages = getPipelineStages({
+      effective,
+      currentStage: effective.stageIndex,
+      furthestPassed: effective.furthestPassedStage,
+      eliminatedStage: effective.eliminatedStage,
+      allEvents: events,
+    });
+
+    expect(stages.map(s => s.id)).toEqual(['applied', 'ppt', 'test', 'interview', 'offer']);
+  });
+
+  it('omits PPT and preserves upcoming rounds when eliminated in test round without PPT', () => {
+    const events = [{
+      event_type: 'online_test',
+      start_time: new Date(Date.now() - 48 * 60 * 60 * 1000),
+      end_time: new Date(Date.now() - 46 * 60 * 60 * 1000),
+    }];
+    const effective = getEffectiveStage('not_shortlisted', null, events);
+    const stages = getPipelineStages({
+      effective,
+      currentStage: effective.stageIndex,
+      furthestPassed: effective.furthestPassedStage,
+      eliminatedStage: effective.eliminatedStage,
+      allEvents: events,
+    });
+
+    expect(stages.map(s => s.id)).toEqual(['applied', 'test', 'interview', 'offer']);
+  });
+});
+

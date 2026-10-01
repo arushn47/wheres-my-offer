@@ -656,9 +656,9 @@ export default function DrivesClient() {
                         {drive.aliases && drive.aliases.length > 0 && (
                           <div className="flex items-center gap-1.5 flex-wrap pt-0.5">
                             <span className="text-[10px] text-zinc-500 font-mono">Aliases:</span>
-                            {drive.aliases.slice(0, 2).map((al) => (
+                            {drive.aliases.slice(0, 2).map((al, i) => (
                               <span
-                                key={al}
+                                key={`${drive.driveKey}-alias-${i}`}
                                 className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-500/10 text-amber-300/90 border border-amber-500/20 max-w-[130px] truncate"
                                 title={al}
                               >

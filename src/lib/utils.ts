@@ -107,6 +107,24 @@ export function detectBranch(emailOrReg?: string | null): string | null {
   return branches[code] || code;
 }
 
+import { cleanLocationString, KNOWN_CITIES } from './sync/locations';
+
+export { cleanLocationString, KNOWN_CITIES };
+
+/**
+ * Formats a raw location string for display.
+ *
+ * Rules:
+ * - Already slash-separated: normalise spacing ("Pune/Bangalore" → "Pune / Bangalore")
+ * - Multiple parallel cities: join with " / " (e.g. "Bangalore, Hyderabad, Mumbai" → "Bangalore / Hyderabad / Mumbai")
+ * - Hierarchical address: preserve comma (e.g. "HSR Layout, Bengaluru" stays "HSR Layout, Bengaluru")
+ */
+export function formatLocation(location: string | null | undefined): string | null {
+  if (!location) return null;
+  const cleaned = cleanLocationString(location);
+  return cleaned === 'Not Specified' ? null : cleaned;
+}
+
 /**
  * Extract VIT academic registration number from student email if formatted with reg no.
  * e.g., 'arush.23bce10472@vitbhopal.ac.in' -> '23BCE10472'

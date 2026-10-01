@@ -79,7 +79,44 @@ async function findDriveForCircular(
     const company = Array.isArray(drive.companies) ? drive.companies[0] : drive.companies;
     return (company?.name || '').toLowerCase().trim() === name || (drive.drive_name || '').toLowerCase().trim() === name;
   });
-  return byCompany.length === 1 ? byCompany[0] : null;
+  if (byCompany.length === 1) return byCompany[0];
+
+  if (byCompany.length > 1) {
+    const textLower = params.text.toLowerCase();
+    const { data: resolutions } = await supabase
+      .from('drive_resolutions')
+      .select('drive_number, notes')
+      .in('drive_number', byCompany.map((d) => d.drive_number).filter(Boolean));
+
+    for (const res of resolutions || []) {
+      if (!res.notes) continue;
+      const match = res.notes.match(/aliases_json:(\[.*?\])/);
+      if (match) {
+        try {
+          const aliases: string[] = JSON.parse(match[1]);
+          for (const alias of aliases) {
+            const trimmed = alias.trim().toLowerCase();
+            if (trimmed.length >= 4 && textLower.includes(trimmed)) {
+              const matchedDrive = byCompany.find((d) => d.drive_number === res.drive_number);
+              if (matchedDrive) return matchedDrive;
+            }
+          }
+        } catch {}
+      }
+    }
+
+    const hasRegular = /\bregular\b/i.test(textLower);
+    const hasSuperOrSpecialist = /\b(?:super\s*dream|specialist\s*programmer|dse)\b/i.test(textLower);
+    if (hasRegular && !hasSuperOrSpecialist) {
+      const regDrive = byCompany.find((d) => /regular/i.test(d.drive_name || '') || (d.drive_number && d.drive_number.includes('1338')));
+      if (regDrive) return regDrive;
+    } else if (hasSuperOrSpecialist) {
+      const superDrive = byCompany.find((d) => !/regular/i.test(d.drive_name || '') || (d.drive_number && d.drive_number.includes('1078')));
+      if (superDrive) return superDrive;
+    }
+  }
+
+  return null;
 }
 
 async function scanSharedAttachment(
@@ -375,20 +412,28 @@ export async function ingestSharedCollegeCircular(params: {
     .select('user_id,match_type,matched_value,matched_round_type')
     .eq('placement_drive_id', drive.id);
 
-  const { data: manualApplications, error: manualApplicationsError } = await supabase
+  // Fetch ALL applications for this drive (not just manual_override).
+  // Users whose application was created from a previous college circular have
+  // manual_override=false but are fully legitimate recipients of follow-up circulars
+  // (PPT schedules, shortlists, etc.). Excluding them causes broken state where
+  // status can update (from drive-level processing) but no events are ever inserted.
+  const { data: allApplications, error: allApplicationsError } = await supabase
     .from('applications')
-    .select('user_id')
-    .eq('placement_drive_id', drive.id)
-    .eq('manual_override', true);
-  if (manualApplicationsError) throw manualApplicationsError;
+    .select('user_id, manual_override')
+    .eq('placement_drive_id', drive.id);
+  if (allApplicationsError) throw allApplicationsError;
+
+  const manualApplications = (allApplications || []).filter((a) => a.manual_override);
+  // Set of users who have ANY application — treated as having personal drive evidence.
+  const applicationUserIds = new Set((allApplications || []).map((a) => a.user_id));
 
   const targetUserIds = Array.from(new Set([
     ...userIds,
-    ...(manualApplications || []).map((application) => application.user_id),
+    ...(allApplications || []).map((application) => application.user_id),
   ]));
   const { data: users } = await supabase.from('users').select('id,neo_id,email').in('id', targetUserIds);
   const eligibleUserIds = new Set(userIds);
-  for (const application of manualApplications || []) eligibleUserIds.add(application.user_id);
+  for (const application of allApplications || []) eligibleUserIds.add(application.user_id);
   for (const match of userMatches || []) {
     if (isShortlistMatchEvidence({ matchType: match.match_type, matchedValue: match.matched_value, matchedRoundType: match.matched_round_type })) {
       eligibleUserIds.add(match.user_id);
@@ -406,9 +451,12 @@ export async function ingestSharedCollegeCircular(params: {
     }
     const userEvidence = (userMatches || []).filter((match) => match.user_id === targetUserId)
       .some((match) => isShortlistMatchEvidence({ matchType: match.match_type, matchedValue: match.matched_value, matchedRoundType: match.matched_round_type }));
-    const hasManualOverride = (manualApplications || []).some((application) => application.user_id === targetUserId);
+    const hasManualOverride = manualApplications.some((application) => application.user_id === targetUserId);
+    // An existing application (any source) counts as personal drive evidence — the user was
+    // already vetted when the application row was created.
+    const hasAppEvidence = applicationUserIds.has(targetUserId);
     if (!hasSharedDriveFanOutEvidence({
-      hasPersonalDriveEvidence: Boolean(eligibleReceipts?.some((receipt) => receipt.user_id === targetUserId)),
+      hasPersonalDriveEvidence: Boolean(eligibleReceipts?.some((receipt) => receipt.user_id === targetUserId)) || hasAppEvidence,
       hasConfirmedShortlistMatch: userEvidence,
       manualOverride: hasManualOverride,
     }) || !user) {
@@ -562,7 +610,7 @@ export async function fanOutSharedCollegeArchiveToUser(userId: string): Promise<
           isShortlistMatchEvidence({ matchType: match.match_type, matchedValue: match.matched_value, matchedRoundType: match.matched_round_type })
         );
         if (!hasSharedDriveFanOutEvidence({
-          hasPersonalDriveEvidence: personalEvidence,
+          hasPersonalDriveEvidence: personalEvidence || currentApplication !== null,
           hasConfirmedShortlistMatch: positiveShortlist,
           manualOverride: Boolean(currentApplication?.manual_override),
         })) {

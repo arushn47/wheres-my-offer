@@ -62,10 +62,16 @@ Registration: on or before 30-09-2026
 });
 
 describe('cleanLocationString normalization', () => {
-  it('converts |, /, &, and "and" into clean commas', () => {
-    expect(cleanLocationString('Bangalore | Hyderabad')).toBe('Bangalore, Hyderabad');
-    expect(cleanLocationString('Bangalore / Hyderabad / Noida')).toBe('Bangalore, Hyderabad, Noida');
-    expect(cleanLocationString('Noida & Gurgaon')).toBe('Noida, Gurgaon');
+  it('formats parallel cities with "/" and preserves hierarchical localities with ","', () => {
+    expect(cleanLocationString('Bangalore | Hyderabad')).toBe('Bangalore / Hyderabad');
+    expect(cleanLocationString('Bangalore / Hyderabad / Noida')).toBe('Bangalore / Hyderabad / Noida');
+    expect(cleanLocationString('Noida & Gurgaon')).toBe('Noida / Gurgaon');
+    expect(cleanLocationString('Hyderabad, Bangalore, Bhubaneshwar')).toBe('Hyderabad / Bangalore / Bhubaneshwar');
+    expect(cleanLocationString('Hyderabad / Bangalore / Bhubaneshwar')).toBe('Hyderabad / Bangalore / Bhubaneshwar');
+    expect(cleanLocationString('HSR Layout, Bangalore')).toBe('HSR Layout, Bangalore');
+    expect(cleanLocationString('Whitefield, Bengaluru')).toBe('Whitefield, Bengaluru');
+    expect(cleanLocationString('Phase 1, Hinjewadi, Pune')).toBe('Phase 1, Hinjewadi, Pune');
+    expect(cleanLocationString('Sector 62, Noida')).toBe('Sector 62, Noida');
     expect(cleanLocationString('Hybrid (Gurgaon/Bangalore)')).toBe('Hybrid (Gurgaon, Bangalore)');
     expect(cleanLocationString('Remote')).toBe('Remote');
   });

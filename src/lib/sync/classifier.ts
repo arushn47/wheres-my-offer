@@ -134,10 +134,10 @@ const CLASSIFICATION_RULES: ClassificationRule[] = [
         (/shortlist(ed)?/i.test(s) &&
           !/not\s+shortlist/i.test(s) &&
           !/un-?shortlist/i.test(s)) ||
-        /(?:find\s+(?:the\s+)?(?:below|attached|enclosed)\s+shortlist|below\s+is\s+the\s+shortlist|find\s+(?:the\s+)?shortlist|list\s+of\s+shortlisted\s+candidates|shortlisted\s+candidates\s+(?:list|sheet|roster)|shortlist\s+for\s+next\s+round|following\s+(?:are\s+the\s+)?(?:shortlisted|selected)\s+candidates)/i.test(b) ||
+        /(?:find\s+(?:the\s+)?(?:below|attached|enclosed)\s+shortlist|below\s+is\s+the\s+shortlist|find\s+(?:the\s+)?shortlist|list\s+of\s+shortlisted\s+candidates|shortlisted\s+candidates\s+(?:list|sheet|roster)|shortlist\s+for\s+next\s+round|following\s+(?:are\s+the\s+)?(?:shortlisted|selected)\s+candidates|shortlist\s+(?:is\s+as\s+follows|and\s+dates\s+are\s+given\s+below|is\s+given\s+below|is\s+below|below|attached|released|published)|(?:following|below)\s+(?:is\s+)?(?:the\s+)?shortlist)/i.test(b) ||
         /shortlisted\s+candidates\s+will\s+have\s+(?:pre[\s-]*placement\s*talk|\bppt\b|interview|test|assessment|online\s+test)/i.test(b) ||
         /(?:shortlist|shortlisted\s+candidates)\s+(?:for\s+)?(?:pre[\s-]*placement\s*talk|\bppt\b|interview|test|assessment)/i.test(b) ||
-        /next\s+round\s+of\s+selection/i.test(s)
+        /(?:next\s+round\s+of\s+selection|next\s+round)/i.test(s)
       );
     },
     reason: 'Email announces candidate shortlist or next round selection',
@@ -172,8 +172,9 @@ const CLASSIFICATION_RULES: ClassificationRule[] = [
     classification: 'test',
     confidence: 'high',
     match: (s, b) =>
-      ((/(online\s+test|coding\s+test|online\s+assessment|aptitude\s+test|test\s+schedule|test\s+link|assessment\s+(?:test|link|scheduled|window)|thanks\s+for\s+taking\s+(?:the\s+)?assessment)/i.test(s) ||
-        (/\bapplied\s+(?:students?|candidates?)\b/i.test(s) && /(?:online\s+assessment|\boa\b|online\s+test|coding\s+test|assessment\s+link|attend\s+the\s+test|fresh\s+link|test\s+link|test\s+today)/i.test(b))) &&
+      ((/(online\s+test|coding\s+test|online\s+assessment|aptitude\s+test|test\s+schedule|test\s+link|assessment\s+(?:test|link|scheduled|window)|test\s+time|revised\s+test\s+time|thanks\s+for\s+taking\s+(?:the\s+)?assessment)/i.test(s) ||
+        (/\bapplied\s+(?:students?|candidates?)\b/i.test(s) && /(?:online\s+assessment|\boa\b|online\s+test|coding\s+test|assessment\s+link|attend\s+the\s+test|attempt\s+the\s+test|fresh\s+link|test\s+link|test\s+today|test\s*\d*\s*[:\-]|tests?\.mettl\.com|hackerrank\.com|codility\.com|shl\.com|amcat\.in|cocubes\.com)/i.test(b)) ||
+        (/(?:tests?\.mettl\.com|hackerrank\.com|codility\.com)\/authenticateKey|test\s*\d*\s*:\s*\d{1,2}:\d{2}\s*(?:am|pm)/i.test(b))) &&
       !/(?:ppt|pre[\s-]*placement\s*talk).*(?:online\s+test|coding\s+test|assessment)/i.test(s)),
     reason: 'Subject or applied candidates notice mentions online test or assessment',
   },
@@ -212,7 +213,8 @@ const CLASSIFICATION_RULES: ClassificationRule[] = [
     match: (s, b) =>
       (/\bapplied\s+(?:list|students?|candidates?)\b/i.test(s) ||
         /\b(?:below\s+attached|find\s+the\s+attached)\s+applied\s+list\b/i.test(b)) &&
-      !/(?:shortlist|result|selected|selects|selection\s*list|online\s+test|coding\s+test|assessment|interview|pre[\s-]*placement\s*talk|\bppt\b)/i.test(s),
+      !/(?:shortlist|result|selected|selects|selection\s*list|online\s+test|coding\s+test|assessment|interview|pre[\s-]*placement\s*talk|\bppt\b|\btest\b)/i.test(s) &&
+      !/(?:test\s*\d*\s*[:\-]|tests?\.mettl\.com|hackerrank\.com|codility\.com|shl\.com|amcat\.in|attempt\s+the\s+test|attend\s+the\s+test|fresh\s+link|test\s+link|test\s+today|online\s+test|coding\s+test|online\s+assessment)/i.test(b),
     reason: 'Subject or body refers to applied candidates list / registration verification',
   },
   {

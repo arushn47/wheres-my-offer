@@ -124,47 +124,66 @@ export async function PATCH(
         .in('id', renameScopeCompanyIds);
     }
 
-    // 3b. Aliases are DRIVE-SCOPED, stored in drive_resolutions keyed by this
-    // drive's number. companies.aliases is deliberately NOT written: sibling
-    // drives (e.g. two Deloitte drive numbers) share one company row, so any
-    // write there instantly re-links their alias sets. Each drive keeps its own
-    // alias list; only a company RENAME is org-wide.
+    // 3b. Aliases are DRIVE-SCOPED — each drive_number gets its own alias list.
+    //
+    // Storage: a single `drive_resolutions` row (resolved_via='manual_review') per
+    // drive_number, with aliases encoded as JSON in the `notes` field:
+    //   notes = "Configured from Admin Panel\naliases_json:[\"infosys regular\",\"infosys se\"]"
+    //
+    // Why NOT companies.aliases:
+    //   Both Infosys drives (1078=Super Dream, 1338=Regular) share the same company_id.
+    //   Writing to companies.aliases instantly applies to BOTH drives — the admin
+    //   typed aliases for 1338 but 1078's display also changes. That's wrong.
+    //
+    // Why NOT multiple drive_resolutions rows:
+    //   drive_resolutions has UNIQUE(drive_number) — only 1 row per drive. Inserting
+    //   2 alias rows fails with a constraint violation on the 2nd insert.
+    //
+    // Solution: one upsert row per drive, aliases stored as JSON in notes. The GET
+    // route reads driveAliasesMap from drive_resolutions (manual_review rows) and
+    // will be updated to parse aliases_json from notes.
     if (aliases !== undefined) {
       const aliasArr = Array.isArray(aliases)
-        ? aliases.map((s: string) => String(s).trim()).filter(Boolean)
+        ? aliases.map((s: string) => String(s).trim().toLowerCase()).filter(Boolean)
         : typeof aliases === 'string'
-        ? aliases.split(',').map((s: string) => s.trim()).filter(Boolean)
+        ? aliases.split(',').map((s: string) => s.trim().toLowerCase()).filter(Boolean)
         : [];
 
-      const targetDriveNumber = driveUpdate.drive_number || searchDriveNumber;
-      const targetResolvedName = driveUpdate.drive_name || companyName || searchCompanyPattern || 'Company';
+      const targetDriveNumber = searchDriveNumber || matchedDrives[0]?.drive_number;
+      const resolvedName = companyName?.trim() || matchedDrives[0]?.drive_name || 'Company';
+      const resolvedRole = role?.trim() || 'Default Role';
 
       if (targetDriveNumber) {
-        // Always wipe existing manual aliases for this drive first, then re-insert
-        // the full new set. Using upsert with onConflict:'drive_number' would only
-        // keep the last alias because drive_number is the sole conflict key — each
-        // subsequent upsert overwrites the previous one.
-        await supabase
-          .from('drive_resolutions')
-          .delete()
-          .eq('drive_number', targetDriveNumber)
-          .eq('resolved_via', 'manual_review');
+        // Build the notes string: keep the standard marker + append aliases_json
+        const notesValue = aliasArr.length > 0
+          ? `Configured from Admin Panel\naliases_json:${JSON.stringify(aliasArr)}`
+          : 'Configured from Admin Panel';
 
-        if (aliasArr.length > 0) {
-          const rows = aliasArr.map((al) => ({
-            drive_number: targetDriveNumber,
-            company_base_name: al.toLowerCase(),
-            resolved_company_name: targetResolvedName,
-            resolved_role: driveUpdate.role || 'Default Role',
-            resolved_via: 'manual_review',
-            confidence: 'high',
-            notes: 'Configured from Admin Panel',
-            updated_at: new Date().toISOString(),
-          }));
-          await supabase.from('drive_resolutions').insert(rows);
+        // Upsert: if a manual_review row already exists for this drive, update it;
+        // otherwise insert a new one. onConflict:'drive_number' handles both cases.
+        const { error: aliasErr } = await supabase
+          .from('drive_resolutions')
+          .upsert(
+            {
+              drive_number: targetDriveNumber,
+              company_base_name: aliasArr[0] || resolvedName.toLowerCase(),
+              resolved_company_name: resolvedName,
+              resolved_role: resolvedRole,
+              resolved_via: 'manual_review',
+              confidence: 'high',
+              notes: notesValue,
+              updated_at: new Date().toISOString(),
+            },
+            { onConflict: 'drive_number' }
+          );
+
+        if (aliasErr) {
+          console.error('[Admin Edit Drive API] Error saving aliases to drive_resolutions:', aliasErr);
+          // Non-fatal: log but continue
         }
       }
     }
+
 
     // 4. Return new driveKey and confirmation
     const newNormNumber = driveUpdate.normalized_drive_number || (searchDriveNumber ? searchDriveNumber : null);

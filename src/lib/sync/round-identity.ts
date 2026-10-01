@@ -87,7 +87,9 @@ export function classifyShortlistEmail(
   ) return 'test_r2';
 
   if (
-    /online\s+test|coding\s+test|assessment|test\s+(?:shortlist|link|invitation|schedule)/i.test(subj)
+    /online\s+test|coding\s+test|assessment|test\s+(?:shortlist|link|invitation|schedule)/i.test(subj) ||
+    (/shortlist/i.test(subj) && /(?:online\s+)?tests?|assessment|coding/i.test(text)) ||
+    /shortlist\s+and\s+dates/i.test(subj)
   ) return 'test';
 
   // PPT shortlist (unusual — only when candidates are explicitly named)
@@ -376,3 +378,138 @@ export function deriveStageLabelFromId(stageId: string): { label: string; shortL
     shortLabel: round > 1 ? `${baseShort} ${round}` : baseShort,
   };
 }
+
+// ---------------------------------------------------------------------------
+// 8. Announced Recruitment Process (Structured pipeline from circular)
+// ---------------------------------------------------------------------------
+
+export interface AnnouncedRound {
+  id: string;
+  label: string;
+  shortLabel: string;
+  dateStr?: string;
+  roundType: 'ppt' | 'test' | 'gd' | 'interview' | 'other';
+  roundNumber?: number;
+}
+
+/**
+ * Extracts structured recruitment process rounds from a drive's circular text
+ * when it explicitly details the process schedule (e.g. under "Date of Visit:",
+ * "Recruitment Process:", "Selection Process:").
+ *
+ * High-confidence requirement: Must find at least 2 structured rounds with known
+ * round keywords (test, interview, game round, gd, ppt).
+ */
+export function parseRecruitmentProcess(text: string): AnnouncedRound[] | null {
+  if (!text) return null;
+
+  // 1. Isolate the process schedule section
+  const processMatch = text.match(
+    /(?:date\s+of\s+visit|recruitment\s+process|selection\s+process|process\s+schedule|hiring\s+process)\s*[:\-–—\t*]*\s*([\s\S]{1,500}?)(?:\b(?:eligible\s+branches|eligibility(?:\s+criteria)?|ctc|stipend|salary|last\s+date|website|job\s+description|about\s+the\s+company)\b|$)/i
+  );
+
+  if (!processMatch || !processMatch[1]) return null;
+  const block = processMatch[1].trim();
+
+  // Split into lines
+  const lines = block
+    .split(/\r?\n/)
+    .map(l => l.replace(/^[•\-\*#\s]*(?:\d+[\.\)\-:]\s+)?/, '').trim())
+    .filter(l => l.length > 3 && l.length < 100);
+
+  const rounds: AnnouncedRound[] = [];
+  const ROUND_KEYWORD_REGEX = /\b(test|assessment|coding|ppt|pre[\s-]*placement|interview|game\s*round|gd|group\s+discussion|hackathon|technical|hr)\b/i;
+
+  let testCount = 0;
+  let interviewCount = 0;
+
+  for (const line of lines) {
+    if (!ROUND_KEYWORD_REGEX.test(line)) continue;
+
+    // Extract date if present (e.g., "2nd October", "6th October", "15-10-2026")
+    const dateMatch = line.match(/\b(?:\d{1,2}(?:st|nd|rd|th)?\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*|\d{1,2}[-\/.]\d{1,2}(?:[-\/.]\d{2,4})?)\b/i);
+    const dateStr = dateMatch ? dateMatch[0] : undefined;
+
+    // Clean round label by removing leading date prefixes (e.g. "2nd October - Test 1 (Online)" -> "Test 1 (Online)")
+    let cleanRoundName = line;
+    if (dateStr) {
+      cleanRoundName = cleanRoundName.replace(new RegExp(`^${dateStr}\\s*[:\\-–—]?\\s*`, 'i'), '').trim();
+    }
+    if (dateStr) {
+      cleanRoundName = cleanRoundName.replace(new RegExp(`[:\\-–—]?\\s*${dateStr}$`, 'i'), '').trim();
+    }
+
+    if (!cleanRoundName || cleanRoundName.length < 3) continue;
+
+    let roundType: AnnouncedRound['roundType'] = 'other';
+    let shortLabel = cleanRoundName;
+    let roundNumber: number | undefined;
+
+    if (/\b(ppt|pre[\s-]*placement)\b/i.test(cleanRoundName)) {
+      roundType = 'ppt';
+      shortLabel = 'PPT';
+    } else if (/\b(game\s*round)\b/i.test(cleanRoundName)) {
+      roundType = 'other';
+      shortLabel = 'Game Round';
+    } else if (/\b(gd|group\s+discussion)\b/i.test(cleanRoundName)) {
+      roundType = 'gd';
+      shortLabel = 'GD';
+    } else if (/\b(interview|hr|technical)\b/i.test(cleanRoundName)) {
+      roundType = 'interview';
+      interviewCount++;
+      const numMatch = cleanRoundName.match(/\b(?:round\s*(\d+)|(\d+)(?:st|nd|rd|th)?\s+round|r(\d+))\b/i);
+      roundNumber = numMatch ? parseInt(numMatch[1] || numMatch[2] || numMatch[3], 10) : interviewCount;
+      shortLabel = roundNumber > 1 ? `Interview ${roundNumber}` : (cleanRoundName.replace(/\s*\([^)]*\)/g, '').trim() || 'Interview');
+    } else if (/\b(test|assessment|coding)\b/i.test(cleanRoundName)) {
+      roundType = 'test';
+      testCount++;
+      const numMatch = cleanRoundName.match(/\b(?:test\s*(\d+)|round\s*(\d+)|(\d+)(?:st|nd|rd|th)?\s+test|r(\d+))\b/i);
+      roundNumber = numMatch ? parseInt(numMatch[1] || numMatch[2] || numMatch[3] || numMatch[4], 10) : testCount;
+      shortLabel = roundNumber > 1 ? `Test ${roundNumber}` : (cleanRoundName.replace(/\s*\([^)]*\)/g, '').trim() || 'Test');
+    }
+
+    // Short label cleanup (strip parenthetical notes for compact badge display, keeping label descriptive)
+    shortLabel = shortLabel.replace(/\s*\((?:online|in\s*campus|virtual|in[\s-]*person)[^)]*\)/i, '').trim();
+
+    const baseId = shortLabel.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+    const id = `${baseId}_${rounds.length + 1}`;
+
+    rounds.push({
+      id,
+      label: cleanRoundName,
+      shortLabel,
+      dateStr,
+      roundType,
+      roundNumber,
+    });
+  }
+
+  // Must have at least 2 distinct rounds to qualify as a structured process
+  if (rounds.length < 2) return null;
+
+  return rounds;
+}
+
+export function buildAnnouncedProcessToken(rounds: AnnouncedRound[]): string {
+  return `announced_process:${JSON.stringify(rounds)}`;
+}
+
+export function parseAnnouncedProcessToken(notes: string | null | undefined): AnnouncedRound[] | null {
+  if (!notes) return null;
+  for (const line of notes.split('\n')) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith('announced_process:')) {
+      try {
+        const json = trimmed.slice('announced_process:'.length);
+        const parsed = JSON.parse(json);
+        if (Array.isArray(parsed) && parsed.length >= 2) {
+          return parsed;
+        }
+      } catch {
+        return null;
+      }
+    }
+  }
+  return null;
+}
+

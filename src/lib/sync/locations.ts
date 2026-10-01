@@ -1,12 +1,39 @@
 /**
- * Utilities for parsing, deduplicating, and consolidating work locations for campus placement drives.
- * 
- * DESIGN PRINCIPLE:
- * In address syntax, "Area, City" or "City, State" (e.g. "Whitefield, Bangalore", "Bangalore, Karnataka")
- * represents an address hierarchy for a SINGLE job location, NOT two distinct hiring locations.
- * Multiple distinct cities are separated by explicit conjunctions ("and", "&"), slashes ("/"),
- * pipes ("|"), semicolons (";"), or lists of 3+ comma-separated cities.
+ * Known major Indian cities used to distinguish parallel city lists from
+ * hierarchical "locality, city" address strings.
  */
+export const KNOWN_CITIES = new Set([
+  // South
+  'bangalore', 'bengaluru', 'blr',
+  'hyderabad', 'secunderabad', 'cyberabad', 'hyd',
+  'chennai', 'madras',
+  'coimbatore', 'madurai', 'trichy', 'tiruchirappalli', 'salem', 'vellore',
+  'kochi', 'cochin', 'ernakulam', 'trivandrum', 'thiruvananthapuram', 'calicut', 'kozhikode',
+  'visakhapatnam', 'vizag', 'vijayawada', 'guntur', 'tirupati', 'warangal',
+  'mysore', 'mysuru', 'mangalore', 'mangaluru', 'hubli', 'hubballi', 'dharwad', 'belgaum', 'belagavi',
+  // West
+  'mumbai', 'bombay', 'navi mumbai', 'thane', 'kalyan', 'panvel',
+  'pune', 'pcmc',
+  'nagpur', 'nashik', 'nasik', 'aurangabad', 'chhatrapati sambhajinagar', 'kolhapur',
+  'ahmedabad', 'gandhinagar', 'surat', 'vadodara', 'baroda', 'rajkot',
+  'goa', 'panaji',
+  // North
+  'delhi', 'new delhi', 'delhi ncr', 'ncr', 'noida', 'greater noida', 'gurgaon', 'gurugram', 'faridabad', 'ghaziabad',
+  'chandigarh', 'mohali', 'panchkula', 'ludhiana', 'jalandhar', 'amritsar',
+  'jaipur', 'udaipur', 'jodhpur', 'kota',
+  'lucknow', 'kanpur', 'varanasi', 'prayagraj', 'allahabad', 'agra', 'meerut', 'bareilly', 'aligarh',
+  'dehradun', 'haridwar', 'roorkee',
+  // East / Central
+  'kolkata', 'calcutta',
+  'bhubaneswar', 'bhubaneshwar', 'cuttack', 'rourkela',
+  'patna', 'gaya', 'ranchi', 'jamshedpur', 'dhanbad', 'bokaro',
+  'indore', 'bhopal', 'gwalior', 'jabalpur',
+  'guwahati', 'shillong',
+  // Generic / Special
+  'pan india', 'remote', 'across india', 'anywhere in india', 'all india', 'india',
+]);
+
+const LOCALITY_HINTS = /\b(?:layout|sector|phase|tech\s*park|technopark|cyber\s*city|tower|towers|campus|road|rd|nagar|puram|halli|galli|plot|block|floor|midc|sez|industrial\s+area|zone|colony|circle|cross|stage|lane|street)\b/i;
 
 /**
  * Cleans and sanitizes a raw location string for display, stripping out accidental email text
@@ -56,6 +83,25 @@ export function cleanLocationString(raw: string | null | undefined): string {
   // Filter out if it became purely numbers or punctuation
   if (/^[\d\s,.\-]+$/.test(cleaned)) {
     return 'Not Specified';
+  }
+
+  // Separator semantic normalisation:
+  // • Multiple parallel cities  →  "Bangalore / Hyderabad / Mumbai"  (slash-separated)
+  // • Hierarchical address      →  "HSR Layout, Bengaluru"           (comma-separated)
+  //
+  // Multi-city if:
+  // 1. ALL comma-parts are known cities (e.g. "Hyderabad, Bangalore, Bhubaneshwar")
+  // 2. OR at least 2 distinct parts are known cities and no part has a locality keyword
+  const commaParts = cleaned.split(',').map((p) => p.trim()).filter(Boolean);
+  if (commaParts.length > 1) {
+    const knownCitiesCount = commaParts.filter((p) => KNOWN_CITIES.has(p.toLowerCase())).length;
+    const hasLocalityKeyword = commaParts.some((p) => LOCALITY_HINTS.test(p));
+
+    const isMultiCity =
+      knownCitiesCount === commaParts.length ||
+      (knownCitiesCount >= 2 && !hasLocalityKeyword);
+
+    cleaned = isMultiCity ? commaParts.join(' / ') : commaParts.join(', ');
   }
 
   return cleaned;
@@ -137,4 +183,5 @@ export function parseAssignedLocations(rawLocation: string | null | undefined): 
 
   return cleaned;
 }
+
 

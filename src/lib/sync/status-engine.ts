@@ -1,3 +1,9 @@
+import {
+  buildCandidateIdentity,
+  matchesCandidateText,
+  loadUserCandidateIdentity,
+  type UserCandidateIdentity,
+} from '@/lib/sync/user-identity';
 import type { ParsedEmail } from '@/lib/gmail/client';
 import { extractEvents, extractJobDetails, extractAllDriveNumbers, type ExtractedEvent } from '@/lib/sync/events';
 import { createAdminClient } from '@/lib/supabase/admin';
@@ -21,6 +27,8 @@ import {
   buildEliminationToken,
   extractExplicitOrdinal,
   isRescheduleEmail,
+  parseRecruitmentProcess,
+  buildAnnouncedProcessToken,
 } from '@/lib/sync/round-identity';
 
 // existingApp select: add `registration_deadline`
@@ -61,47 +69,19 @@ type ShortlistRound = RoundType;
 export function checkNeoIdMatch(
   text: string,
   userNeoId: string | null,
-  userEmail: string
+  userEmail: string,
+  userName?: string | null,
+  candidateIdentity?: UserCandidateIdentity
 ): { matched: boolean; matchedValue: string | null } {
   if (!text) return { matched: false, matchedValue: null };
 
-  // Strip recipient email addresses, mailto links, and headers to prevent matching user's own email
-  const sanitizedText = text
-    .replace(/[a-zA-Z0-9._%+-]+@vit(?:student|bhopal|chennai|vellore)?\.[a-zA-Z0-9.-]+/gi, ' ')
-    .replace(/[a-zA-Z0-9._%+-]+@gmail\.com/gi, ' ')
-    .replace(/mailto:[^\s>]+/gi, ' ')
-    .replace(/to:\s*[^\n]+/gi, ' ')
-    .replace(/from:\s*[^\n]+/gi, ' ')
-    .toUpperCase();
+  const identity = candidateIdentity || buildCandidateIdentity({
+    neoId: userNeoId,
+    emails: [userEmail],
+    name: userName,
+  });
 
-  // 1. Check user's explicitly configured Neo ID (e.g. alphanumeric registration ID)
-  // Uses strict word-boundary regex to avoid false positives from partial substring matches.
-  // Retains 0/O and 1/I fuzzy matching to handle OCR scan / CDC font rendering artefacts.
-  if (userNeoId && userNeoId.trim().length >= 4) {
-    const cleanNeoId = userNeoId.trim().toUpperCase();
-    const regex = new RegExp(`\\b${cleanNeoId}\\b`);
-    const matchesDirect = regex.test(sanitizedText);
-    const matchesFlexible = new RegExp(
-      `\\b${cleanNeoId.replace(/[0O]/g, '[0O]').replace(/[1I]/g, '[1I]')}\\b`
-    ).test(sanitizedText);
-
-    if (matchesDirect || matchesFlexible) {
-      return { matched: true, matchedValue: cleanNeoId };
-    }
-  }
-
-  // 2. Check registration number pattern (e.g. "23BCE10472")
-  // VIT branch codes are exactly 3 letters (BCE, CSE, MIS, etc.)
-  const regMatch = userEmail.match(/([0-9]{2}[a-z]{3}[0-9]{4,5})/i);
-  if (regMatch && regMatch[1]) {
-    const regNo = regMatch[1].toUpperCase();
-    const regRegex = new RegExp(`(?:^|[^A-Z0-9])${regNo}(?:[^A-Z0-9]|$)`, 'i');
-    if (regRegex.test(sanitizedText)) {
-      return { matched: true, matchedValue: regNo };
-    }
-  }
-
-  return { matched: false, matchedValue: null };
+  return matchesCandidateText(text, identity);
 }
 
 /**
@@ -173,8 +153,12 @@ export async function processEmailForEventsAndStatus(
     /successfully\s+registered|thank\s+you\s+for\s+(registering|applying)/i.test(fullText) ||
     /confirms?\s+(that\s+)?(you(r|'re)|your)\s+(successful\s+)?(registration|application)/i.test(fullText);
 
+  const candidateIdentity = await loadUserCandidateIdentity(supabase, userId);
+
   // 1. Check for Neo ID match in email body / HTML tables / subject
-  const bodyMatch = checkNeoIdMatch(fullText, userNeoId, userEmail);
+  const bodyMatch = isCollegeBroadcast
+    ? checkNeoIdMatch(fullText, userNeoId, userEmail, candidateIdentity.name, candidateIdentity)
+    : { matched: false, matchedValue: null, matchLocation: null };
   let isNeoMatched = bodyMatch.matched;
   let isInAppliedList = false; // Matched in an applied/opt-in list (NOT a shortlist)
   let matchDetail: string | null = bodyMatch.matchedValue
@@ -325,7 +309,7 @@ export async function processEmailForEventsAndStatus(
     const { extractGoogleSheetUrls, scanGoogleSheetForCandidate } = await import('@/lib/sync/gsheet-parser');
     const gUrls = extractGoogleSheetUrls(fullText);
     for (const gUrl of gUrls) {
-      const gMatch = await scanGoogleSheetForCandidate(gUrl, userEmail, userNeoId);
+      const gMatch = await scanGoogleSheetForCandidate(gUrl, userEmail, userNeoId, candidateIdentity.name, candidateIdentity);
       if (gMatch && gMatch.matched) {
         isNeoMatched = true;
         matchType = 'xlsx_cell';
@@ -492,7 +476,7 @@ export async function processEmailForEventsAndStatus(
   // Shortlist verdicts are written directly to applications.status by the archive
   // scanner (roster-absence) and below (roster-presence). No separate tracking state.
 
-  if (isNeoMatched && (!isCollegeBroadcast || hasConfirmedCollegeShortlistMatch)) {
+  if (isNeoMatched && isCollegeBroadcast && hasConfirmedCollegeShortlistMatch) {
     // Only record genuine shortlist matches (never applied/opt-in rosters)
     const matchPayload: any = {
       user_id: userId,
@@ -1099,7 +1083,7 @@ export async function processEmailForEventsAndStatus(
     // RULE: Only downgrade if candidate actually APPLIED or was in the process!
     // Do NOT downgrade companies where the user never applied or has opted out / withdrawn.
     const currentStatus = existingApp?.status || 'not_applied';
-    if (!['not_applied', 'withdrawn', 'declined'].includes(currentStatus)) {
+    if (!['not_applied', 'registration_open', 'withdrawn', 'declined'].includes(currentStatus)) {
       // Check if this is a post-test round announcement (interview, next round, selection list, results)
       const isPostTestRound =
         emailClass === 'interview' ||
@@ -1323,6 +1307,16 @@ export async function processEmailForEventsAndStatus(
     } else if (prevTravel && ['vellore', 'chennai', 'ap', 'bhopal', 'bhopal_lab', 'online'].includes(prevTravel)) {
       noteParts.push(prevTravel);
     }
+    const announcedProcess = parseRecruitmentProcess(fullText);
+    if (announcedProcess) {
+      noteParts.push(buildAnnouncedProcessToken(announcedProcess));
+    } else {
+      const existingProcessToken = existingApp?.notes?.split('\n').find((l: string) => l.trim().startsWith('announced_process:'));
+      if (existingProcessToken) {
+        noteParts.push(existingProcessToken);
+      }
+    }
+
     if (isAiFlaggedForReview && aiReviewNotes) noteParts.push(aiReviewNotes);
     if (noteParts.length > 0) appUpdate.notes = noteParts.join('\n');
   }
@@ -1470,3 +1464,4 @@ export async function processEmailForEventsAndStatus(
     });
   }
 }
+

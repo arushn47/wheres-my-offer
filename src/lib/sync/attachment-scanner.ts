@@ -1,3 +1,4 @@
+import { loadUserCandidateIdentity } from '@/lib/sync/user-identity';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { createGmailClient } from '@/lib/gmail/client';
 import type { GmailAccount } from '@/lib/gmail/client';
@@ -608,7 +609,7 @@ export async function scanSharedCollegeCandidateMatches(
     }
     if (evaluation.state !== 'verified_present') continue;
 
-    const round = classifyShortlistEmail(email.subject || '', '');
+    const round = classifyShortlistEmail(email.subject || '', '') ?? 'test';
     const { error } = await supabase.from('candidate_matches').insert({
       user_id: userId,
       placement_drive_id: driveId,

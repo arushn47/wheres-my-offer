@@ -28,6 +28,8 @@ export async function GET(req: NextRequest) {
     // and enforce the drive registration temporal boundary (only circulars on or after registration date).
     const assignedCollegeEmailIds = new Set<string>();
     const takenCollegeEmailIds = new Set<string>();
+    // Subjects of direct personal emails (no college_email_id) already assigned to OTHER drives
+    const takenBySubject = new Set<string>();
     let boundary: { minAllowedDate: Date | null; registrationDate: Date | null; formattedRegistrationDate: string | null } = {
       minAllowedDate: null,
       registrationDate: null,
@@ -165,6 +167,24 @@ export async function GET(req: NextRequest) {
             takenCollegeEmailIds.add(d.source_college_email_id);
           }
         }
+
+        // 6. For emails with NO college_email_id (direct personal receipts from
+        // NeoPAT/VIT broadcasts), group by normalized subject. If ANY receipt of
+        // the same subject is already assigned to a drive (excluding the target
+        // drive), treat the entire subject group as taken — one email subject
+        // maps to one drive.
+        const { data: takenDirectReceipts } = await supabase
+          .from('personal_emails')
+          .select('subject, placement_drive_id')
+          .not('placement_drive_id', 'is', null)
+          .is('college_email_id', null)
+          .not('assignment_source', 'eq', 'admin_unlinked');
+        for (const r of takenDirectReceipts || []) {
+          // Skip if already assigned to the TARGET drive (not a conflict)
+          if (driveIds.includes(r.placement_drive_id)) continue;
+          const normalized = (r.subject || '').toLowerCase().trim();
+          if (normalized) takenBySubject.add(normalized);
+        }
       }
     }
 
@@ -210,6 +230,16 @@ export async function GET(req: NextRequest) {
       // Respect drive registration temporal boundary if set
       if (boundary.minAllowedDate && !isEmailAllowedByDriveBoundary(em.received_at, boundary.minAllowedDate)) {
         continue;
+      }
+
+      // Skip direct personal receipts (no college_email_id) whose subject is already
+      // assigned to another drive. These are NeoPAT/VIT broadcast emails that were
+      // forwarded to multiple students — one subject = one drive.
+      if (!em.college_email_id && !em.canonical_email_id) {
+        const normalizedSubject = (em.subject || '').toLowerCase().trim();
+        if (normalizedSubject && takenBySubject.has(normalizedSubject)) {
+          continue;
+        }
       }
 
       // Group ONLY by canonical circular identity, never by subject: "Re: X" replies

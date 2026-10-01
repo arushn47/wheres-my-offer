@@ -1840,7 +1840,7 @@ export function extractJobDetails(text: string): ExtractedJobDetails {
 
     // "Job Location: Tata Technologies Ltd. Pune/ Bangalore/Thane" -> "Pune / Bangalore / Thane"
     const withSpacedSlashes = rawLoc.replace(/\s*\/\s*/g, ' / ').trim();
-    const CITY_ALTERNATION = 'Pune|Bangalore|Bengaluru|Hyderabad|Secunderabad|Chennai|Mumbai|Thane|Navi\\s+Mumbai|Noida|Greater\\s+Noida|Gurgaon|Gurugram|New\\s+Delhi|Delhi|Kolkata|Ahmedabad|Gandhinagar|Coimbatore|Kochi|Indore|Bhopal|Jaipur|Chandigarh|Mohali|Trivandrum|Visakhapatnam|Mysore|Nagpur|Surat|Vadodara|Pan\\s+India|Remote|Across\\s+India';
+    const CITY_ALTERNATION = 'Pune|Bangalore|Bengaluru|Hyderabad|Secunderabad|Chennai|Mumbai|Thane|Navi\\s+Mumbai|Noida|Greater\\s+Noida|Gurgaon|Gurugram|New\\s+Delhi|Delhi|Kolkata|Ahmedabad|Gandhinagar|Coimbatore|Kochi|Indore|Bhopal|Jaipur|Chandigarh|Mohali|Trivandrum|Visakhapatnam|Mysore|Nagpur|Surat|Vadodara|Bhubaneswar|Bhubaneshwar|Cuttack|Pan\\s+India|Remote|Across\\s+India';
     const suffixSplit = withSpacedSlashes.match(/^(.{2,60}?(?:Ltd|Limited|Pvt|Private|Inc|Incorporated|LLP|Corp)\.?)\s+(.+)$/i);
     if (suffixSplit && new RegExp(`^(?:${CITY_ALTERNATION})(?:\\s*\/\\s*(?:${CITY_ALTERNATION}))*$`, 'i').test(suffixSplit[2].trim())) {
       rawLoc = suffixSplit[2].trim();

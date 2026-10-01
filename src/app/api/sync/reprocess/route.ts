@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getSession } from '@/lib/auth';
+import { loadUserCandidateIdentity } from '@/lib/sync/user-identity';
 import { createAdminClient } from '@/lib/supabase/admin';
 import {
   classifyEmail,
@@ -20,7 +21,7 @@ import {
   resolveDriveByTimingCorrelation,
 } from '@/lib/sync/drive-correlator';
 import { pickRegistrationDeadline } from '@/lib/sync/events';
-import { classifyShortlistEmail } from '@/lib/sync/round-identity';
+import { classifyShortlistEmail, parseRecruitmentProcess, buildAnnouncedProcessToken } from '@/lib/sync/round-identity';
 
 
 export const dynamic = 'force-dynamic';
@@ -69,8 +70,9 @@ export async function recalculateApplicationStatuses(
     .eq('id', userId)
     .single();
 
-  const userNeoId = userData?.neo_id || null;
-  const userEmail = userData?.email || '';
+  const candidateIdentity = await loadUserCandidateIdentity(supabase, userId);
+  const userNeoId = candidateIdentity.neoId || userData?.neo_id || null;
+  const userEmail = candidateIdentity.personalEmail || candidateIdentity.emails[0] || userData?.email || '';
 
   if (!userEmail) return { updatedCount: 0, results: [] };
 
@@ -207,21 +209,41 @@ export async function recalculateApplicationStatuses(
       }
       if (!cChunk || cChunk.length === 0) break;
 
-      allCollegeEmails.push(...cChunk.map((ce: any) => ({
-        id: ce.id,
-        subject: ce.subject,
-        sender: ce.sender_email,
-        received_at: ce.received_at || ce.created_at,
-        body_snippet: ce.body_snippet || '',
-        classification: ce.classification,
-        parsed_company_name: ce.parsed_company_name,
-        parsed_drive_numbers: ce.parsed_drive_numbers || [],
-        placement_drive_id: null,
-        college_email_id: ce.id,
-        canonical_email_id: ce.id,
-        assignment_source: 'college_broadcast',
-        has_canonical_body: Boolean(ce.body_snippet && ce.body_snippet.length > 500),
-      })));
+      for (const ce of cChunk) {
+        let classification = ce.classification;
+        const dynamicClass = classifyEmail({
+          subject: ce.subject || '',
+          bodySnippet: ce.body_snippet || '',
+          bodyPlain: ce.body_snippet || '',
+          sender: ce.sender_email || '',
+          senderEmail: ce.sender_email || '',
+        } as any).classification;
+
+        if (dynamicClass && dynamicClass !== 'unclassified' && dynamicClass !== ce.classification) {
+          classification = dynamicClass;
+          supabase
+            .from('college_emails')
+            .update({ classification: dynamicClass })
+            .eq('id', ce.id)
+            .then(() => {});
+        }
+
+        allCollegeEmails.push({
+          id: ce.id,
+          subject: ce.subject,
+          sender: ce.sender_email,
+          received_at: ce.received_at || ce.created_at,
+          body_snippet: ce.body_snippet || '',
+          classification,
+          parsed_company_name: ce.parsed_company_name,
+          parsed_drive_numbers: ce.parsed_drive_numbers || [],
+          placement_drive_id: null,
+          college_email_id: ce.id,
+          canonical_email_id: ce.id,
+          assignment_source: 'college_broadcast',
+          has_canonical_body: Boolean(ce.body_snippet && ce.body_snippet.length > 500),
+        });
+      }
 
       if (cChunk.length < pageSize) break;
       clgPage++;
@@ -572,11 +594,15 @@ export async function recalculateApplicationStatuses(
           hasExplicitTime: boolean;
         }> = [];
 
-        // 0. Scan company emails for candidate matches (email body direct matches and Google Sheets)
+        // 0. Scan broadcast circulars (college emails) for candidate matches (email body direct matches and Google Sheets)
+        // NEVER scan personal transactional emails!
         for (const email of companyEmails) {
+          if (userPersonalEmailIdSet.has(email.id) || (!email.college_email_id && !email.canonical_email_id && !email.sender)) {
+            continue;
+          }
           const emailText = `${email.subject || ''}\n${email.body_snippet || ''}`;
           const isRelevantCandidateEmail =
-            /shortlist|selection|selected|test|assessment|interview|score|rank|eligible|candidates|students/i.test(
+            /shortlist|selection|selected|test\s+shortlist|interview\s+shortlist|shortlisted\s+candidates|selected\s+candidates/i.test(
               emailText
             );
           if (!isRelevantCandidateEmail) continue;
@@ -591,7 +617,7 @@ export async function recalculateApplicationStatuses(
 
           // Check direct Neo ID or Reg No match in email body
           const { checkNeoIdMatch } = await import('@/lib/sync/status-engine');
-          const bodyMatch = checkNeoIdMatch(emailText, userNeoId, userEmail);
+          const bodyMatch = checkNeoIdMatch(emailText, userNeoId, userEmail, candidateIdentity.name, candidateIdentity);
           if (bodyMatch.matched) {
             matchedEmailIds.add(email.id);
             const isShortlistNotice = /shortlist|selection|selected|result/i.test(email.subject || '');
@@ -645,7 +671,7 @@ export async function recalculateApplicationStatuses(
 
             const gUrls = extractGoogleSheetUrls(emailText);
             for (const gUrl of gUrls) {
-              const gMatch = await scanGoogleSheetForCandidate(gUrl, userEmail, userNeoId, userData?.name);
+              const gMatch = await scanGoogleSheetForCandidate(gUrl, userEmail, userNeoId, candidateIdentity.name, candidateIdentity);
               if (gMatch && gMatch.matched) {
                 matchedEmailIds.add(email.id);
                 const matchExists = (candidateMatches || []).some(
@@ -655,15 +681,23 @@ export async function recalculateApplicationStatuses(
                   }
                 );
                 if (!matchExists) {
-                  const { error: candidateMatchError } = await supabase.from('candidate_matches').insert({
+                  const isCollegeRef = Boolean(email.college_email_id || email.canonical_email_id || (email as any).sender_email);
+                  const round = classifyShortlistEmail(email.subject || '', emailText) ?? 'test';
+                  const insertPayload: any = {
                     user_id: userId,
-                    email_id: email.id,
                     placement_drive_id: drive.id,
                     neo_id: userNeoId || userEmail,
                     match_type: 'xlsx_cell',
+                    matched_round_type: round,
                     matched_value: gMatch.details,
                     confidence: 'high',
-                  });
+                  };
+                  if (isCollegeRef) {
+                    insertPayload.college_email_id = email.id;
+                  } else {
+                    insertPayload.email_id = email.id;
+                  }
+                  const { error: candidateMatchError } = await supabase.from('candidate_matches').insert(insertPayload);
                   if (candidateMatchError && candidateMatchError.code !== '23505') {
                     throw candidateMatchError;
                   }
@@ -853,13 +887,49 @@ export async function recalculateApplicationStatuses(
           ) {
             return false;
           }
-          return (
+          const isWithdrawalEmail = (
             e.classification === 'withdrawal' ||
             e.classification === 'decline' ||
             /registration.*withdrawn|your registration.*withdrawn|declined\s+drive/i.test(full) ||
             /confirmation.*drive\s+registration\s+update.*withdrawn/i.test(full)
           );
+          if (!isWithdrawalEmail) return false;
+
+          // Drive-number specificity check: if the email body explicitly names a drive number
+          // AND it does NOT match this drive's number, this withdrawal email belongs to a
+          // sibling drive of the same company — do not count it here.
+          const thisDriveId = (drive as any).id as string | undefined;
+          const thisDriveNum = (drive as any).drive_number as string | undefined;
+
+          // Primary check: use the pre-assigned placement_drive_id on the email row
+          const emailAssignedDriveId = (e as any).placement_drive_id as string | undefined;
+          if (emailAssignedDriveId && thisDriveId && emailAssignedDriveId !== thisDriveId) {
+            return false; // withdrawal belongs to a different drive (e.g. sibling of same company)
+          }
+
+          // Secondary check: if no pre-assignment, look for explicit drive number in the snippet
+          if (!emailAssignedDriveId && thisDriveNum) {
+            const driveNumPattern = /pat-pl-\d{4}-\d+/gi;
+            const mentionedDriveNums = (e.body_snippet || '').match(driveNumPattern) || [];
+            if (mentionedDriveNums.length > 0) {
+              const normalized = thisDriveNum.toLowerCase();
+              const matchesThisDrive = mentionedDriveNums.some(
+                (n) => n.toLowerCase() === normalized
+              );
+              if (!matchesThisDrive) return false;
+            }
+          }
+
+          // Temporal guard: withdrawal must not predate this drive's earliest known email.
+          // e.g. an Aug 18 withdrawal cannot be for a drive whose first email was Sep 17.
+          if (driveMinAllowedTime > 0 && e.received_at) {
+            const wTime = new Date(e.received_at).getTime();
+            if (wTime < driveMinAllowedTime) return false;
+          }
+
+          return true;
         });
+
 
         const latestWithdrawalTime = withdrawalEmails.reduce((max, e) => {
           const t = e.received_at ? new Date(e.received_at).getTime() : 0;
@@ -980,21 +1050,44 @@ export async function recalculateApplicationStatuses(
           const b = (e.body_snippet || '').toLowerCase();
           const full = `${s} ${b}`;
 
+          // Check dynamic classification
+          const isClassifiedAsTest =
+            e.classification === 'test' ||
+            classifyEmail({
+              subject: e.subject || '',
+              bodySnippet: e.body_snippet || '',
+              bodyPlain: e.body_snippet || '',
+              sender: (e as any).sender || '',
+              senderEmail: (e as any).sender || '',
+            } as any).classification === 'test';
+
           // 1. Explicit scheduling phrase in subject or direct test links
           const isExplicitSubjectSchedule =
-            /(?:online\s+)?(?:test|assessment|exam)\s+(?:is\s+)?(?:scheduled|rescheduled)|(?:online\s+)?(?:test|assessment|exam)\s+schedule/i.test(s) ||
+            /(?:online\s+)?(?:test|assessment|exam)\s+(?:is\s+)?(?:scheduled|rescheduled)|(?:online\s+)?(?:test|assessment|exam)\s+(?:schedule|time|timing|slot)|revised\s+test\s+time/i.test(s) ||
             /test\s+link|assessment\s+link|exam\s+link/i.test(s);
 
           if (isExplicitSubjectSchedule) {
             return true;
           }
 
-          // 2. Registration circulars, opt-in Google Forms, or mandatory registration emails
+          // 2. Direct test platform link or explicit test session in body
+          const hasDirectPlatformOrSlot =
+            /(?:tests?\.mettl\.com|app\.mettl\.com|hackerrank\.com|hackerearth\.com|codility\.com|shl\.com|amcat\.in|cocubes\.com)/i.test(full) ||
+            /test\s*\d*\s*[:\-]\s*\d{1,2}:\d{2}|attempt\s+the\s+test|attend\s+the\s+test|fresh\s+link\s+for\s+test|test\s+today/i.test(full);
+
+          if (isClassifiedAsTest && !isRegistrationCircular(e)) {
+            return true;
+          }
+
+          if (hasDirectPlatformOrSlot && !isRegistrationCircular(e)) {
+            return true;
+          }
+
+          // 3. Registration circulars, opt-in Google Forms, or mandatory registration emails
           if (
             isRegistrationCircular(e) ||
-            e.classification === 'registration' ||
             /super\s*dream.*registration|dream.*registration|placement\s+registration|internship\s+registration/i.test(s) ||
-            /forms\.gle|google\s+form|registration\s+link|register\s+(?:in|on)\s+the\s+(?:below\s+)?link|mandatory\s+.*registration/i.test(full)
+            (/forms\.gle|google\s+form|registration\s+link|register\s+(?:in|on)\s+the\s+(?:below\s+)?link|mandatory\s+.*registration/i.test(full) && !hasDirectPlatformOrSlot)
           ) {
             // Only accept if body explicitly states "test is scheduled on <date>"
             if (!/(?:online\s+)?(?:test|assessment|exam)\s+(?:is\s+)?scheduled\s+(?:on|for)|\bon\s+\d{1,2}[-/.]\d{1,2}/i.test(b)) {
@@ -1060,23 +1153,42 @@ export async function recalculateApplicationStatuses(
             .filter(Boolean)
         );
 
-        const roundForMatchedEmail = (emailId: string, round: 'test' | 'interview' | 'selected') =>
-          (candidateMatches || []).some((m) => {
+        const roundForMatchedEmail = (emailOrId: string | { id: string; college_email_id?: string | null; canonical_email_id?: string | null }, round: 'test' | 'interview' | 'selected') => {
+          const ids = typeof emailOrId === 'string'
+            ? [emailOrId]
+            : [emailOrId.id, emailOrId.college_email_id, emailOrId.canonical_email_id].filter(Boolean) as string[];
+          return (candidateMatches || []).some((m) => {
             const match = m as unknown as { email_id: string | null; college_email_id: string | null; matched_round_type?: string | null; match_type?: string };
-            return (match.email_id === emailId || match.college_email_id === emailId) &&
-              match.matched_round_type === round &&
+            const mRef = match.email_id || match.college_email_id;
+            return mRef && ids.includes(mRef) &&
+              (match.matched_round_type === round || (match.matched_round_type == null && round === 'test')) &&
               match.match_type !== 'xlsx_applied_list';
           });
+        };
 
         const sortedSelectionEmails = [...selectionEmails].sort(
           (a, b) => (a.received_at ? new Date(a.received_at).getTime() : 0) - (b.received_at ? new Date(b.received_at).getTime() : 0)
         );
-        const isMatchedInSelectionList = sortedSelectionEmails.some((e) => roundForMatchedEmail(e.id, 'selected'));
+        let isMatchedInSelectionList = sortedSelectionEmails.some((e) => roundForMatchedEmail(e as any, 'selected'));
+        if (!isMatchedInSelectionList) {
+          const driveMatches = candidateMatchesByDriveId.get(drive.id) || [];
+          isMatchedInSelectionList = driveMatches.some(
+            (m) => m.matched_round_type === 'selected' && m.match_type !== 'xlsx_applied_list'
+          );
+        }
 
         const sortedNextRoundEmails = [...nextRoundEmails].sort(
           (a, b) => (a.received_at ? new Date(a.received_at).getTime() : 0) - (b.received_at ? new Date(b.received_at).getTime() : 0)
         );
-        const isMatchedInNextRound = sortedNextRoundEmails.some((e) => roundForMatchedEmail(e.id, 'interview'));
+        let isMatchedInNextRound = sortedNextRoundEmails.some((e) => roundForMatchedEmail(e as any, 'interview'));
+        if (!isMatchedInNextRound) {
+          const driveMatches = candidateMatchesByDriveId.get(drive.id) || [];
+          isMatchedInNextRound = driveMatches.some(
+            (m) =>
+              ['interview', 'interview_r2', 'gd'].includes(m.matched_round_type) &&
+              m.match_type !== 'xlsx_applied_list'
+          );
+        }
 
         const hasCompanyCandidateMatch = activeDriveEmails.some((e) => matchedEmailIds.has(e.id));
 
@@ -1087,12 +1199,20 @@ export async function recalculateApplicationStatuses(
         let isMatchedInTest = false;
         if (sortedTestShortlists.length > 0) {
           const latestTestShortlistEmail = sortedTestShortlists[sortedTestShortlists.length - 1];
-          isMatchedInTest = roundForMatchedEmail(latestTestShortlistEmail.id, 'test');
+          isMatchedInTest = roundForMatchedEmail(latestTestShortlistEmail as any, 'test');
         }
         if (!isMatchedInTest) {
           isMatchedInTest =
-            testShortlistEmails.some((e) => roundForMatchedEmail(e.id, 'test')) ||
-            testEmails.some((e) => roundForMatchedEmail(e.id, 'test'));
+            testShortlistEmails.some((e) => roundForMatchedEmail(e as any, 'test')) ||
+            testEmails.some((e) => roundForMatchedEmail(e as any, 'test'));
+        }
+        if (!isMatchedInTest) {
+          const driveMatches = candidateMatchesByDriveId.get(drive.id) || [];
+          isMatchedInTest = driveMatches.some(
+            (m) =>
+              (m.matched_round_type === 'test' || m.matched_round_type === 'test_r2' || m.matched_round_type == null) &&
+              m.match_type !== 'xlsx_applied_list'
+          );
         }
         // A personal test invitation email (e.g. Goldman Sachs direct link) only establishes shortlisting
         // when NO explicit test shortlist roster (Excel/attachment) exists for this drive.
@@ -1132,7 +1252,12 @@ export async function recalculateApplicationStatuses(
           })),
         }));
 
-        const allExtractedEvents = extractedByEmail.flatMap((x) => x.events);
+        const allExtractedEvents = [
+          ...extractedByEmail.flatMap((x) => x.events),
+          ...gsheetEventsForCompany,
+        ];
+
+        const existingApp = appsByDriveId.get(drive.id) || null;
 
         const deadlineWinner = pickRegistrationDeadline(
           extractedByEmail.flatMap(({ e, events }) =>
@@ -1144,6 +1269,10 @@ export async function recalculateApplicationStatuses(
             }))
           )
         );
+
+        const finalRegDeadline = deadlineWinner?.event.startTime
+          ? deadlineWinner.event.startTime.toISOString()
+          : (existingApp?.registration_deadline || null);
 
         const hasPptEvent = activeDriveEmails.some((e) => {
           if (!isAfterRegistration(e)) return false;
@@ -1200,14 +1329,35 @@ export async function recalculateApplicationStatuses(
           );
           const interviewTime = latestInterviewEventTime || nextRoundMatchTime;
 
-          if (!hasUpcomingInterviewEvent && subsequentSelectionEmails.length > 0) {
+          const latestNextRoundTime = nextRoundEmails.reduce((max, e) => {
+            const t = e.received_at ? new Date(e.received_at).getTime() : 0;
+            return Math.max(max, t);
+          }, 0);
+          const earliestSubsequentSelectionTime = subsequentSelectionEmails.reduce((min, e) => {
+            const t = e.received_at ? new Date(e.received_at).getTime() : Infinity;
+            return Math.min(min, t);
+          }, Infinity);
+
+          // In multi-campus drives (e.g. Infosys across Vellore, Chennai, AP, Bhopal),
+          // other campuses often complete interviews first, releasing interim selection lists
+          // (e.g. batch-1, batch-2) while Bhopal's interview round is still scheduled/ongoing.
+          // Never mark shortlisted candidates as rejected if interview circulars were sent
+          // after/concurrently with selection emails, or state interview dates are future/pending.
+          const hasStaggeredCampusInterviews =
+            (latestNextRoundTime > 0 && earliestSubsequentSelectionTime < Infinity && latestNextRoundTime >= earliestSubsequentSelectionTime) ||
+            nextRoundEmails.some((e) => {
+              const full = `${e.subject || ''} ${e.body_snippet || ''}`.toLowerCase();
+              return /from\s+\d{1,2}(?:st|nd|rd|th)?\s+[a-z]+\s+onwards|dates\s+for\s+interview\s+are\s+not\s+confirmed|interview.*will\s+happen\s+soon/i.test(full);
+            });
+
+          if (!hasUpcomingInterviewEvent && !hasStaggeredCampusInterviews && subsequentSelectionEmails.length > 0) {
             computedStatus = 'rejected';
             // User was interviewed (matched in next-round / interview shortlist) but a
-            // selection list came out afterwards without them â†’ Interviewed Â· Not Selected
-            computedRejectionNote = 'Interviewed Â· Not Selected';
-          } else if (!hasUpcomingInterviewEvent && interviewTime > 0 && (Date.now() - interviewTime) > 14 * 24 * 60 * 60 * 1000) {
+            // selection list came out afterwards without them → Interviewed · Not Selected
+            computedRejectionNote = 'Interviewed · Not Selected';
+          } else if (!hasUpcomingInterviewEvent && interviewTime > 0 && (Date.now() - interviewTime) > 14 * 24 * 60 * 60 * 1000 && !hasStaggeredCampusInterviews) {
             computedStatus = 'rejected';
-            computedRejectionNote = 'Interviewed Â· Not Selected';
+            computedRejectionNote = 'Interviewed · Not Selected';
           } else if (!hasUpcomingInterviewEvent && interviewTime > 0 && interviewTime < Date.now()) {
             computedStatus = 'interview_completed';
           } else {
@@ -1250,13 +1400,17 @@ export async function recalculateApplicationStatuses(
           if (selectionEmails.length > 0 || nextRoundEmails.length > 0 || testShortlistEmails.length > 0) {
             computedStatus = 'not_shortlisted';
           } else if (testEmails.length > 0) {
-            // A test was scheduled. If we have no positive candidate match for any test or
-            // shortlist email, the user was not shortlisted (the test announcement went to all
-            // registered students but a separate shortlist determined who actually sits).
-            // Only keep test_scheduled if there's a positive match somewhere (handled above).
-            const hasAnyMatchInTestEmails = testEmails.some((e) => matchedEmailIds.has(e.id));
-            if (hasAnyMatchInTestEmails || hasDirectPersonalTestInvitation) {
-              computedStatus = 'test_scheduled';
+            const testEvents = allExtractedEvents.filter(
+              (e) => ['online_test', 'coding_test'].includes(e.eventType) && e.startTime
+            );
+            const hasUpcomingTestEvent = testEvents.some((e) => Boolean(e.startTime && e.startTime.getTime() > Date.now()));
+            const latestTestEventTime = testEvents.reduce(
+              (max, e) => Math.max(max, e.startTime ? e.startTime.getTime() : 0),
+              0
+            );
+
+            if (!hasUpcomingTestEvent && latestTestEventTime > 0 && latestTestEventTime < Date.now()) {
+              computedStatus = 'test_completed';
             } else {
               computedStatus = 'test_scheduled';
             }
@@ -1265,28 +1419,19 @@ export async function recalculateApplicationStatuses(
           } else {
             computedStatus = 'applied';
           }
-        } else if (hasCompanyCandidateMatch) {
-          if (selectionEmails.length > 0 || nextRoundEmails.length > 0 || testShortlistEmails.length > 0) {
-            computedStatus = 'not_shortlisted';
-          } else if (testEmails.length > 0) {
-            const hasAnyMatchInTestEmails = testEmails.some((e) => matchedEmailIds.has(e.id));
-            if (hasAnyMatchInTestEmails || hasDirectPersonalTestInvitation) {
-              computedStatus = 'test_scheduled';
-            } else {
-              computedStatus = 'test_scheduled';
-            }
-          } else if (hasPptEvent) {
-            computedStatus = 'ppt_scheduled';
-          } else {
-            computedStatus = 'applied';
-          }
-        } else if (selectionEmails.length > 0 || nextRoundEmails.length > 0 || testShortlistEmails.length > 0 || testEmails.length > 0) {
-          computedStatus = 'not_applied';
         } else {
-          computedStatus = 'not_applied';
+          // Candidate NEVER confirmed registration and is not withdrawn!
+          // A candidate who never applied CANNOT be shortlisted, tested, or eliminated!
+          const now = Date.now();
+          const regDeadlineTime = finalRegDeadline ? new Date(finalRegDeadline).getTime() : 0;
+          if (regDeadlineTime > now) {
+            computedStatus = 'registration_open';
+          } else {
+            computedStatus = 'not_applied';
+          }
         }
 
-        const existingApp = appsByDriveId.get(drive.id) || null;
+
 
         // GUARD: Reprocess only has access to email subjects + body snippets — it cannot
         // re-scan Excel attachments. The archive scanner (and the live sync status-engine)
@@ -1296,11 +1441,25 @@ export async function recalculateApplicationStatuses(
         // concrete positive evidence of shortlisting (a personal match in a roster).
         const hasPositiveCandidateEvidence = isMatchedInTest || isMatchedInNextRound || isMatchedInSelectionList ||
           (candidateMatchesByDriveId.get(drive.id) || []).length > 0;
+
+        const hasDriveShortlistEvidence =
+          testShortlistEmails.length > 0 ||
+          testEmails.length > 0 ||
+          nextRoundEmails.length > 0 ||
+          selectionEmails.length > 0 ||
+          activeDriveEmails.some((e) =>
+            /shortlist|selection\s*list|selected\s*(?:candidates|students)|test\s*schedule/i.test(
+              `${e.subject || ''} ${e.body_snippet || ''}`
+            )
+          );
+
         if (
           !existingApp?.manual_override &&
+          !options?.recalculateStatusesFromRemainingEvidence &&
           existingApp?.status === 'not_shortlisted' &&
           ['test_scheduled', 'ppt_scheduled', 'applied'].includes(computedStatus) &&
-          !hasPositiveCandidateEvidence
+          !hasPositiveCandidateEvidence &&
+          hasDriveShortlistEvidence
         ) {
           computedStatus = 'not_shortlisted';
         }
@@ -1326,10 +1485,16 @@ export async function recalculateApplicationStatuses(
         const computedPriority = STATUS_PRIORITY[computedStatus] ?? 0;
         const hasPriorCandidateEvidence = matchedShortlistEmailIds.size > 0;
         const hasShortlistMatch = isMatchedInTest || isMatchedInNextRound || isMatchedInSelectionList;
-        const isPhantomRejection =
+        const isPhantomNotShortlisted =
           !existingApp?.manual_override &&
+          (existingApp?.status === 'not_shortlisted' || existingApp?.status === 'rejected') &&
+          (!hasConfirmedRegistration || (computedStatus === 'applied' && !hasDriveShortlistEvidence) || computedStatus === 'not_applied' || computedStatus === 'registration_open');
+
+        const isPhantomRejection =
+          (!existingApp?.manual_override &&
           existingApp?.status === 'rejected' &&
-          computedStatus === 'not_shortlisted';
+          computedStatus === 'not_shortlisted') ||
+          isPhantomNotShortlisted;
 
         const isEvidenceBackedTerminal =
           ['rejected', 'selected', 'offer_received'].includes(computedStatus) &&
@@ -1372,26 +1537,51 @@ export async function recalculateApplicationStatuses(
           }
         }
 
+        // Extract announced recruitment process from circulars (e.g. Test 1, Test 2, Game Round, Interview)
+        let announcedRounds = mainEmailText ? parseRecruitmentProcess(mainEmailText) : null;
+        if (!announcedRounds && collegeCompanyEmails.length > 0) {
+          for (const cEmail of collegeCompanyEmails) {
+            const text = `${cEmail.subject || ''}\n${cEmail.body_snippet || ''}`;
+            announcedRounds = parseRecruitmentProcess(text);
+            if (announcedRounds) break;
+          }
+        }
+        if (!announcedRounds && combinedEmailText) {
+          announcedRounds = parseRecruitmentProcess(combinedEmailText);
+        }
+
+        const announcedProcessToken = announcedRounds
+          ? buildAnnouncedProcessToken(announcedRounds)
+          : (existingApp?.notes?.split('\n').find((l: string) => l.trim().startsWith('announced_process:')) || null);
+
         // Build the final notes value:
-        // - For manual override: preserve existing notes verbatim.
+        // - For manual override: preserve existing notes verbatim, adding announced process if not present.
         // - For computed rejection states: the rejection context note is the authoritative first line;
         //   travel mode (if known) is appended as a second line so it isn't lost.
         // - Otherwise: travel note is used as-is.
+        // - Announced process token is preserved / appended across all application records.
         let finalNotes: string | null;
         if (existingApp?.manual_override) {
           const previousNotes = existingApp?.notes || '';
-          if (shouldRefreshTravelMode && travelReq) {
-            finalNotes = refreshTravelModeNote(previousNotes, travelReq);
-          } else {
-            finalNotes = existingApp?.notes || null;
+          let baseNotes = shouldRefreshTravelMode && travelReq
+            ? refreshTravelModeNote(previousNotes, travelReq)
+            : previousNotes;
+          if (announcedProcessToken && !baseNotes.includes('announced_process:')) {
+            baseNotes = baseNotes ? `${baseNotes}\n${announcedProcessToken}` : announcedProcessToken;
           }
-        } else if (computedRejectionNote) {
-          // Rejection context is the primary note; optionally append travel mode
-          finalNotes = finalTravel
-            ? `${computedRejectionNote}\n${finalTravel}`
-            : computedRejectionNote;
+          finalNotes = baseNotes || null;
         } else {
-          finalNotes = finalTravel || null;
+          const noteParts: string[] = [];
+          if (computedRejectionNote) {
+            noteParts.push(computedRejectionNote);
+            if (finalTravel) noteParts.push(finalTravel);
+          } else if (finalTravel) {
+            noteParts.push(finalTravel);
+          }
+          if (announcedProcessToken && !noteParts.some((p) => p.startsWith('announced_process:'))) {
+            noteParts.push(announcedProcessToken);
+          }
+          finalNotes = noteParts.length > 0 ? noteParts.join('\n') : null;
         }
 
         let workLocation = extractedJob.location || null;
@@ -1427,9 +1617,7 @@ export async function recalculateApplicationStatuses(
           }
         }
 
-        const finalRegDeadline = deadlineWinner?.event.startTime
-          ? deadlineWinner.event.startTime.toISOString()
-          : (existingApp?.registration_deadline || null);
+
 
         const appPayload = {
           user_id: userId,
@@ -1449,7 +1637,9 @@ export async function recalculateApplicationStatuses(
           cgpa_requirement: extractedJob.cgpaRequirement || existingApp?.cgpa_requirement || null,
           backlog_requirement: extractedJob.backlogRequirement || existingApp?.backlog_requirement || null,
           notes: finalNotes,
-          applied_at: (registrationEmails[0]?.received_at ? new Date(registrationEmails[0].received_at) : (driveStartDate || (existingApp?.applied_at ? new Date(existingApp.applied_at) : new Date()))).toISOString(),
+          applied_at: hasConfirmedRegistration
+            ? (registrationEmails[0]?.received_at ? new Date(registrationEmails[0].received_at).toISOString() : (existingApp?.applied_at || new Date().toISOString()))
+            : null,
           last_updated: new Date().toISOString(),
         };
 
@@ -1646,12 +1836,15 @@ export async function recalculateApplicationStatuses(
               mode: evt.mode,
               confidence: evt.confidence,
               manual_override: false,
+              round_number: 1,
               college_email_id: evt._collegeEmailId ?? null,
             });
           }
 
           if (eventsToInsert.length > 0) {
-            await supabase.from('events').insert(eventsToInsert);
+            await supabase.from('events').upsert(eventsToInsert, {
+              onConflict: 'user_id,placement_drive_id,event_type,round_number',
+            });
           }
         }
 
