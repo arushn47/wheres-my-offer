@@ -413,6 +413,7 @@ export default function UsersClient() {
   };
 
   const filteredUsers = users.filter((u) => {
+    if (u.role === 'admin') return false;
     const q = searchQuery.toLowerCase().trim();
     if (!q) return true;
     const nameMatch = u.name?.toLowerCase().includes(q);
