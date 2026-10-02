@@ -1,5 +1,5 @@
 import { deriveEventEndTime } from '@/lib/event-duration';
-import { parseEliminationToken, deriveStageId, deriveStageLabelFromId } from '@/lib/sync/round-identity';
+import { parseEliminationToken, parseAnnouncedProcessToken, deriveStageId, deriveStageLabelFromId } from '@/lib/sync/round-identity';
 
 export interface StageDefinition {
   id: string;
@@ -181,7 +181,27 @@ export function getEffectiveStage(
   const isNotesTest =
     eliminationCtx.roundType === 'test' || eliminationCtx.roundType === 'test_r2' ||
     /eliminated.*test|test.*eliminated|rejected.*test|test.*rejected/i.test(notesText);
-  const notShortlistedSubtitle = isPptCompleted
+
+  // Check announced recruitment process tokens from notes
+  const announcedRounds = parseAnnouncedProcessToken(notes);
+  const hasAnnouncedPpt = Boolean(announcedRounds?.some((r) => r.roundType === 'ppt'));
+
+  const isExplicitPostPpt =
+    s === 'not_shortlisted_post_ppt' ||
+    eliminationCtx.roundType === 'post_ppt' ||
+    /not\s*shortlisted\s*\(post\s*ppt\)|not\s*shortlisted\s*post[\s-]*ppt|not\s*shortlisted\s*after\s*ppt|post[\s-]*ppt|after\s*ppt/i.test(notesText);
+
+  const hasFuturePpt = pptEvents.some((e) => !isEventPast(e));
+
+  const effectiveHasPpt = hasPpt || hasAnnouncedPpt || isExplicitPostPpt;
+  const effectiveIsPptCompleted =
+    !hasFuturePpt &&
+    (isPptCompleted ||
+      isExplicitPostPpt ||
+      (hasAnnouncedPpt &&
+        ['not_shortlisted', 'not_shortlisted_post_ppt', 'rejected', 'test_scheduled', 'test_completed', 'interview_scheduled', 'interview_completed', 'selected', 'offer', 'offer_received'].includes(s)));
+
+  const notShortlistedSubtitle = effectiveIsPptCompleted
     ? 'Not Shortlisted · Post-PPT'
     : 'Not Shortlisted · In Screening';
 
@@ -194,6 +214,7 @@ export function getEffectiveStage(
       test_r2:      'online_test',
       gd:           'group_discussion',
       ppt:          'ppt',
+      post_ppt:     'online_test',
       interview:    'technical_interview',
       interview_r2: 'technical_interview',
     };
@@ -216,21 +237,21 @@ export function getEffectiveStage(
   // If the application status was manually set by the user, honor it strictly!
   // Do NOT let company-wide broadcast events hijack a manually specified status.
   if (manualOverride) {
-    if (s === 'not_shortlisted') {
+    if (s === 'not_shortlisted' || s === 'not_shortlisted_post_ppt') {
       return {
         stageIndex: 2,
         effectiveStatus: 'not_shortlisted',
         eliminatedStage: 2,
-        furthestPassedStage: isPptCompleted ? 1 : 0,
+        furthestPassedStage: effectiveIsPptCompleted ? 1 : 0,
         statusSubtitle: notShortlistedSubtitle,
-        hasPpt,
+        hasPpt: effectiveHasPpt,
         hasTest,
         hasInterview,
         isTestCompleted,
-        isPptCompleted,
+        isPptCompleted: effectiveIsPptCompleted,
         isInterviewCompleted,
-      eliminatedStageId: null,
-      eliminationLabel: null,
+        eliminatedStageId: null,
+        eliminationLabel: null,
       };
     }
 
@@ -554,18 +575,18 @@ export function getEffectiveStage(
   // ─── AUTOMATED INFERRED STAGE PATH ────────────────────────────────────────
 
   // 1. Not Shortlisted: candidate applied but was screened out before test round (Pre-Test Screening)
-  if (s === 'not_shortlisted') {
+  if (s === 'not_shortlisted' || s === 'not_shortlisted_post_ppt') {
     return {
       stageIndex: 2,
       effectiveStatus: 'not_shortlisted',
       eliminatedStage: 2,
-      furthestPassedStage: isPptCompleted ? 1 : 0,
+      furthestPassedStage: effectiveIsPptCompleted ? 1 : 0,
       statusSubtitle: notShortlistedSubtitle,
-      hasPpt,
+      hasPpt: effectiveHasPpt,
       hasTest,
       hasInterview,
       isTestCompleted,
-      isPptCompleted,
+      isPptCompleted: effectiveIsPptCompleted,
       isInterviewCompleted,
       eliminatedStageId: null,
       eliminationLabel: null,
@@ -682,13 +703,13 @@ export function getEffectiveStage(
       stageIndex: 2,
       effectiveStatus: 'not_shortlisted',
       eliminatedStage: 2,
-      furthestPassedStage: isPptCompleted ? 1 : 0,
+      furthestPassedStage: effectiveIsPptCompleted ? 1 : 0,
       statusSubtitle: notShortlistedSubtitle,
-      hasPpt,
+      hasPpt: effectiveHasPpt,
       hasTest,
       hasInterview,
       isTestCompleted,
-      isPptCompleted,
+      isPptCompleted: effectiveIsPptCompleted,
       isInterviewCompleted,
       eliminatedStageId: null,
       eliminationLabel: null,

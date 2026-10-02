@@ -18,7 +18,7 @@ import {
 } from 'lucide-react';
 import { AppLogoMark } from '@/components/brand/logo';
 
-const LAST_UPDATED = 'September 16, 2026';
+const LAST_UPDATED = 'October 2, 2026';
 const APP_NAME = "Where's My Offer?";
 const APP_URL = 'https://www.wheresmyoffer.in';
 
@@ -412,8 +412,14 @@ export default function TermsClient() {
               </p>
               <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
                 <div>
-                  <p className="text-xs font-semibold text-white">{APP_NAME} Team</p>
-                  <p className="text-[11px] text-zinc-500 font-mono">VIT Bhopal University · Student Project</p>
+                  <p className="text-xs font-semibold text-white">{APP_NAME} Team &amp; Support</p>
+                  <p className="text-[11px] text-zinc-400 font-mono mt-0.5">
+                    Direct Email:{' '}
+                    <a href="mailto:arushmenon.7@gmail.com" className="text-emerald-400 underline underline-offset-2 hover:text-emerald-300">
+                      arushmenon.7@gmail.com
+                    </a>
+                  </p>
+                  <p className="text-[11px] text-zinc-500 font-mono mt-0.5">VIT Bhopal University · Student Project</p>
                 </div>
                 <Link
                   href="/feedback"

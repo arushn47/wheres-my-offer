@@ -28,6 +28,7 @@ import {
   extractExplicitOrdinal,
   isRescheduleEmail,
   parseRecruitmentProcess,
+  parseAnnouncedRoundsFromSubject,
   buildAnnouncedProcessToken,
 } from '@/lib/sync/round-identity';
 
@@ -1005,6 +1006,13 @@ export async function processEmailForEventsAndStatus(
 
   let newStatus: string | null = null;
   let hasConfirmedShortlistMatch = false;
+  let isPostPptElimination = false;
+
+  const isExplicitPostPptEmail =
+    /not\s*shortlisted\s*\(post\s*ppt\)|not\s*shortlisted\s*post[\s-]*ppt|not\s*shortlisted\s*after\s*ppt/i.test(subjLower + ' ' + fullText);
+  const isExplicitNotShortlistedEmail =
+    isExplicitPostPptEmail ||
+    /(?:drive\s+registration\s+update.*status:\s*not\s*shortlisted|your\s+status.*not\s*shortlisted|status\s*:\s*not\s*shortlisted)/i.test(subjLower + ' ' + fullText);
 
   if (existingApp?.manual_override && !isNeoMatched) {
     // User has manually set their status — preserve it UNLESS there is fresh
@@ -1075,6 +1083,14 @@ export async function processEmailForEventsAndStatus(
     ) {
       newStatus = 'applied';
     }
+  } else if (isExplicitNotShortlistedEmail && isEmailAfterApplication) {
+    const currentStatus = existingApp?.status || 'not_applied';
+    if (!['not_applied', 'registration_open', 'withdrawn', 'declined'].includes(currentStatus)) {
+      newStatus = 'not_shortlisted';
+      if (isExplicitPostPptEmail) {
+        isPostPptElimination = true;
+      }
+    }
   } else if (
     // E. A shortlist was officially released but candidate was NOT in it
     isShortlistEmail &&
@@ -1124,6 +1140,14 @@ export async function processEmailForEventsAndStatus(
         // It is a test or screening shortlist email (e.g. initial test shortlist or updated test shortlist)
         // If the candidate was not found in this shortlist, they did NOT qualify for the test!
         newStatus = 'not_shortlisted';
+        const hasPptEvidence =
+          isExplicitPostPptEmail ||
+          extractedEvents.some((e) => /ppt/i.test(e.eventType)) ||
+          /not\s*shortlisted\s*\(post\s*ppt\)|post[\s-]*ppt|after\s*ppt/i.test(subjLower + ' ' + fullText) ||
+          Boolean(existingApp?.notes && /announced_process:.*"roundType":"ppt"/i.test(existingApp.notes));
+        if (hasPptEvidence) {
+          isPostPptElimination = true;
+        }
       }
     }
   } else if (
@@ -1292,6 +1316,8 @@ export async function processEmailForEventsAndStatus(
       } else {
         noteParts.push('Eliminated in Test Round');
       }
+    } else if (newStatus === 'not_shortlisted' && isPostPptElimination) {
+      noteParts.push(buildEliminationToken('post_ppt'));
     }
     const prevTravel = existingApp?.notes?.split('\n')[0]?.trim();
     const isEstablishedPhysical = ['vellore', 'chennai', 'ap', 'bhopal', 'bhopal_lab'].includes(prevTravel || '');
@@ -1307,7 +1333,9 @@ export async function processEmailForEventsAndStatus(
     } else if (prevTravel && ['vellore', 'chennai', 'ap', 'bhopal', 'bhopal_lab', 'online'].includes(prevTravel)) {
       noteParts.push(prevTravel);
     }
-    const announcedProcess = parseRecruitmentProcess(fullText);
+    const announcedProcess =
+      parseRecruitmentProcess(fullText) ??
+      parseAnnouncedRoundsFromSubject(email.subject || '');
     if (announcedProcess) {
       noteParts.push(buildAnnouncedProcessToken(announcedProcess));
     } else {

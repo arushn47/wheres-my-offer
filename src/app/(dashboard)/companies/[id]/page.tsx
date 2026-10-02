@@ -4,6 +4,7 @@ import { requireSession } from '@/lib/auth';
 import { createAdminClient } from '@/lib/supabase/admin';
 import CompanyDetailClient, { type CompanyDetail } from './company-detail-client';
 import { detectCampus, detectBranch, detectRegNo } from '@/lib/utils';
+import { extractAnnouncedRoundsFromEmails, buildAnnouncedProcessToken } from '@/lib/sync/round-identity';
 
 function parseScheduledDate(sub: string): number | null {
   const m1 = sub.match(/scheduled\s+on\s+[([]?(\d{1,2}(?:st|nd|rd|th)?)\s+([A-Za-z]+)(?:\s+(20\d{2}|\b2[4-7]\b))?/i);
@@ -428,6 +429,10 @@ export default async function CompanyDetailPage(props: {
       .order('received_at', { ascending: false })
       .limit(50);
 
+    const sortedCollegeEmailRows = [...(collegeEmailRows || [])].sort((a, b) => 
+      new Date(a.received_at || 0).getTime() - new Date(b.received_at || 0).getTime()
+    );
+
     const seenCollegeSubjects = new Set<string>();
     // Pre-populate seen subjects from personal emails already in allEmailsMap
     for (const em of allEmailsMap.values()) {
@@ -435,7 +440,7 @@ export default async function CompanyDetailPage(props: {
       if (norm) seenCollegeSubjects.add(norm);
     }
 
-    for (const ce of (collegeEmailRows || [])) {
+    for (const ce of sortedCollegeEmailRows) {
       // Exclude unlinked and irrelevant circulars
       if (excludedEmailIds.has(ce.id)) continue;
       if (ce.classification === 'irrelevant') continue;
@@ -448,6 +453,7 @@ export default async function CompanyDetailPage(props: {
       if (normSub && seenCollegeSubjects.has(normSub)) {
         continue;
       }
+      if (normSub) seenCollegeSubjects.add(normSub);
 
       if (!allEmailsMap.has(ce.id)) {
         const isDriveNumberMatch = driveNumbers.some((dNum) => {
@@ -627,7 +633,17 @@ export default async function CompanyDetailPage(props: {
           cgpaRequirement: application.cgpa_requirement || targetDrive?.cgpa_requirement || sharedDriveMeta?.cgpa_requirement || null,
           backlogRequirement: application.backlog_requirement || targetDrive?.backlog_requirement || sharedDriveMeta?.backlog_requirement || null,
           manualOverride: application.manual_override,
-          notes: application.notes,
+          notes: (() => {
+            let n = application.notes || '';
+            if (!n.includes('announced_process:')) {
+              const derived = extractAnnouncedRoundsFromEmails(emails);
+              if (derived && derived.length >= 2) {
+                const token = buildAnnouncedProcessToken(derived);
+                n = n ? `${n}\n${token}` : token;
+              }
+            }
+            return n || null;
+          })(),
           appliedAt: application.applied_at,
           lastUpdated: application.last_updated,
         }

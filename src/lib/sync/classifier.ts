@@ -155,8 +155,8 @@ const CLASSIFICATION_RULES: ClassificationRule[] = [
     classification: 'result',
     confidence: 'high',
     match: (s, b) =>
-      /not\s+selected|regret\s+to\s+inform|unfortunately|could\s+not\s+be\s+selected/i.test(s + ' ' + b),
-    reason: 'Rejection language detected',
+      /not\s+selected|not\s*shortlisted|screened\s*out|regret\s+to\s+inform|unfortunately|could\s+not\s+be\s+selected/i.test(s + ' ' + b),
+    reason: 'Rejection or not shortlisted language detected',
   },
   {
     classification: 'interview',

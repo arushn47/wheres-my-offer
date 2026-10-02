@@ -22,6 +22,7 @@ export type RoundType =
   | 'test_r2'       // explicitly labeled Round 2 assessment
   | 'gd'            // group discussion — distinct from PPT and interview
   | 'ppt'           // PPT shortlist (only when candidates are named — rare)
+  | 'post_ppt'      // Screened out after PPT (attended PPT, not shortlisted for test)
   | 'interview'     // technical/HR/final interview — first or only round
   | 'interview_r2'  // explicitly labeled second/round-2 interview
   | 'selected';     // final selection / offer
@@ -288,6 +289,7 @@ export const ELIMINATION_LABELS: Partial<Record<RoundType, string>> = {
   test_r2:      'Eliminated in Round 2 Assessment',
   gd:           'Eliminated in Group Discussion',
   ppt:          'Not Shortlisted for PPT',
+  post_ppt:     'Not Shortlisted (Post PPT)',
   interview:    'Interviewed · Not Selected',
   interview_r2: 'Eliminated in Round 2 Interview',
 };
@@ -320,7 +322,15 @@ export function parseEliminationToken(notes: string | null | undefined): {
     const tokenMatch = trimmed.match(/^eliminated_at:(\w+)$/);
     if (tokenMatch) {
       const rt = tokenMatch[1] as RoundType;
+      if (rt === 'post_ppt') {
+        return { roundType: 'post_ppt', label: 'Not Shortlisted (Post PPT)' };
+      }
       return { roundType: rt, label: ELIMINATION_LABELS[rt] ?? `Eliminated (${rt})` };
+    }
+
+    // Explicit post-PPT status tokens or legacy freeform text
+    if (/not\s*shortlisted\s*\(post\s*ppt\)|not\s*shortlisted\s*post[\s-]*ppt|not\s*shortlisted\s*after\s*ppt/i.test(trimmed)) {
+      return { roundType: 'post_ppt', label: 'Not Shortlisted (Post PPT)' };
     }
 
     // Legacy freeform prose — backward compat for existing DB rows
@@ -417,81 +427,342 @@ export function parseRecruitmentProcess(text: string): AnnouncedRound[] | null {
     .map(l => l.replace(/^[•\-\*#\s]*(?:\d+[\.\)\-:]\s+)?/, '').trim())
     .filter(l => l.length > 3 && l.length < 100);
 
-  const rounds: AnnouncedRound[] = [];
   const ROUND_KEYWORD_REGEX = /\b(test|assessment|coding|ppt|pre[\s-]*placement|interview|game\s*round|gd|group\s+discussion|hackathon|technical|hr)\b/i;
 
-  let testCount = 0;
-  let interviewCount = 0;
+  interface RawRound {
+    roundType: AnnouncedRound['roundType'];
+    explicitNumber?: number;
+    dateStr?: string;
+    rawText: string;
+    isGameRound: boolean;
+    isHackathon: boolean;
+  }
+
+  const rawRounds: RawRound[] = [];
 
   for (const line of lines) {
     if (!ROUND_KEYWORD_REGEX.test(line)) continue;
 
-    // Extract date if present (e.g., "2nd October", "6th October", "15-10-2026")
-    const dateMatch = line.match(/\b(?:\d{1,2}(?:st|nd|rd|th)?\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*|\d{1,2}[-\/.]\d{1,2}(?:[-\/.]\d{2,4})?)\b/i);
+    // Extract date if present (e.g., "2nd October", "6th October", "15-10-2026", "31 august 2026")
+    const dateMatch = line.match(/\b(?:\d{1,2}(?:st|nd|rd|th)?\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*(?:\s+\d{2,4})?|\d{1,2}[-\/.]\d{1,2}(?:[-\/.]\d{2,4})?)\b/i);
     const dateStr = dateMatch ? dateMatch[0] : undefined;
 
-    // Clean round label by removing leading date prefixes (e.g. "2nd October - Test 1 (Online)" -> "Test 1 (Online)")
-    let cleanRoundName = line;
+    // Clean round label by removing date strings anywhere in the line
+    let cleanLine = line;
     if (dateStr) {
-      cleanRoundName = cleanRoundName.replace(new RegExp(`^${dateStr}\\s*[:\\-–—]?\\s*`, 'i'), '').trim();
-    }
-    if (dateStr) {
-      cleanRoundName = cleanRoundName.replace(new RegExp(`[:\\-–—]?\\s*${dateStr}$`, 'i'), '').trim();
+      cleanLine = cleanLine.replace(new RegExp(`\\b${dateStr}\\b\\s*[:\\-–—]?\\s*`, 'i'), ' ').replace(/\s{2,}/g, ' ').trim();
     }
 
-    if (!cleanRoundName || cleanRoundName.length < 3) continue;
+    if (!cleanLine || cleanLine.length < 3) continue;
+
+    // Check for explicit round numbering in text (1-10 only to prevent calendar days like "31" being treated as round 31)
+    const numMatch = cleanLine.match(/\b(?:(?:test|interview|round|assessment|stage)\s*([1-9]|10)\b|([1-9]|10)(?:st|nd|rd|th)?\s+(?:test|interview|round|assessment|stage)\b|r([1-9]|10)\b)/i);
+    const explicitNumber = numMatch ? parseInt(numMatch[1] || numMatch[2] || numMatch[3], 10) : undefined;
 
     let roundType: AnnouncedRound['roundType'] = 'other';
-    let shortLabel = cleanRoundName;
-    let roundNumber: number | undefined;
+    let isGameRound = false;
+    let isHackathon = false;
 
-    if (/\b(ppt|pre[\s-]*placement)\b/i.test(cleanRoundName)) {
+    if (/\b(ppt|pre[\s-]*placement)\b/i.test(cleanLine)) {
       roundType = 'ppt';
-      shortLabel = 'PPT';
-    } else if (/\b(game\s*round)\b/i.test(cleanRoundName)) {
+    } else if (/\b(game\s*round)\b/i.test(cleanLine)) {
       roundType = 'other';
-      shortLabel = 'Game Round';
-    } else if (/\b(gd|group\s+discussion)\b/i.test(cleanRoundName)) {
+      isGameRound = true;
+    } else if (/\b(hackathon)\b/i.test(cleanLine)) {
+      roundType = 'other';
+      isHackathon = true;
+    } else if (/\b(gd|group\s+discussion)\b/i.test(cleanLine)) {
       roundType = 'gd';
-      shortLabel = 'GD';
-    } else if (/\b(interview|hr|technical)\b/i.test(cleanRoundName)) {
+    } else if (/\b(interview|hr|technical)\b/i.test(cleanLine)) {
       roundType = 'interview';
-      interviewCount++;
-      const numMatch = cleanRoundName.match(/\b(?:round\s*(\d+)|(\d+)(?:st|nd|rd|th)?\s+round|r(\d+))\b/i);
-      roundNumber = numMatch ? parseInt(numMatch[1] || numMatch[2] || numMatch[3], 10) : interviewCount;
-      shortLabel = roundNumber > 1 ? `Interview ${roundNumber}` : (cleanRoundName.replace(/\s*\([^)]*\)/g, '').trim() || 'Interview');
-    } else if (/\b(test|assessment|coding)\b/i.test(cleanRoundName)) {
+    } else if (/\b(test|assessment|coding)\b/i.test(cleanLine)) {
       roundType = 'test';
-      testCount++;
-      const numMatch = cleanRoundName.match(/\b(?:test\s*(\d+)|round\s*(\d+)|(\d+)(?:st|nd|rd|th)?\s+test|r(\d+))\b/i);
-      roundNumber = numMatch ? parseInt(numMatch[1] || numMatch[2] || numMatch[3] || numMatch[4], 10) : testCount;
-      shortLabel = roundNumber > 1 ? `Test ${roundNumber}` : (cleanRoundName.replace(/\s*\([^)]*\)/g, '').trim() || 'Test');
     }
 
-    // Short label cleanup (strip parenthetical notes for compact badge display, keeping label descriptive)
-    shortLabel = shortLabel.replace(/\s*\((?:online|in\s*campus|virtual|in[\s-]*person)[^)]*\)/i, '').trim();
-
-    const baseId = shortLabel.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
-    const id = `${baseId}_${rounds.length + 1}`;
-
-    rounds.push({
-      id,
-      label: cleanRoundName,
-      shortLabel,
-      dateStr,
+    rawRounds.push({
       roundType,
-      roundNumber,
+      explicitNumber,
+      dateStr,
+      rawText: cleanLine,
+      isGameRound,
+      isHackathon,
     });
   }
 
   // Must have at least 2 distinct rounds to qualify as a structured process
-  if (rounds.length < 2) return null;
+  if (rawRounds.length < 2) return null;
+
+  // Campus placement rule: A drive never jumps directly from PPT (or Applied) to Interview without a Test.
+  // When circulars list PPT and Interview/GD dates but omit the test schedule (announced separately),
+  // inject a Test round before Interview/GD rounds.
+  const hasTestRound = rawRounds.some(r => r.roundType === 'test');
+  const hasInterviewOrGd = rawRounds.some(r => r.roundType === 'interview' || r.roundType === 'gd');
+  if (!hasTestRound && hasInterviewOrGd) {
+    const insertIdx = rawRounds.findIndex(r => r.roundType === 'interview' || r.roundType === 'gd');
+    rawRounds.splice(insertIdx !== -1 ? insertIdx : rawRounds.length, 0, {
+      roundType: 'test',
+      rawText: 'Test',
+      isGameRound: false,
+      isHackathon: false,
+    });
+  }
+
+  const totalTests = rawRounds.filter(r => r.roundType === 'test').length;
+  const totalInterviews = rawRounds.filter(r => r.roundType === 'interview').length;
+
+  let testSeq = 0;
+  let interviewSeq = 0;
+  const rounds: AnnouncedRound[] = [];
+  const seenIds = new Set<string>();
+
+  for (const raw of rawRounds) {
+    let label = '';
+    let shortLabel = '';
+    let roundNumber: number | undefined;
+    let baseId = '';
+
+    if (raw.roundType === 'ppt') {
+      label = 'Pre-Placement Talk';
+      shortLabel = 'PPT';
+      baseId = 'ppt';
+    } else if (raw.roundType === 'gd') {
+      label = 'Group Discussion';
+      shortLabel = 'GD';
+      baseId = 'gd';
+    } else if (raw.isGameRound) {
+      label = 'Game Round';
+      shortLabel = 'Game Round';
+      baseId = 'game_round';
+    } else if (raw.isHackathon) {
+      label = 'Hackathon';
+      shortLabel = 'Hackathon';
+      baseId = 'hackathon';
+    } else if (raw.roundType === 'test') {
+      testSeq++;
+      roundNumber = raw.explicitNumber ?? (totalTests > 1 ? testSeq : 1);
+      if (totalTests > 1 || raw.explicitNumber) {
+        label = `Test ${roundNumber}`;
+        shortLabel = `Test ${roundNumber}`;
+      } else {
+        label = 'Test';
+        shortLabel = 'Test';
+      }
+      baseId = `test_${roundNumber}`;
+    } else if (raw.roundType === 'interview') {
+      interviewSeq++;
+      roundNumber = raw.explicitNumber ?? (totalInterviews > 1 ? interviewSeq : 1);
+      if (totalInterviews > 1 || raw.explicitNumber) {
+        label = `Interview ${roundNumber}`;
+        shortLabel = `Interview ${roundNumber}`;
+      } else {
+        label = 'Interview';
+        shortLabel = 'Interview';
+      }
+      baseId = `interview_${roundNumber}`;
+    } else {
+      const clean = raw.rawText.replace(/\s*\([^)]*\)/g, '').replace(/[-–—].*$/, '').trim();
+      label = clean || 'Round';
+      shortLabel = clean || 'Round';
+      baseId = shortLabel.toLowerCase().replace(/[^a-z0-9]+/g, '_') || 'round';
+    }
+
+    let id = baseId;
+    let counter = 2;
+    while (seenIds.has(id)) {
+      id = `${baseId}_${counter++}`;
+    }
+    seenIds.add(id);
+
+    rounds.push({
+      id,
+      label,
+      shortLabel,
+      dateStr: raw.dateStr,
+      roundType: raw.roundType,
+      roundNumber,
+    });
+  }
 
   return rounds;
 }
 
 export function buildAnnouncedProcessToken(rounds: AnnouncedRound[]): string {
   return `announced_process:${JSON.stringify(rounds)}`;
+}
+
+/**
+ * Normalizes and sanitizes announced process rounds, ensuring verbose email text,
+ * dates, campus venues, or unstructured notes never leak into stage stepper labels.
+ */
+export function sanitizeAnnouncedRounds(rounds: AnnouncedRound[]): AnnouncedRound[] {
+  if (!Array.isArray(rounds)) return [];
+
+  // Campus placement rule: Ensure a Test round exists between PPT and Interview/GD
+  let normalized = [...rounds];
+  const hasTest = normalized.some(r => r.roundType === 'test');
+  const hasInterviewOrGd = normalized.some(r => r.roundType === 'interview' || r.roundType === 'gd');
+
+  if (!hasTest && hasInterviewOrGd) {
+    const insertIdx = normalized.findIndex(r => r.roundType === 'interview' || r.roundType === 'gd');
+    normalized.splice(insertIdx !== -1 ? insertIdx : normalized.length, 0, {
+      id: 'test_1',
+      label: 'Test',
+      shortLabel: 'Test',
+      roundType: 'test',
+      roundNumber: 1,
+    });
+  }
+
+  const totalTests = normalized.filter(r => r.roundType === 'test').length;
+  const totalInterviews = normalized.filter(r => r.roundType === 'interview').length;
+
+  let testSeq = 0;
+  let interviewSeq = 0;
+
+  return normalized.map(r => {
+    let { label, shortLabel, id, roundType, roundNumber, dateStr } = r;
+
+    if (label?.includes('PPT & GD') || shortLabel?.includes('PPT & GD') || id === 'ppt_gd') {
+      label = 'PPT & GD';
+      shortLabel = 'PPT & GD';
+    } else if (roundType === 'ppt') {
+      label = 'Pre-Placement Talk';
+      shortLabel = 'PPT';
+    } else if (roundType === 'gd') {
+      label = 'Group Discussion';
+      shortLabel = 'GD';
+    } else if (roundType === 'test') {
+      testSeq++;
+      const num = totalTests > 1 ? (roundNumber && roundNumber <= totalTests ? roundNumber : testSeq) : 1;
+      roundNumber = num;
+      if (totalTests > 1) {
+        label = `Test ${num}`;
+        shortLabel = `Test ${num}`;
+      } else {
+        label = 'Test';
+        shortLabel = 'Test';
+      }
+    } else if (roundType === 'interview') {
+      interviewSeq++;
+      const num = totalInterviews > 1 ? (roundNumber && roundNumber <= totalInterviews ? roundNumber : interviewSeq) : 1;
+      roundNumber = num;
+      if (totalInterviews > 1) {
+        label = `Interview ${num}`;
+        shortLabel = `Interview ${num}`;
+      } else {
+        label = 'Interview';
+        shortLabel = 'Interview';
+      }
+    } else if (roundType === 'other') {
+      if (/game/i.test(label || shortLabel || id)) {
+        label = 'Game Round';
+        shortLabel = 'Game Round';
+      } else if (/hackathon/i.test(label || shortLabel || id)) {
+        label = 'Hackathon';
+        shortLabel = 'Hackathon';
+      } else {
+        const clean = (shortLabel || label || 'Round')
+          .replace(/\s*\([^)]*\)/g, '')
+          .replace(/[-–—].*$/, '')
+          .trim();
+        label = clean || 'Round';
+        shortLabel = clean || 'Round';
+      }
+    }
+
+    return {
+      id: id || `${shortLabel.toLowerCase().replace(/[^a-z0-9]+/g, '_')}`,
+      label,
+      shortLabel,
+      dateStr,
+      roundType,
+      roundNumber,
+    };
+  });
+}
+
+/**
+ * Fallback: infer the announced recruitment pipeline from the email **subject line** alone.
+ *
+ * Used when the email body lacks a structured "Recruitment Process:" / "Selection Process:"
+ * section but the subject directly names the round(s) being announced — e.g.
+ *   "Deloitte India PPT & Group Discussion is scheduled on (01-10-2026)"
+ *   "Infosys next round of selection process (Technical Interview) is scheduled"
+ *   "Amazon online (Test - 2) is scheduled on 29th September"
+ *
+ * Returns null when the subject is too ambiguous (fewer than 2 distinct round tokens found),
+ * to avoid polluting single-event schedule announcements with a fake process pipeline.
+ */
+export function parseAnnouncedRoundsFromSubject(subject: string): AnnouncedRound[] | null {
+  if (!subject) return null;
+  const subj = subject
+    .replace(/^(?:fwd?|re|fw)\s*:\s*/i, '')   // strip forward/reply prefixes
+    .toLowerCase();
+
+  const rawRounds: Array<{ roundType: AnnouncedRound['roundType']; label: string; shortLabel: string }> = [];
+
+  // Check for PPT (pre-placement talk)
+  if (/\bppt\b|pre[- ]*placement\s*talk/i.test(subj)) {
+    rawRounds.push({ roundType: 'ppt', label: 'Pre-Placement Talk', shortLabel: 'PPT' });
+  }
+
+  // Check for Group Discussion / GD
+  if (/\bgroup\s+discussion\b|\bgd\b/i.test(subj)) {
+    rawRounds.push({ roundType: 'gd', label: 'Group Discussion', shortLabel: 'GD' });
+  }
+
+  // Check for Test (detect round 2 first)
+  const testR2 = /\b(?:test|online\s+test|assessment)\s*[-–]?\s*2\b|\btest\s+2\b|\bround\s+2\s+(?:online\s+)?(?:test|assessment)\b/i.test(subj);
+  const hasTest = /\bonline\s+test\b|\bcoding\s+test\b|\bassessment\b|\btest\b/i.test(subj);
+  if (testR2) {
+    rawRounds.push({ roundType: 'test', label: 'Test 2', shortLabel: 'Test 2' });
+  } else if (hasTest && !rawRounds.some(r => r.roundType === 'ppt' || r.roundType === 'gd')) {
+    // Only add test when it's the sole round keyword in subject (otherwise it's a schedule email for that test)
+    rawRounds.push({ roundType: 'test', label: 'Test', shortLabel: 'Test' });
+  }
+
+  // Check for Interview
+  if (/\btechnical\s+interview\b|\bhr\s+interview\b|\bfinal\s+interview\b|\binterview\b/i.test(subj)) {
+    rawRounds.push({ roundType: 'interview', label: 'Interview', shortLabel: 'Interview' });
+  }
+
+  // Must contain at least two recognizable round types to infer a structured pipeline.
+  // A subject that only says "Test scheduled" doesn't tell us the full process.
+  if (rawRounds.length < 2) return null;
+
+  // Determine the authoritative round ordering from the subject.
+  // PPT always comes first, then test, then GD, then interview.
+  const ORDER: Array<AnnouncedRound['roundType']> = ['ppt', 'test', 'gd', 'interview'];
+  const sorted = [...rawRounds].sort(
+    (a, b) => ORDER.indexOf(a.roundType) - ORDER.indexOf(b.roundType)
+  );
+
+  // Campus placement rule: inject a Test between PPT/applied and Interview/GD
+  // when no test was explicitly found in the subject.
+  const hasTestRound = sorted.some(r => r.roundType === 'test');
+  const hasInterviewOrGd = sorted.some(r => r.roundType === 'interview' || r.roundType === 'gd');
+  if (!hasTestRound && hasInterviewOrGd) {
+    const insertIdx = sorted.findIndex(r => r.roundType === 'interview' || r.roundType === 'gd');
+    sorted.splice(insertIdx !== -1 ? insertIdx : sorted.length, 0, {
+      roundType: 'test',
+      label: 'Test',
+      shortLabel: 'Test',
+    });
+  }
+
+  // Build final AnnouncedRound objects with de-duplicated IDs
+  const seenIds = new Set<string>();
+  const rounds: AnnouncedRound[] = [];
+  for (const r of sorted) {
+    const baseId = r.roundType === 'gd' ? 'gd' : r.roundType === 'ppt' ? 'ppt' : r.roundType === 'interview' ? 'interview_1' : 'test_1';
+    let id = baseId;
+    let counter = 2;
+    while (seenIds.has(id)) id = `${baseId}_${counter++}`;
+    seenIds.add(id);
+    rounds.push({ id, label: r.label, shortLabel: r.shortLabel, roundType: r.roundType });
+  }
+
+  return rounds.length >= 2 ? rounds : null;
 }
 
 export function parseAnnouncedProcessToken(notes: string | null | undefined): AnnouncedRound[] | null {
@@ -503,7 +774,7 @@ export function parseAnnouncedProcessToken(notes: string | null | undefined): An
         const json = trimmed.slice('announced_process:'.length);
         const parsed = JSON.parse(json);
         if (Array.isArray(parsed) && parsed.length >= 2) {
-          return parsed;
+          return sanitizeAnnouncedRounds(parsed);
         }
       } catch {
         return null;
@@ -512,4 +783,157 @@ export function parseAnnouncedProcessToken(notes: string | null | undefined): An
   }
   return null;
 }
+
+function parseScheduledDateInSubject(sub: string): number | null {
+  const m1 = sub.match(/scheduled\s+on\s+[([]?(\d{1,2}(?:st|nd|rd|th)?)\s+([A-Za-z]+)(?:\s+(20\d{2}|\b2[4-7]\b))?/i);
+  if (m1) {
+    const day = m1[1].replace(/\D/g, '');
+    const month = m1[2];
+    const year = m1[3] ? (m1[3].length === 2 ? '20' + m1[3] : m1[3]) : '2026';
+    const p = Date.parse(`${day} ${month} ${year} UTC`);
+    if (!isNaN(p)) return p;
+  }
+  const m2 = sub.match(/scheduled\s+on\s+[([]?(\d{1,2})[-/.](\d{1,2})[-/.](20\d{2}|\b2[4-7]\b)/i);
+  if (m2) {
+    const day = parseInt(m2[1], 10);
+    const month = parseInt(m2[2], 10) - 1;
+    let year = parseInt(m2[3], 10);
+    if (year < 100) year += 2000;
+    return Date.UTC(year, month, day);
+  }
+  return null;
+}
+
+/**
+ * Extracts the announced recruitment pipeline by synthesizing all emails/circulars for a placement drive.
+ * Handles drives where the company conducts Test 1 first, followed by PPT & GD and Interviews (e.g. Deloitte),
+ * as well as conventional drives where PPT precedes the Test.
+ */
+export function extractAnnouncedRoundsFromEmails(
+  emails: Array<{
+    subject?: string | null;
+    snippet?: string | null;
+    body_snippet?: string | null;
+    body_text?: string | null;
+    received_at?: string | null;
+    receivedAt?: string | null;
+  }>
+): AnnouncedRound[] | null {
+  if (!emails || emails.length === 0) return null;
+
+  // 1. Structured text in body takes precedence if available
+  for (const e of emails) {
+    const text = `${e.subject || ''}\n${e.body_text || e.body_snippet || e.snippet || ''}`;
+    const structured = parseRecruitmentProcess(text);
+    if (structured && structured.length >= 2) {
+      return structured;
+    }
+  }
+
+  // 2. Discover rounds across subjects and determine chronological / structural ordering
+  const roundMap = new Map<
+    string,
+    {
+      id: string;
+      label: string;
+      shortLabel: string;
+      roundType: AnnouncedRound['roundType'];
+      date: number;
+    }
+  >();
+
+  for (const e of emails) {
+    const subj = (e.subject || '').replace(/^(?:(?:re|fw|fwd)\s*:\s*)+/i, '').trim();
+    if (!subj) continue;
+    const sLower = subj.toLowerCase();
+    const date = parseScheduledDateInSubject(subj) || new Date(e.receivedAt || e.received_at || 0).getTime() || 0;
+
+    const isTest = /\bonline\s+test\b|\btest\b|\bassessment\b/i.test(sLower) && !sLower.includes('shortlist') && !sLower.includes('result');
+    const isTest2 = /\btest\s*[-–]?\s*2\b|\bround\s+2\s+(?:online\s+)?test\b/i.test(sLower);
+    const isPpt = /\bppt\b|pre[- ]*placement\s*talk/i.test(sLower);
+    const isGd = /\bgroup\s+discussion\b|\bgd\b/i.test(sLower);
+    const isInterview = /\binterview\b|\bnext\s+round\s+of\s+selection\b/i.test(sLower);
+
+    if (isTest && !isTest2) {
+      const existing = roundMap.get('test_1');
+      if (!existing || (date > 0 && (existing.date === 0 || existing.date > date))) {
+        roundMap.set('test_1', { id: 'test_1', label: 'Online Test', shortLabel: 'Test', roundType: 'test', date });
+      }
+    }
+    if (isTest2) {
+      const existing = roundMap.get('test_2');
+      if (!existing || (date > 0 && (existing.date === 0 || existing.date > date))) {
+        roundMap.set('test_2', { id: 'test_2', label: 'Test 2', shortLabel: 'Test 2', roundType: 'test', date });
+      }
+    }
+    if (isPpt && isGd) {
+      const existing = roundMap.get('ppt_gd');
+      if (!existing || (date > 0 && (existing.date === 0 || existing.date > date))) {
+        roundMap.set('ppt_gd', { id: 'ppt_gd', label: 'PPT & GD', shortLabel: 'PPT & GD', roundType: 'gd', date });
+      }
+    } else {
+      if (isPpt && !roundMap.has('ppt_gd')) {
+        const existing = roundMap.get('ppt');
+        if (!existing || (date > 0 && (existing.date === 0 || existing.date > date))) {
+          roundMap.set('ppt', { id: 'ppt', label: 'Pre-Placement Talk', shortLabel: 'PPT', roundType: 'ppt', date });
+        }
+      }
+      if (isGd && !roundMap.has('ppt_gd')) {
+        const existing = roundMap.get('gd');
+        if (!existing || (date > 0 && (existing.date === 0 || existing.date > date))) {
+          roundMap.set('gd', { id: 'gd', label: 'Group Discussion', shortLabel: 'GD', roundType: 'gd', date });
+        }
+      }
+    }
+    if (isInterview) {
+      const existing = roundMap.get('interview');
+      if (!existing || (date > 0 && (existing.date === 0 || existing.date > date))) {
+        roundMap.set('interview', { id: 'interview_1', label: 'Interview', shortLabel: 'Interview', roundType: 'interview', date });
+      }
+    }
+  }
+
+  // If combined ppt_gd exists, omit redundant standalone ppt / gd
+  if (roundMap.has('ppt_gd')) {
+    roundMap.delete('ppt');
+    roundMap.delete('gd');
+  }
+
+  const rawList = Array.from(roundMap.values());
+  if (rawList.length < 2) {
+    for (const e of emails) {
+      const single = parseAnnouncedRoundsFromSubject(e.subject || '');
+      if (single && single.length >= 2) return single;
+    }
+    return null;
+  }
+
+  // Determine chronological order between Test and PPT:
+  // If Test date is strictly before PPT/GD date, Test is before PPT!
+  // Otherwise, default to standard order (PPT -> Test -> GD -> Interview).
+  const testRound = rawList.find(r => r.id === 'test_1');
+  const pptRound = rawList.find(r => r.id === 'ppt' || r.id === 'ppt_gd');
+  const isTestBeforePpt = Boolean(testRound && pptRound && testRound.date > 0 && pptRound.date > 0 && testRound.date < pptRound.date);
+
+  const sorted = [...rawList].sort((a, b) => {
+    if (isTestBeforePpt) {
+      const orderA = a.id === 'test_1' ? 1 : a.id === 'test_2' ? 2 : a.id === 'ppt' || a.id === 'ppt_gd' ? 3 : a.id === 'gd' ? 4 : 5;
+      const orderB = b.id === 'test_1' ? 1 : b.id === 'test_2' ? 2 : b.id === 'ppt' || b.id === 'ppt_gd' ? 3 : b.id === 'gd' ? 4 : 5;
+      return orderA - orderB;
+    }
+    const orderA = a.id === 'ppt' ? 1 : a.id === 'test_1' ? 2 : a.id === 'test_2' ? 3 : a.id === 'ppt_gd' || a.id === 'gd' ? 4 : 5;
+    const orderB = b.id === 'ppt' ? 1 : b.id === 'test_1' ? 2 : b.id === 'test_2' ? 3 : b.id === 'ppt_gd' || b.id === 'gd' ? 4 : 5;
+    return orderA - orderB;
+  });
+
+  return sanitizeAnnouncedRounds(
+    sorted.map((r) => ({
+      id: r.id,
+      label: r.label,
+      shortLabel: r.shortLabel,
+      roundType: r.roundType,
+    }))
+  );
+}
+
 

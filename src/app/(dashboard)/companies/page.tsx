@@ -27,30 +27,32 @@ export default async function CompaniesPage() {
     { data: matches },
     { data: accounts },
     { data: sharedDrives },
+    { data: personalEmails },
+    { data: emailDriveLinks },
   ] = await Promise.all([
     supabase
       .from('companies')
-      .select('id, name, aliases, updated_at')
+      .select('id, name, aliases, created_at, updated_at')
       .order('updated_at', { ascending: false }),
 
     supabase
       .from('placement_drives')
-      .select('id, company_id, drive_number, normalized_drive_number, drive_name, role, category, ctc, stipend, location, created_at, updated_at'),
+      .select('id, company_id, drive_number, normalized_drive_number, drive_name, role, category, ctc, stipend, location, created_at, updated_at, source_college_email_id, source_email_id'),
 
     supabase
       .from('applications')
-      .select('id, placement_drive_id, status, role, category, ctc, stipend, location, notes, manual_override, applied_at, last_updated, registration_deadline')
+      .select('id, placement_drive_id, status, role, category, ctc, stipend, location, notes, manual_override, applied_at, last_updated, registration_deadline, status_source_email_at')
       .eq('user_id', session.userId),
 
     supabase
       .from('events')
-      .select('id, placement_drive_id, event_type, title, start_time, end_time, venue, mode')
+      .select('id, placement_drive_id, event_type, title, start_time, end_time, venue, mode, college_email_id, source_email_id')
       .eq('user_id', session.userId)
       .order('start_time', { ascending: true }),
 
     supabase
       .from('candidate_matches')
-      .select('id, placement_drive_id, email_id')
+      .select('id, placement_drive_id, email_id, college_email_id')
       .eq('user_id', session.userId)
       .neq('match_type', 'xlsx_applied_list'),
 
@@ -63,6 +65,17 @@ export default async function CompaniesPage() {
       .from('placement_drives')
       .select('normalized_drive_number, drive_number, role, category, ctc, stipend, location')
       .or('ctc.not.is.null,location.not.is.null,stipend.not.is.null,role.not.is.null'),
+
+    supabase
+      .from('personal_emails')
+      .select('placement_drive_id, received_at')
+      .eq('user_id', session.userId)
+      .not('placement_drive_id', 'is', null),
+
+    supabase
+      .from('email_drive_links')
+      .select('placement_drive_id, college_emails(received_at)')
+      .eq('user_id', session.userId),
   ]);
 
   // Shortlist verdicts are read straight from applications.status; no verification table.
@@ -190,16 +203,103 @@ export default async function CompaniesPage() {
   const matchedEmailIds = new Set((matches || []).map((m) => m.email_id).filter(Boolean));
   const matchedDriveIds = new Set((matches || []).map((m: any) => m.placement_drive_id).filter(Boolean));
 
+  const allCollegeEmailIds = new Set<string>();
+  for (const e of events || []) if ((e as any).college_email_id) allCollegeEmailIds.add((e as any).college_email_id);
+  for (const m of matches || []) if ((m as any).college_email_id) allCollegeEmailIds.add((m as any).college_email_id);
+  for (const d of placementDrives || []) if ((d as any).source_college_email_id) allCollegeEmailIds.add((d as any).source_college_email_id);
+  for (const l of emailDriveLinks || []) if ((l as any).email_id) allCollegeEmailIds.add((l as any).email_id);
+
+  const { data: collegeEmailsData } = allCollegeEmailIds.size > 0
+    ? await supabase.from('college_emails').select('id, received_at').in('id', Array.from(allCollegeEmailIds))
+    : { data: [] };
+
+  const collegeEmailMap = new Map<string, string>((collegeEmailsData || []).map((e: any) => [e.id, e.received_at]));
+
+  const driveEmailMap = new Map<string, string>();
+  const trackDriveEmail = (dId: string | null | undefined, dt: string | null | undefined) => {
+    if (!dId || !dt) return;
+    const prev = driveEmailMap.get(dId);
+    if (!prev || new Date(dt).getTime() > new Date(prev).getTime()) {
+      driveEmailMap.set(dId, dt);
+    }
+  };
+
+  for (const pe of (personalEmails || [])) {
+    trackDriveEmail(pe.placement_drive_id, pe.received_at);
+  }
+  for (const link of (emailDriveLinks || [])) {
+    const rAt = (link as any).college_emails?.received_at || collegeEmailMap.get((link as any).email_id);
+    trackDriveEmail(link.placement_drive_id, rAt);
+  }
+  for (const ev of (events || [])) {
+    if (ev.placement_drive_id && (ev as any).college_email_id) {
+      trackDriveEmail(ev.placement_drive_id, collegeEmailMap.get((ev as any).college_email_id));
+    }
+  }
+  for (const cm of (matches || [])) {
+    if (cm.placement_drive_id && (cm as any).college_email_id) {
+      trackDriveEmail(cm.placement_drive_id, collegeEmailMap.get((cm as any).college_email_id));
+    }
+  }
+  for (const pd of (placementDrives || [])) {
+    if (pd.id && (pd as any).source_college_email_id) {
+      trackDriveEmail(pd.id, collegeEmailMap.get((pd as any).source_college_email_id));
+    }
+  }
+  for (const a of (applications || [])) {
+    trackDriveEmail(a.placement_drive_id, (a as any).status_source_email_at);
+    trackDriveEmail(a.placement_drive_id, a.applied_at);
+  }
+
+  // Also match by drive_numbers in recent college_emails
+  const driveByNum = new Map<string, string>();
+  for (const pd of (placementDrives || [])) {
+    if (pd.drive_number) driveByNum.set(pd.drive_number.toLowerCase().trim(), pd.id);
+    if (pd.normalized_drive_number) driveByNum.set(pd.normalized_drive_number.toLowerCase().trim(), pd.id);
+  }
+
+  const { data: recentCollegeEmails } = await supabase.from('college_emails')
+    .select('id, received_at, parsed_drive_numbers')
+    .not('parsed_drive_numbers', 'is', null)
+    .order('received_at', { ascending: false })
+    .limit(200);
+
+  for (const ce of (recentCollegeEmails || [])) {
+    for (const num of (ce.parsed_drive_numbers || [])) {
+      if (typeof num === 'string') {
+        const dId = driveByNum.get(num.toLowerCase().trim());
+        if (dId) {
+          trackDriveEmail(dId, ce.received_at);
+        }
+      }
+    }
+  }
+
   // Assemble full details based on Entities
   const formattedCompanies: CompanyWithDetails[] = entities.map((ent) => {
     const { drive, app, entityId } = ent;
     const companyId = drive?.company_id || ent.company?.id || (app as any)?.company_id;
     const comp = companyId ? compMap.get(companyId) : undefined;
-    // Per-drive time: the user-scoped application update always reflects THIS drive's
-    // last change. drive.updated_at is bumped by shared catalog operations (admin edits,
-    // archive refreshes) that touch every drive at once — showing it makes every card
-    // display the same "common" time. Application first, drive only as fallback.
-    const effectiveLatestDate = app?.last_updated || drive?.updated_at || comp?.updated_at || drive?.created_at || new Date().toISOString();
+    
+    // Per-drive status/activity update timestamp:
+    // 1. If manual override: the student manually adjusted their status (app.last_updated)
+    // 2. Otherwise: the most recent update timestamp among:
+    //    - latest drive circular/email (including test/interview/PPT schedule notifications)
+    //    - status_source_email_at (verdict mail)
+    //    - applied_at (registration mail)
+    //    - drive creation date
+    const targetDriveId = drive?.id || app?.placement_drive_id;
+    const latestEmail = targetDriveId ? driveEmailMap.get(targetDriveId) : undefined;
+    const isManual = Boolean(app?.manual_override && app?.last_updated);
+
+    const effectiveLatestDate = isManual
+      ? app!.last_updated
+      : latestEmail
+        || (app as any)?.status_source_email_at
+        || app?.applied_at
+        || drive?.created_at
+        || comp?.created_at
+        || nowIso;
     
     const normNum = drive?.normalized_drive_number || drive?.drive_number;
     const shared = normNum ? sharedMetaMap.get(normNum.toLowerCase().trim()) : undefined;
@@ -214,7 +314,7 @@ export default async function CompaniesPage() {
       drive_number: drive?.drive_number || null,
       drive_name: drive?.drive_name || null,
       updated_at: effectiveLatestDate,
-      latestEmailDate: effectiveLatestDate,
+      latestEmailDate: latestEmail || (app as any)?.status_source_email_at || app?.applied_at || undefined,
       application: app ? {
         id: app.id,
         status: app.status,
@@ -228,6 +328,7 @@ export default async function CompaniesPage() {
         applied_at: app.applied_at || null,
         last_updated: app.last_updated || new Date().toISOString(),
         registration_deadline: app.registration_deadline || null,
+        status_source_email_at: (app as any)?.status_source_email_at || null,
       } : {
         // Dummy unapplied application to show drive details
         id: '',

@@ -21,7 +21,7 @@ import {
   resolveDriveByTimingCorrelation,
 } from '@/lib/sync/drive-correlator';
 import { pickRegistrationDeadline } from '@/lib/sync/events';
-import { classifyShortlistEmail, parseRecruitmentProcess, buildAnnouncedProcessToken } from '@/lib/sync/round-identity';
+import { classifyShortlistEmail, parseRecruitmentProcess, buildAnnouncedProcessToken, extractAnnouncedRoundsFromEmails } from '@/lib/sync/round-identity';
 
 
 export const dynamic = 'force-dynamic';
@@ -1548,6 +1548,9 @@ export async function recalculateApplicationStatuses(
         }
         if (!announcedRounds && combinedEmailText) {
           announcedRounds = parseRecruitmentProcess(combinedEmailText);
+        }
+        if (!announcedRounds && collegeCompanyEmails.length > 0) {
+          announcedRounds = extractAnnouncedRoundsFromEmails(collegeCompanyEmails);
         }
 
         const announcedProcessToken = announcedRounds

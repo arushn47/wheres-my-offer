@@ -90,7 +90,7 @@ export async function POST(request: Request) {
     }
 
     // 3. Dispatch Email to Developer
-    const recipientEmail = process.env.FEEDBACK_RECIPIENT_EMAIL || 'arushn.2005@gmail.com';
+    const recipientEmail = process.env.FEEDBACK_RECIPIENT_EMAIL || 'arushmenon.7@gmail.com';
     const emailSubject = `[Where's My Offer ${safeCategory.toUpperCase()}] ${safeSeverity === 'critical' ? '🚨 CRITICAL: ' : ''}${subject.trim()}`;
 
     const severityColors: Record<string, string> = {

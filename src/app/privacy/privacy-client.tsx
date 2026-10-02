@@ -20,7 +20,7 @@ import {
 } from 'lucide-react';
 import { AppLogoMark } from '@/components/brand/logo';
 
-const LAST_UPDATED = 'September 16, 2026';
+const LAST_UPDATED = 'October 2, 2026';
 const APP_NAME = "Where's My Offer?";
 const APP_URL = 'https://www.wheresmyoffer.in';
 
@@ -278,7 +278,7 @@ export default function PrivacyClient() {
                 <h2 className="text-lg font-bold text-white">Google API Services — Limited Use Disclosure</h2>
               </div>
               <p className="text-sm leading-relaxed text-zinc-300 mb-4">
-                {APP_NAME}&apos;s use and transfer to any other app of information received from Google APIs adheres to the{' '}
+                Where&apos;s My Offer?&apos;s use and transfer to any other app of information received from Google APIs will adhere to{' '}
                 <a
                   href="https://developers.google.com/terms/api-services-user-data-policy"
                   target="_blank"
@@ -287,16 +287,16 @@ export default function PrivacyClient() {
                 >
                   Google API Services User Data Policy <ExternalLink className="h-3.5 w-3.5 inline" />
                 </a>
-                , including the strict <strong>Limited Use</strong> requirements:
+                , including the Limited Use requirements.
               </p>
 
               <div className="space-y-2.5">
                 {[
-                  'We only use read access to your Gmail messages to provide placement tracking and scheduling features directly visible to you within the application interface.',
-                  'We do not transfer your Gmail data to third parties, unless necessary to provide these placement features, comply with applicable laws, or as part of a merger/acquisition.',
-                  'We do not use or transfer your Gmail data for serving advertisements, personalized retargeting, or consumer profiling.',
-                  'We do not use your Gmail data to train generalized artificial intelligence (AI) and/or machine learning (ML) models.',
-                  'Human eyes are strictly prohibited: No employee, developer, or contractor reads your emails, except with your explicit affirmative permission for troubleshooting a specific issue, for security investigations, or when required by law.',
+                  "We only use access to read, filter, or parse Gmail messages to provide user-facing placement tracking, event detection, and shortlist verification features directly visible in the Where's My Offer? user interface.",
+                  'We do not transfer Google user data to third parties, unless strictly necessary to provide or improve these placement tracking features, comply with applicable laws, or as part of a merger, acquisition, or sale of assets with prior user notice.',
+                  'We do not use or transfer Google user data for serving advertisements, including personalized, retargeted, or interest-based advertising.',
+                  'We do not use Google user data to develop, train, or improve generalized machine learning (ML) or artificial intelligence (AI) models.',
+                  "Human eyes are strictly prohibited: No human reads your emails, except with your explicit affirmative agreement for troubleshooting a specific issue, for security purposes (such as investigating abuse or bugs), to comply with applicable law, or when aggregated and anonymized for internal technical operations.",
                 ].map((clause, i) => (
                   <div key={i} className="flex items-start gap-2.5 rounded-lg bg-zinc-900/70 border border-zinc-800/80 p-3 text-xs text-zinc-300">
                     <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0 mt-0.5" />
@@ -454,7 +454,13 @@ export default function PrivacyClient() {
               <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
                 <div>
                   <p className="text-xs font-semibold text-white">{APP_NAME} Developer &amp; Security Desk</p>
-                  <p className="text-[11px] text-zinc-500 font-mono">Student Platform · VIT Bhopal University</p>
+                  <p className="text-[11px] text-zinc-400 font-mono mt-0.5">
+                    Direct Email:{' '}
+                    <a href="mailto:arushmenon.7@gmail.com" className="text-emerald-400 underline underline-offset-2 hover:text-emerald-300">
+                      arushmenon.7@gmail.com
+                    </a>
+                  </p>
+                  <p className="text-[11px] text-zinc-500 font-mono mt-0.5">Student Platform · VIT Bhopal University</p>
                 </div>
                 <Link
                   href="/feedback"

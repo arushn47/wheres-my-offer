@@ -36,9 +36,38 @@ describe('not-shortlisted stage with PPT evidence', () => {
     expect(result.furthestPassedStage).toBe(1);
     expect(result.isPptCompleted).toBe(true);
   });
+
+  it('labels not_shortlisted as Post-PPT when drive has an announced PPT in notes', () => {
+    const notesWithPpt = 'announced_process:[{"id":"ppt","roundType":"ppt","label":"PPT","shortLabel":"PPT"},{"id":"test","roundType":"test","label":"Online Test","shortLabel":"Test"}]';
+    const result = getEffectiveStage('not_shortlisted', null, [], notesWithPpt);
+
+    expect(result.statusSubtitle).toBe('Not Shortlisted · Post-PPT');
+    expect(result.furthestPassedStage).toBe(1);
+    expect(result.isPptCompleted).toBe(true);
+    expect(result.hasPpt).toBe(true);
+  });
+
+  it('labels not_shortlisted as Post-PPT when notes contain explicit Not Shortlisted(Post PPT) token', () => {
+    const notes = 'eliminated_at:post_ppt\nNot Shortlisted (Post PPT)';
+    const result = getEffectiveStage('not_shortlisted', null, [], notes);
+
+    expect(result.statusSubtitle).toBe('Not Shortlisted · Post-PPT');
+    expect(result.furthestPassedStage).toBe(1);
+    expect(result.isPptCompleted).toBe(true);
+  });
+
+  it('labels not_shortlisted_post_ppt status directly as Post-PPT', () => {
+    const result = getEffectiveStage('not_shortlisted_post_ppt', null, []);
+
+    expect(result.effectiveStatus).toBe('not_shortlisted');
+    expect(result.statusSubtitle).toBe('Not Shortlisted · Post-PPT');
+    expect(result.furthestPassedStage).toBe(1);
+    expect(result.isPptCompleted).toBe(true);
+  });
 });
 
 import { getPipelineStages } from '@/components/companies/stage-stepper';
+import { buildAnnouncedProcessToken, parseRecruitmentProcess } from '@/lib/sync/round-identity';
 
 describe('getPipelineStages dynamic recruitment pipeline', () => {
   it('omits PPT when test round is completed without PPT (e.g. Axxela)', () => {
@@ -132,5 +161,80 @@ describe('getPipelineStages dynamic recruitment pipeline', () => {
 
     expect(stages.map(s => s.id)).toEqual(['applied', 'test', 'interview', 'offer']);
   });
+
+  it('renders clean round stage names for announced process notes instead of full event strings', () => {
+    const emailText = `Date of Visit:
+Test - 26th Sept 2026 (4 PM) @ VIT Vellore campus & others in respective campus venues
+Physical Interview 31 august - Will be announced later`;
+
+    const announced = parseRecruitmentProcess(emailText)!;
+    const notes = buildAnnouncedProcessToken(announced);
+
+    const effective = getEffectiveStage('applied', null, []);
+    const stages = getPipelineStages({
+      effective,
+      currentStage: 0,
+      furthestPassed: -1,
+      eliminatedStage: -1,
+      notes,
+    });
+
+    expect(stages.map(s => s.label)).toEqual(['Applied', 'Test', 'Interview', 'Selected / Offer']);
+    expect(stages.map(s => s.shortLabel)).toEqual(['Applied', 'Test', 'Interview', 'Offer']);
+  });
+
+  it('guarantees Test round is included between PPT and Interview for PPT Completed companies (e.g. UBS, Chargebee, EY SAP)', () => {
+    const emailText = `Date of Visit:
+*Pre-placement talk:* 29-September-26; 4:00 PM to 5:00 PM
+*Interview:* 6-October-26; 10:00 AM onwards`;
+
+    const announced = parseRecruitmentProcess(emailText)!;
+    const notes = buildAnnouncedProcessToken(announced);
+
+    const events = [{
+      event_type: 'ppt',
+      start_time: new Date(Date.now() - 48 * 60 * 60 * 1000),
+      end_time: new Date(Date.now() - 46 * 60 * 60 * 1000),
+    }];
+    const effective = getEffectiveStage('ppt_completed', null, events, notes);
+    const stages = getPipelineStages({
+      effective,
+      currentStage: effective.stageIndex,
+      furthestPassed: effective.furthestPassedStage,
+      eliminatedStage: effective.eliminatedStage,
+      allEvents: events,
+      notes,
+    });
+
+    // Must have Test between PPT and Interview!
+    expect(stages.map(s => s.shortLabel)).toEqual(['Applied', 'PPT', 'Test', 'Interview', 'Offer']);
+  });
+
+  it('marks PPT as passed milestone and Post-PPT subtitle for not_shortlisted drives with announced PPT (e.g. Amazon, Blackrock)', () => {
+    const amazonNotes = `vellore\nannounced_process:[{"id":"ppt_1","label":"PPT: 10.08.2026*","shortLabel":"PPT","dateStr":"10.08.2026","roundType":"ppt"},{"id":"test_10_08_2026_2","label":"Test: 10.08.2026 *","shortLabel":"Test: 10.08.2026 *","dateStr":"10.08.2026","roundType":"test","roundNumber":1},{"id":"interview_date_will_be_informed_later_3","label":"Interview Date:  will be informed later*","shortLabel":"Interview Date:  will be informed later*","roundType":"interview","roundNumber":1}]`;
+
+    const effective = getEffectiveStage('not_shortlisted', null, [], amazonNotes, false);
+    expect(effective.isPptCompleted).toBe(true);
+    expect(effective.furthestPassedStage).toBe(1);
+    expect(effective.statusSubtitle).toBe('Not Shortlisted · Post-PPT');
+
+    const stages = getPipelineStages({
+      effective,
+      currentStage: effective.stageIndex,
+      furthestPassed: effective.furthestPassedStage,
+      eliminatedStage: effective.eliminatedStage,
+      allEvents: [],
+      notes: amazonNotes,
+    });
+
+    expect(stages.map(s => s.id)).toEqual([
+      'applied',
+      'ppt_1',
+      'test_10_08_2026_2',
+      'interview_date_will_be_informed_later_3',
+      'offer',
+    ]);
+  });
 });
+
 

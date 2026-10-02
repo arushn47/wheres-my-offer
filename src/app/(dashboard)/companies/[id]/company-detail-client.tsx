@@ -17,6 +17,7 @@ import {
   Building2,
   Globe,
   GraduationCap,
+  Info,
 } from 'lucide-react';
 import { cn, timeAgo, getDriveMode } from '@/lib/utils';
 import { CategoryBadge, STATUS_META } from '@/components/ui/status-chip';
@@ -156,6 +157,7 @@ const ALL_STATUSES = [
   { value: 'interview_scheduled', label: 'Interview Scheduled' },
   { value: 'selected', label: 'Selected / Offer 🎉' },
   { value: 'not_shortlisted', label: 'Not Shortlisted for Test (Screening)' },
+  { value: 'not_shortlisted_post_ppt', label: 'Not Shortlisted (Post PPT)' },
   { value: 'rejected_test', label: 'Eliminated in Test Round (Post-Test)' },
   { value: 'rejected_interview', label: 'Interviewed · Not Selected (Post-Interview)' },
   { value: 'declined', label: 'Declined / Opted Out' },
@@ -263,18 +265,19 @@ function getGmailLink(email: {
   // /u/{n} is Gmail's account index, not an email address. Keep a valid
   // account path and use authuser to open the exact connected inbox.
   const accountPath = `https://mail.google.com/mail/u/0/${email.accountEmail ? `?authuser=${encodeURIComponent(email.accountEmail)}` : ''}`;
-  // Exact targets first so the button never lands on a search results page.
+  // Exact targets first so the button opens the email or conversation directly.
   // 1. Thread id -> opens the exact conversation.
   if (email.threadId) {
     return `${accountPath}#all/${encodeURIComponent(email.threadId)}`;
   }
-  // 2. RFC Message-ID -> exact message, valid in any mailbox that has it.
-  if (email.rfcMessageId) {
-    return `${accountPath}#search/${encodeURIComponent(`rfc822msgid:${email.rfcMessageId}`)}`;
-  }
-  // 3. Gmail message id -> opens that message directly (e.g. #inbox/FMfcgz...).
+  // 2. Gmail message id -> opens that message directly (e.g. #all/FMfcgz...).
   if (email.gmailMessageId) {
-    return `${accountPath}#inbox/${encodeURIComponent(email.gmailMessageId)}`;
+    return `${accountPath}#all/${encodeURIComponent(email.gmailMessageId)}`;
+  }
+  // 3. RFC Message-ID -> exact message search, valid in any mailbox that has it.
+  if (email.rfcMessageId) {
+    const cleanId = email.rfcMessageId.replace(/^<|>$/g, '').trim();
+    return `${accountPath}#search/${encodeURIComponent(`rfc822msgid:${cleanId}`)}`;
   }
   // 4. Subject search is the last resort only, when no id is stored at all.
   if (email.subject) {
@@ -332,7 +335,12 @@ export default function CompanyDetailClient({
     const eff = getEffectiveStage(rawStatus, null, company.events, notesStr, isManual);
     if (eff.effectiveStatus === 'rejected_interview') return 'rejected_interview';
     if (eff.effectiveStatus === 'rejected_test') return 'rejected_test';
-    if (eff.effectiveStatus === 'not_shortlisted') return 'not_shortlisted';
+    if (eff.effectiveStatus === 'not_shortlisted') {
+      if (eff.statusSubtitle.toLowerCase().includes('post-ppt') || eff.statusSubtitle.toLowerCase().includes('post ppt')) {
+        return 'not_shortlisted_post_ppt';
+      }
+      return 'not_shortlisted';
+    }
     if (eff.effectiveStatus === 'test_completed') return 'test_completed';
 
     if (rawStatus === 'rejected') {
@@ -404,6 +412,9 @@ export default function CompanyDetailClient({
     } else if (newStatus === 'rejected_interview') {
       patchStatus = 'rejected';
       patchNotes = 'Interviewed · Not Selected';
+    } else if (newStatus === 'not_shortlisted_post_ppt') {
+      patchStatus = 'not_shortlisted';
+      patchNotes = 'eliminated_at:post_ppt\nNot Shortlisted (Post PPT)';
     } else if (newStatus === 'not_shortlisted') {
       patchStatus = 'not_shortlisted';
       patchNotes = 'Not Shortlisted for Test';
@@ -900,6 +911,15 @@ export default function CompanyDetailClient({
               : "Your ID wasn't in the final selection sheet. This drive is archived — the radar stays on the next ones."}
           </div>
         )}
+
+        {/* Multi-role / Intertwined Drive Advisory */}
+        <div className="mt-4 flex items-start gap-2.5 rounded-xl border border-zinc-800/80 bg-zinc-900/40 p-3.5 text-xs text-zinc-400">
+          <Info className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400/80" />
+          <div className="leading-relaxed">
+            <span className="font-semibold text-zinc-200">Notice on Multi-Role &amp; Intertwined Drives:</span>{' '}
+            Companies with multiple roles (such as Deloitte, Whirlpool, etc.) frequently release shortlists for different profiles across separate circulars. If a released shortlist roster corresponds to a different profile, an automated &quot;Not Shortlisted&quot; indication may be provisional. You can freely adjust your status via the dropdown above to reflect your actual progress.
+          </div>
+        </div>
       </motion.div>
 
       {/* Recruitment Stage Stepper */}
@@ -1112,18 +1132,23 @@ export default function CompanyDetailClient({
 
                                   {/* A single quiet absence-of-match note, only for actual shortlist rosters. */}
                                   {isNotShortlisted ? (
-                                    <div
-                                      data-testid={`not-shortlisted-evidence-${idx}`}
-                                      className="mt-2 flex min-w-0 items-center gap-2 rounded-lg border border-rose-500/30 bg-rose-500/[0.07] px-2.5 py-2 text-[10px] text-rose-200"
-                                    >
-                                      <FileSpreadsheet className="h-3.5 w-3.5 shrink-0 text-rose-400" />
-                                      <span className="truncate" title={email.attachmentName || email.subject}>
-                                        {email.attachmentName && (isRosterWorkbook(email.attachmentName) || isShortlistRosterAttachment(email.attachmentName))
-                                          ? `Not listed in ${email.attachmentName}`
-                                          : /selection\s*list|final\s*selection|selected\s*candidates/i.test(email.subject)
-                                            ? 'Not listed in selection list'
-                                            : 'Not listed in shortlist'}
-                                      </span>
+                                    <div className="mt-2 space-y-1">
+                                      <div
+                                        data-testid={`not-shortlisted-evidence-${idx}`}
+                                        className="flex min-w-0 items-center gap-2 rounded-lg border border-rose-500/30 bg-rose-500/[0.07] px-2.5 py-2 text-[10px] text-rose-200"
+                                      >
+                                        <FileSpreadsheet className="h-3.5 w-3.5 shrink-0 text-rose-400" />
+                                        <span className="truncate" title={email.attachmentName || email.subject}>
+                                          {email.attachmentName && (isRosterWorkbook(email.attachmentName) || isShortlistRosterAttachment(email.attachmentName))
+                                            ? `Not listed in ${email.attachmentName}`
+                                            : /selection\s*list|final\s*selection|selected\s*candidates/i.test(email.subject)
+                                              ? 'Not listed in selection list'
+                                              : 'Not listed in shortlist'}
+                                        </span>
+                                      </div>
+                                      <p className="px-1 text-[10px] text-zinc-500 italic">
+                                        * For companies with multiple roles/profiles, shortlists may only cover specific candidate batches.
+                                      </p>
                                     </div>
                                   ) : (email.attachmentName && !isAttachmentAlreadyShown) ? (
                                     <div

@@ -51,10 +51,24 @@ export function getPipelineStages({
   // through instead of the generic template.
   const announcedRounds = parseAnnouncedProcessToken(notes);
   if (announcedRounds && announcedRounds.length >= 2) {
+    let rounds = [...announcedRounds];
+    const hasTest = rounds.some(r => r.roundType === 'test');
+    const hasInterviewOrGd = rounds.some(r => r.roundType === 'interview' || r.roundType === 'gd');
+    if (!hasTest && hasInterviewOrGd) {
+      const insertIdx = rounds.findIndex(r => r.roundType === 'interview' || r.roundType === 'gd');
+      rounds.splice(insertIdx !== -1 ? insertIdx : rounds.length, 0, {
+        id: 'test_1',
+        label: 'Test',
+        shortLabel: 'Test',
+        roundType: 'test',
+        roundNumber: 1,
+      });
+    }
+
     const pipeline: Array<{ id: string; label: string; shortLabel: string }> = [
       { id: 'applied', label: 'Applied', shortLabel: 'Applied' },
     ];
-    for (const r of announcedRounds) {
+    for (const r of rounds) {
       pipeline.push({ id: r.id, label: r.label, shortLabel: r.shortLabel });
     }
     pipeline.push({ id: 'offer', label: 'Selected / Offer', shortLabel: 'Offer' });
@@ -237,6 +251,12 @@ export function StageStepper({
     activeEliminatedStage = stageList.findIndex(s => s.id === eliminatedStageId);
   }
 
+  // Predecessor milestone guarantee: When eliminated at stage k > 0 (e.g. Test),
+  // all earlier milestones in the recruitment pipeline (e.g. Applied, PPT) were completed/passed.
+  if (activeEliminatedStage > 0 && activeFurthestPassed < activeEliminatedStage - 1) {
+    activeFurthestPassed = activeEliminatedStage - 1;
+  }
+
   // Dedicated UI Banner for Registration Open
   if (isRegistrationOpen) {
     if (compact) {
@@ -396,11 +416,20 @@ export function StageStepper({
           activeEliminatedStage === -1 &&
           i === activeCurrentStage;
 
+        // Predecessor stages before current or elimination milestone are completed
+        const isPassed = !isEliminated && (
+          i <= activeFurthestPassed ||
+          (activeEliminatedStage !== -1 && i < activeEliminatedStage)
+        );
+
         // Historical passed stage (completed before current stage)
-        const isHistoricalPassed = !isEliminated && !isCurrent && i < activeCurrentStage && i <= activeFurthestPassed;
+        const isHistoricalPassed = !isEliminated && !isCurrent && (
+          isPassed ||
+          (i < activeCurrentStage && i <= activeFurthestPassed)
+        );
 
         // Has this stage been completed (either in past or as current completed milestone)?
-        const isCompleted = !isEliminated && i <= activeFurthestPassed;
+        const isCompleted = !isEliminated && (isPassed || i <= activeFurthestPassed);
 
         // ── Display label for this stage ───────────────────────────────────────
         let displayLabel = compact ? s.shortLabel : s.label;
@@ -427,7 +456,7 @@ export function StageStepper({
 
         if (!isEliminated) {
           if (announcedRound) {
-            const isRoundCompleted = isHistoricalPassed || (isCurrent && (
+            const isRoundCompleted = isPassed || isHistoricalPassed || (isCurrent && (
               (announcedRound.roundType === 'test' && (effective.isTestCompleted || status === 'test_completed')) ||
               (announcedRound.roundType === 'interview' && (effective.isInterviewCompleted || status === 'interview_completed')) ||
               (announcedRound.roundType === 'ppt' && (effective.isPptCompleted || status === 'ppt_completed')) ||
@@ -442,33 +471,32 @@ export function StageStepper({
             }
           } else {
             // Standard pipeline completed state labels
-            if (s.id === 'ppt' && effective.isPptCompleted) {
+            if (s.id === 'ppt' && (isPassed || effective.isPptCompleted)) {
               displayLabel = compact ? 'PPT Done' : 'PPT Completed';
-            } else if (s.id === 'test' && (effective.isTestCompleted || status === 'test_completed')) {
+            } else if (s.id === 'test' && (isPassed || effective.isTestCompleted || status === 'test_completed')) {
               displayLabel = compact ? 'Test Done' : 'Test Completed';
             }
           }
         } else if (isEliminated) {
-          if (announcedRound) {
-            // Announced pipeline elimination: use the round's own label
-            const elimLabel = effective.eliminationLabel;
-            displayLabel = elimLabel
-              ? (compact ? `Not in ${announcedRound.shortLabel}` : elimLabel)
-              : (compact ? `Out at ${announcedRound.shortLabel}` : `Eliminated at ${announcedRound.label}`);
-          } else if (s.id === 'applied') {
-            displayLabel = compact ? 'Screening' : 'Screened Out';
-          } else if (s.id === 'test') {
-            const elimLabel = effective.eliminationLabel;
-            displayLabel = elimLabel
-              ? (compact ? elimLabel.split(' ').slice(-2).join(' ') : elimLabel)
-              : (compact ? 'Eliminated' : 'Eliminated (Test)');
-          } else if (s.id === 'interview') {
-            const elimLabel = effective.eliminationLabel;
-            displayLabel = elimLabel
-              ? (compact ? 'Not Selected' : elimLabel)
-              : (compact ? 'Not Selected' : 'Not Selected (Interview)');
+          const isInterviewStage = s.id.startsWith('interview') || announcedRound?.roundType === 'interview';
+          const isTestStage = s.id.startsWith('test') || announcedRound?.roundType === 'test';
+          const isGdStage = s.id.startsWith('gd') || announcedRound?.roundType === 'gd';
+          const isAppliedStage = s.id === 'applied';
+
+          if (isInterviewStage) {
+            displayLabel = compact ? 'Not Selected' : (effective.eliminationLabel || 'Interviewed · Not Selected');
+          } else if (isTestStage) {
+            if (effective.effectiveStatus === 'not_shortlisted') {
+              displayLabel = compact ? 'Screened Out' : (effective.eliminationLabel || 'Not Shortlisted for Test');
+            } else {
+              displayLabel = compact ? 'Eliminated' : (effective.eliminationLabel || 'Eliminated in Test Round');
+            }
+          } else if (isGdStage) {
+            displayLabel = compact ? 'Eliminated' : (effective.eliminationLabel || 'Eliminated in Group Discussion');
+          } else if (isAppliedStage) {
+            displayLabel = compact ? 'Screened Out' : (effective.eliminationLabel || 'Screened Out in Eligibility');
           } else {
-            displayLabel = compact ? s.shortLabel : s.label;
+            displayLabel = compact ? 'Eliminated' : (effective.eliminationLabel || `Eliminated (${s.label})`);
           }
         }
 
@@ -499,14 +527,14 @@ export function StageStepper({
                       ? 'border-rose-400 bg-rose-500/25 text-rose-300 ring-2 ring-rose-500/50 shadow-[0_0_12px_rgba(244,63,94,0.45)]'
                       : isCurrent
                         ? activeStyle.circle
-                        : isHistoricalPassed
+                        : isPassed || isHistoricalPassed
                           ? 'border-emerald-500/35 bg-emerald-500/10 text-emerald-400/80'
                           : isWithdrawn && i <= activeFurthestPassed
                             ? 'border-zinc-600 bg-zinc-800 text-zinc-300'
                             : 'border-zinc-700 bg-[#141418] text-zinc-400'
                   )}
                 >
-                  {isEliminated ? '✕' : (isCompleted || isHistoricalPassed) ? '✓' : i + 1}
+                  {isEliminated ? '✕' : (isPassed || isCompleted || isHistoricalPassed) ? '✓' : i + 1}
                 </div>
               </div>
               <span
@@ -518,7 +546,7 @@ export function StageStepper({
                     ? 'text-rose-300 font-bold'
                     : isCurrent
                       ? activeStyle.text
-                      : isHistoricalPassed
+                      : isPassed || isHistoricalPassed
                         ? 'text-emerald-400/75 font-medium'
                         : 'text-zinc-400 font-medium'
                 )}
@@ -533,7 +561,7 @@ export function StageStepper({
                   compact ? 'mb-3.5' : 'mb-0 sm:mb-4',
                   activeEliminatedStage !== -1 && i === activeEliminatedStage - 1
                     ? 'bg-rose-500/70'
-                    : i < activeCurrentStage
+                    : (isPassed || i < activeCurrentStage)
                       ? 'bg-emerald-500/45'
                       : 'bg-zinc-700/70'
                 )}

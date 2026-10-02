@@ -26,6 +26,7 @@ export const STATUS_META: Record<string, { label: string; cls: string; dot: stri
   rejected_interview: { label: 'Interviewed · Not Selected', cls: 'bg-rose-500/10 text-rose-400 border-rose-500/25', dot: 'bg-rose-400' },
   interview_eliminated: { label: 'Interviewed · Not Selected', cls: 'bg-rose-500/10 text-rose-400 border-rose-500/25', dot: 'bg-rose-400' },
   not_shortlisted: { label: 'Not Shortlisted', cls: 'bg-rose-500/10 text-rose-400 border-rose-500/25', dot: 'bg-rose-400' },
+  not_shortlisted_post_ppt: { label: 'Not Shortlisted (Post PPT)', cls: 'bg-rose-500/10 text-rose-400 border-rose-500/25', dot: 'bg-rose-400' },
   withdrawn: { label: 'Withdrawn', cls: 'bg-zinc-800/40 text-zinc-400 border-zinc-700/40', dot: 'bg-zinc-500' },
   declined: { label: 'Declined', cls: 'bg-zinc-800/40 text-zinc-400 border-zinc-700/40', dot: 'bg-zinc-500' },
 };

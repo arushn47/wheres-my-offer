@@ -131,7 +131,9 @@ export function isPlacementOfficeMessageAllowed(input: RelevanceInput): {
   );
   const hasGoogleSheetRoster = /docs\.google\.com\/spreadsheets|drive\.google\.com\/(?:file|open)|sheets\.google\.com/i.test(body);
 
-  if (hasRegNumbers || hasShortlistAttachment || (hasShortlistText && (regNumbers.length > 0 || input.hasAttachments || hasGoogleSheetRoster))) {
+  const isReplyOrForward = /^(?:re|fwd?)\s*:/i.test(subject);
+
+  if (hasRegNumbers || (hasShortlistAttachment && (!isReplyOrForward || hasShortlistText)) || (hasShortlistText && (regNumbers.length > 0 || input.hasAttachments || hasGoogleSheetRoster))) {
     return { isAllowed: true, category: 'shortlist', reason: 'shortlist roster / student IDs / spreadsheet detected' };
   }
 

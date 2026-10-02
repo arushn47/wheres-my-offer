@@ -7,6 +7,10 @@ import {
   buildEliminationToken,
   extractExplicitOrdinal,
   isRescheduleEmail,
+  parseRecruitmentProcess,
+  buildAnnouncedProcessToken,
+  parseAnnouncedProcessToken,
+  sanitizeAnnouncedRounds,
 } from './round-identity';
 
 // ---------------------------------------------------------------------------
@@ -249,3 +253,142 @@ describe('isRescheduleEmail', () => {
     expect(isRescheduleEmail('Online Assessment Shortlist', '')).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// parseRecruitmentProcess (status pipeline stage derivation)
+// ---------------------------------------------------------------------------
+
+describe('parseRecruitmentProcess', () => {
+  it('extracts clean round stage names instead of full event descriptions with dates/venues', () => {
+    const emailText = `Date of Visit:
+Test - 26th Sept 2026 (4 PM) @ VIT Vellore campus & others in respective campus venues
+Physical Interview 31 august - Will be announced later`;
+
+    const rounds = parseRecruitmentProcess(emailText);
+    expect(rounds).not.toBeNull();
+    expect(rounds).toHaveLength(2);
+
+    // Round 1 should be clean "Test" — NOT the full date and venue description!
+    expect(rounds![0]).toEqual(
+      expect.objectContaining({
+        id: 'test_1',
+        label: 'Test',
+        shortLabel: 'Test',
+        roundType: 'test',
+        dateStr: '26th Sept 2026',
+      })
+    );
+
+    // Round 2 should be clean "Interview" — NOT "Physical Interview 31 august - Will be announced later"!
+    expect(rounds![1]).toEqual(
+      expect.objectContaining({
+        id: 'interview_1',
+        label: 'Interview',
+        shortLabel: 'Interview',
+        roundType: 'interview',
+        dateStr: '31 august',
+      })
+    );
+  });
+
+  it('numbers multiple tests and interviews sequentially (e.g. Test 1, Test 2, Game Round, Interview)', () => {
+    const text = `Recruitment Process:
+- Test 1 (Online)
+- Test 2 (in campus)
+- Game Round
+- Interview`;
+
+    const rounds = parseRecruitmentProcess(text);
+    expect(rounds).not.toBeNull();
+    expect(rounds!.map(r => ({ id: r.id, label: r.label, shortLabel: r.shortLabel }))).toEqual([
+      { id: 'test_1', label: 'Test 1', shortLabel: 'Test 1' },
+      { id: 'test_2', label: 'Test 2', shortLabel: 'Test 2' },
+      { id: 'game_round', label: 'Game Round', shortLabel: 'Game Round' },
+      { id: 'interview_1', label: 'Interview', shortLabel: 'Interview' },
+    ]);
+  });
+
+  it('handles PPT, Test, GD, and multiple interviews', () => {
+    const text = `Selection Process:
+1. Pre-Placement Talk
+2. Online Test
+3. Group Discussion
+4. Technical Interview
+5. HR Interview`;
+
+    const rounds = parseRecruitmentProcess(text);
+    expect(rounds).not.toBeNull();
+    expect(rounds!.map(r => r.shortLabel)).toEqual([
+      'PPT',
+      'Test',
+      'GD',
+      'Interview 1',
+      'Interview 2',
+    ]);
+  });
+
+  it('returns null if fewer than 2 rounds found', () => {
+    const text = `Recruitment Process:
+- Single Test only`;
+    expect(parseRecruitmentProcess(text)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// sanitizeAnnouncedRounds + parseAnnouncedProcessToken
+// ---------------------------------------------------------------------------
+
+describe('sanitizeAnnouncedRounds & parseAnnouncedProcessToken', () => {
+  it('sanitizes legacy verbose tokens stored in application notes', () => {
+    const legacyRounds = [
+      {
+        id: 'test_26th_sept_2026_1',
+        label: 'Test - 26th Sept 2026 (4 PM) @ VIT Vellore campus & others in respective campus venues',
+        shortLabel: 'Test - 26th Sept 2026 (4 PM) @ VIT Vellore campus & others in respective campus venues',
+        roundType: 'test' as const,
+        roundNumber: 1,
+      },
+      {
+        id: 'physical_interview_31_august_2',
+        label: 'Physical Interview 31 august - Will be announced later',
+        shortLabel: 'Physical Interview 31 august - Will be announced later',
+        roundType: 'interview' as const,
+        roundNumber: 1,
+      },
+    ];
+
+    const notes = buildAnnouncedProcessToken(legacyRounds);
+    const parsed = parseAnnouncedProcessToken(notes);
+
+    expect(parsed).not.toBeNull();
+    expect(parsed![0].shortLabel).toBe('Test');
+    expect(parsed![0].label).toBe('Test');
+    expect(parsed![1].shortLabel).toBe('Interview');
+    expect(parsed![1].label).toBe('Interview');
+  });
+
+  it('injects a Test round between PPT and Interview when circular omitted test date (e.g. UBS, Chargebee, EY SAP)', () => {
+    const text = `Date of Visit:
+*Pre-placement talk:* 29-September-26; 4:00 PM to 5:00 PM
+*Interview:* 6-October-26; 10:00 AM onwards`;
+
+    const rounds = parseRecruitmentProcess(text);
+    expect(rounds).not.toBeNull();
+    expect(rounds!.map(r => r.shortLabel)).toEqual(['PPT', 'Test', 'Interview']);
+    expect(rounds![1].roundType).toBe('test');
+  });
+
+  it('sanitizes legacy notes that only had PPT and Interview by injecting Test round', () => {
+    const legacyRounds = [
+      { id: 'ppt_1', label: 'Pre-Placement Talk', shortLabel: 'PPT', roundType: 'ppt' as const },
+      { id: 'interview_1', label: 'Interview', shortLabel: 'Interview', roundType: 'interview' as const },
+    ];
+    const notes = buildAnnouncedProcessToken(legacyRounds);
+    const parsed = parseAnnouncedProcessToken(notes);
+
+    expect(parsed).not.toBeNull();
+    expect(parsed!.map(r => r.shortLabel)).toEqual(['PPT', 'Test', 'Interview']);
+  });
+});
+
+

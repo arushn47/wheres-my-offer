@@ -43,7 +43,7 @@ export default async function DashboardPage() {
       .select('id, name'),
     supabase
       .from('applications')
-      .select('id, status, role, category, ctc, stipend, location, notes, manual_override, last_updated, placement_drive_id, registration_deadline')
+      .select('id, status, role, category, ctc, stipend, location, notes, manual_override, last_updated, placement_drive_id, registration_deadline, applied_at, status_source_email_at')
       .eq('user_id', session.userId)
       .order('last_updated', { ascending: false }),
     supabase
@@ -349,7 +349,7 @@ export default async function DashboardPage() {
       category: a.category || drive?.category || null,
       notes: a.notes,
       driveMode: getDriveMode(a.notes, campus),
-      lastUpdated: a.last_updated,
+      lastUpdated: a.manual_override ? a.last_updated : (a.status_source_email_at || a.applied_at || a.last_updated),
     };
   });
 

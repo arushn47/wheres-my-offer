@@ -65,6 +65,7 @@ export interface CompanyWithDetails {
     applied_at: string | null;
     last_updated: string;
     registration_deadline?: string | null;
+    status_source_email_at?: string | null;
   } | null;
   shortlistVerificationState?: string | null;
   latestEvent: {
@@ -198,6 +199,7 @@ export const getEliminationPriority = (comp: CompanyWithDetails, isSyncing = fal
   // Tier 2: Not Shortlisted for Test after PPT
   if (
     subtitle.includes('post-ppt') ||
+    subtitle.includes('post ppt') ||
     /after\s*ppt|post[- ]ppt|ppt.*not\s*shortlisted|not\s*shortlisted.*after\s*ppt/i.test(notes) ||
     (eff.hasPpt && (eff.eliminatedStage === 2 || eff.furthestPassedStage >= 1 || isEliminatedStatus(s) || isEliminatedStatus(rawStatus)))
   ) {
@@ -547,8 +549,8 @@ export default function CompaniesClient({
 
         const isManualA = a.application?.manual_override && a.application?.last_updated;
         const isManualB = b.application?.manual_override && b.application?.last_updated;
-        const dateA = new Date(isManualA ? a.application!.last_updated : a.latestEmailDate || a.application?.applied_at || a.updated_at || 0).getTime();
-        const dateB = new Date(isManualB ? b.application!.last_updated : b.latestEmailDate || b.application?.applied_at || b.updated_at || 0).getTime();
+        const dateA = new Date(isManualA ? a.application!.last_updated : a.latestEmailDate || a.application?.status_source_email_at || a.application?.applied_at || a.updated_at || 0).getTime();
+        const dateB = new Date(isManualB ? b.application!.last_updated : b.latestEmailDate || b.application?.status_source_email_at || b.application?.applied_at || b.updated_at || 0).getTime();
         return dateB - dateA;
       });
     }
@@ -564,8 +566,8 @@ export default function CompaniesClient({
         const numDiff = getDriveNum(b) - getDriveNum(a);
         if (numDiff !== 0) return numDiff;
 
-        const dateA = new Date(a.latestEmailDate || a.updated_at || 0).getTime();
-        const dateB = new Date(b.latestEmailDate || b.updated_at || 0).getTime();
+        const dateA = new Date(a.application?.manual_override ? a.application.last_updated : a.latestEmailDate || a.application?.status_source_email_at || a.application?.applied_at || a.updated_at || 0).getTime();
+        const dateB = new Date(b.application?.manual_override ? b.application.last_updated : b.latestEmailDate || b.application?.status_source_email_at || b.application?.applied_at || b.updated_at || 0).getTime();
         return dateB - dateA;
       });
     }
@@ -585,8 +587,8 @@ export default function CompaniesClient({
 
         const numDiff = getDriveNum(b) - getDriveNum(a);
         if (numDiff !== 0) return numDiff;
-        const dateA = new Date(a.latestEmailDate || a.updated_at || 0).getTime();
-        const dateB = new Date(b.latestEmailDate || b.updated_at || 0).getTime();
+        const dateA = new Date(a.application?.manual_override ? a.application.last_updated : a.latestEmailDate || a.application?.status_source_email_at || a.application?.applied_at || a.updated_at || 0).getTime();
+        const dateB = new Date(b.application?.manual_override ? b.application.last_updated : b.latestEmailDate || b.application?.status_source_email_at || b.application?.applied_at || b.updated_at || 0).getTime();
         return dateB - dateA;
       });
     }
@@ -596,8 +598,8 @@ export default function CompaniesClient({
     return [...list].sort((a, b) => {
       const numDiff = getDriveNum(b) - getDriveNum(a);
       if (numDiff !== 0) return numDiff;
-      const dateA = new Date(a.latestEmailDate || a.updated_at || 0).getTime();
-      const dateB = new Date(b.latestEmailDate || b.updated_at || 0).getTime();
+      const dateA = new Date(a.application?.manual_override ? a.application.last_updated : a.latestEmailDate || a.application?.status_source_email_at || a.application?.applied_at || a.updated_at || 0).getTime();
+      const dateB = new Date(b.application?.manual_override ? b.application.last_updated : b.latestEmailDate || b.application?.status_source_email_at || b.application?.applied_at || b.updated_at || 0).getTime();
       return dateB - dateA;
     });
   }, [companies, filter, q, isSyncing, statusUpdatesPending]);
@@ -827,16 +829,18 @@ export default function CompaniesClient({
                       const isManual = Boolean(c.application?.manual_override && c.application?.last_updated);
                       const displayDate = isManual
                         ? c.application!.last_updated
-                        : c.latestEmailDate || c.application?.applied_at || c.application?.last_updated;
+                        : c.latestEmailDate || c.application?.status_source_email_at || c.application?.applied_at || c.updated_at;
                       const titleText = isManual
-                        ? `Manually updated via Placement Assistant: ${formatDate(c.application!.last_updated)}`
-                        : c.application?.last_updated && c.latestEmailDate === c.application.last_updated
-                          ? `Drive updated: ${formatDate(c.application.last_updated)}`
-                          : c.latestEmailDate
-                            ? `Latest circular/email: ${formatDate(c.latestEmailDate)}`
+                        ? `Status manually updated: ${formatDate(c.application!.last_updated)}`
+                        : c.latestEmailDate
+                          ? `Latest circular/email: ${formatDate(c.latestEmailDate)}`
+                          : c.application?.status_source_email_at
+                            ? `Status updated: ${formatDate(c.application.status_source_email_at)}`
                             : c.application?.applied_at
                               ? `Applied: ${formatDate(c.application.applied_at)}`
-                              : undefined;
+                              : c.updated_at
+                                ? `Drive announced: ${formatDate(c.updated_at)}`
+                                : undefined;
 
                       return (
                         <span
