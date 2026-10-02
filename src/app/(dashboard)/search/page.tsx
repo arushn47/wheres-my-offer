@@ -44,13 +44,13 @@ export default async function SearchPage() {
       .select('id, subject, sender, received_at, body_snippet, college_email_id, placement_drive_id')
       .eq('user_id', session.userId)
       .order('received_at', { ascending: false })
-      .limit(100),
+      .limit(50),
 
     supabase
       .from('college_emails')
-      .select('id, subject, sender_email, received_at, created_at, body_snippet, body_text, parsed_company_name, parsed_drive_numbers')
+      .select('id, subject, sender_email, received_at, created_at, body_text, parsed_company_name, parsed_drive_numbers')
       .order('received_at', { ascending: false })
-      .limit(100),
+      .limit(40),
 
     supabase
       .from('events')
@@ -203,7 +203,7 @@ export default async function SearchPage() {
       receivedAt: (ce as any).received_at || ce.created_at,
       companyId: compId,
       companyName: comp?.name || ce.parsed_company_name || matchedDrive?.drive_name || null,
-      snippet: ce.body_text || ce.body_snippet,
+      snippet: ce.body_text ? ce.body_text.slice(0, 500) : null,
     };
   });
 

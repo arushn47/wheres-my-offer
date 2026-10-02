@@ -6,6 +6,8 @@ import { isPdfAttachment } from '@/lib/sync/pdf-parser';
 
 export const dynamic = 'force-dynamic';
 
+let cachedIngesterPayload: { data: any; expiresAt: number } | null = null;
+
 export async function GET() {
   try {
     await requireAdmin();
@@ -15,6 +17,14 @@ export async function GET() {
       { error: authError.message || 'Unauthorized' },
       { status: authError.status || 401 }
     );
+  }
+
+  // Serve short 15-second memory cache to eliminate bursts from sidebar navigations
+  const now = Date.now();
+  if (cachedIngesterPayload && cachedIngesterPayload.expiresAt > now) {
+    return NextResponse.json(cachedIngesterPayload.data, {
+      headers: { 'Cache-Control': 'private, max-age=15, stale-while-revalidate=30' },
+    });
   }
 
   const supabase = createAdminClient();
@@ -35,7 +45,8 @@ export async function GET() {
       supabase.from('gmail_accounts').select('email,is_connected,last_sync_at,last_history_id').eq('id', state.gmail_account_id).maybeSingle(),
       supabase.from('college_emails').select('id', { count: 'exact', head: true }),
       supabase.from('college_attachments').select('id', { count: 'exact', head: true }),
-      supabase.from('college_attachments').select('id,filename,parse_status'),
+      // Exclude complete attachments to avoid fetching hundreds of parsed rows every poll
+      supabase.from('college_attachments').select('id,filename,parse_status').neq('parse_status', 'complete'),
     ]);
     for (const result of [accountResult, archiveResult, attachmentResult, attachmentStatusResult]) {
       if (result.error) throw result.error;
@@ -55,7 +66,7 @@ export async function GET() {
       attachment.parse_status === 'error' &&
       (isSupportedWorkbookAttachment(attachment.filename || '') || isPdfAttachment(attachment.filename || ''))
     ).length;
-    return NextResponse.json({
+    const payload = {
       ingester: {
         inbox: accountResult.data?.email || null,
         connected: Boolean(accountResult.data?.is_connected),
@@ -73,7 +84,16 @@ export async function GET() {
         failedAttachments,
         unsupportedAttachments,
       },
-    }, { headers: { 'Cache-Control': 'no-store' } });
+    };
+
+    cachedIngesterPayload = {
+      data: payload,
+      expiresAt: Date.now() + 15_000,
+    };
+
+    return NextResponse.json(payload, {
+      headers: { 'Cache-Control': 'private, max-age=15, stale-while-revalidate=30' },
+    });
   } catch (error) {
     console.error('[Admin Shared College Ingester] Status query failed:', error);
     return NextResponse.json(

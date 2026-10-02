@@ -36,8 +36,6 @@ interface SharedCircularRow {
   id: string;
   subject: string | null;
   sender_email: string;
-  body_text: string | null;
-  body_snippet: string | null;
   received_at: string | null;
   created_at: string;
   parsed_company_name: string | null;
@@ -191,7 +189,6 @@ export async function ingestSharedCollegeCircular(params: {
     sender_email: parsedEmail.senderEmail.toLowerCase().trim(),
     subject: parsedEmail.subject,
     body_text: bodyText,
-    body_snippet: bodyText.slice(0, 50000),
     message_id: normalizedMessageId,
     metadata_key: computeCanonicalMetadataKey(parsedEmail.senderEmail, parsedEmail.subject, parsedEmail.bodySnippet),
     has_attachments: parsedEmail.hasAttachments,
@@ -501,14 +498,14 @@ export async function fanOutSharedCollegeArchiveToUser(userId: string): Promise<
   for (let from = 0; ; from += 1000) {
     const { data, error } = await supabase
       .from('college_emails')
-      .select('id,subject,sender_email,body_text,body_snippet,received_at,created_at,parsed_company_name,parsed_drive_numbers,classification,has_attachments')
+      .select('id,subject,sender_email,received_at,created_at,parsed_company_name,parsed_drive_numbers,classification,has_attachments')
       .eq('processing_status', 'complete')
       .range(from, from + 999);
     if (error) throw error;
     circulars.push(...((data || []) as SharedCircularRow[]));
     if (!data || data.length < 1000) break;
   }
-  // Find which circulars match this user's eligible drives before fetching attachments
+  // Find which circulars match this user's eligible drives before fetching attachments and bodies
   const candidateCircularIds = new Set<string>();
   for (const drive of drives) {
     const company = companyMap.get(drive.company_id);
@@ -527,17 +524,27 @@ export async function fanOutSharedCollegeArchiveToUser(userId: string): Promise<
   }
 
   const attachmentsByEmail = new Map<string, ParsedAttachment[]>();
+  const bodiesByEmail = new Map<string, string>();
   if (candidateCircularIds.size > 0) {
     const candidateIdsArray = Array.from(candidateCircularIds);
     for (let from = 0; from < candidateIdsArray.length; from += 200) {
-      const { data: cachedAttachments, error: attachmentError } = await supabase
-        .from('college_attachments')
-        .select('college_email_id,attachment_id,filename,size_bytes,extracted_rows,parse_status')
-        .eq('parse_status', 'complete')
-        .not('extracted_rows', 'is', null)
-        .in('college_email_id', candidateIdsArray.slice(from, from + 200));
-      if (attachmentError) throw attachmentError;
-      for (const row of cachedAttachments || []) {
+      const chunk = candidateIdsArray.slice(from, from + 200);
+      const [attachmentsRes, bodiesRes] = await Promise.all([
+        supabase
+          .from('college_attachments')
+          .select('college_email_id,attachment_id,filename,size_bytes,extracted_rows,parse_status')
+          .eq('parse_status', 'complete')
+          .not('extracted_rows', 'is', null)
+          .in('college_email_id', chunk),
+        supabase
+          .from('college_emails')
+          .select('id,body_text')
+          .in('id', chunk),
+      ]);
+      if (attachmentsRes.error) throw attachmentsRes.error;
+      if (bodiesRes.error) throw bodiesRes.error;
+
+      for (const row of attachmentsRes.data || []) {
         const list = attachmentsByEmail.get(row.college_email_id) || [];
         list.push({
           attachmentId: row.attachment_id,
@@ -548,6 +555,11 @@ export async function fanOutSharedCollegeArchiveToUser(userId: string): Promise<
           parseStatus: row.parse_status,
         });
         attachmentsByEmail.set(row.college_email_id, list);
+      }
+      for (const row of bodiesRes.data || []) {
+        if (row.body_text) {
+          bodiesByEmail.set(row.id, row.body_text);
+        }
       }
     }
   }
@@ -585,7 +597,7 @@ export async function fanOutSharedCollegeArchiveToUser(userId: string): Promise<
       if (!seen.add(`${drive.id}|${circular.id}`)) continue;
       examined++;
 
-      const body = circular.body_text || circular.body_snippet || '';
+      const body = bodiesByEmail.get(circular.id) || '';
       const parsedEmail: ParsedEmail = {
         gmailMessageId: circular.id,
         threadId: null,

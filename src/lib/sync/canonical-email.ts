@@ -100,7 +100,6 @@ export interface CanonicalEmailCacheRow {
   sender_email: string;
   subject: string;
   body_text: string | null;
-  body_snippet: string | null;
   classification: string | null;
   classification_confidence: number | null;
   parsed_company_name: string | null;

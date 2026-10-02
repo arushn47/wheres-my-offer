@@ -28,8 +28,9 @@ export default function SharedCollegeRadar() {
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
     try {
-      const response = await fetch('/api/admin/canonical/ingester', { cache: 'no-store' });
+      const response = await fetch('/api/admin/canonical/ingester');
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error || 'Ingester status unavailable');
       setStatus(payload.ingester || null);
@@ -42,10 +43,20 @@ export default function SharedCollegeRadar() {
   }, []);
 
   useEffect(() => {
-    const initialRefresh = window.setTimeout(() => void refresh(), 0);
-    const timer = window.setInterval(() => void refresh(), 30_000);
+    void refresh();
+
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') void refresh();
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+
+    // Poll at a conservative 45s cadence only while visible
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'visible') void refresh();
+    }, 45_000);
+
     return () => {
-      window.clearTimeout(initialRefresh);
+      document.removeEventListener('visibilitychange', handleVisibility);
       window.clearInterval(timer);
     };
   }, [refresh]);

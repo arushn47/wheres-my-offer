@@ -127,6 +127,7 @@ export async function pushEventToGoogleCalendar(params: SyncCalendarEventParams)
         const updateRes = await calendar.events.update({
           calendarId: 'primary',
           eventId: params.gcalEventId,
+          sendUpdates: 'none',
           requestBody: eventPayload,
         });
         return updateRes.data.id || null;
@@ -146,6 +147,7 @@ export async function pushEventToGoogleCalendar(params: SyncCalendarEventParams)
     if (params.placementDriveId) {
       const insertRes = await calendar.events.insert({
         calendarId: 'primary',
+        sendUpdates: 'none',
         requestBody: eventPayload,
       });
       return insertRes.data.id || null;
@@ -172,6 +174,7 @@ export async function pushEventToGoogleCalendar(params: SyncCalendarEventParams)
         const updateRes = await calendar.events.update({
           calendarId: 'primary',
           eventId: existingMatch.id,
+          sendUpdates: 'none',
           requestBody: eventPayload,
         });
         return updateRes.data.id || null;
@@ -183,6 +186,7 @@ export async function pushEventToGoogleCalendar(params: SyncCalendarEventParams)
     // --- Path 3: No existing event found — insert fresh ---
     const insertRes = await calendar.events.insert({
       calendarId: 'primary',
+      sendUpdates: 'none',
       requestBody: eventPayload,
     });
 
@@ -216,6 +220,7 @@ export async function deleteEventFromGoogleCalendar(params: {
         await calendar.events.delete({
           calendarId: 'primary',
           eventId: params.eventId,
+          sendUpdates: 'none',
         });
         return true;
       } catch (err: unknown) {
@@ -239,6 +244,7 @@ export async function deleteEventFromGoogleCalendar(params: {
           await calendar.events.delete({
             calendarId: 'primary',
             eventId: item.id,
+            sendUpdates: 'none',
           });
         }
       }
@@ -348,13 +354,25 @@ export async function reconcileUserGoogleCalendar(userId: string): Promise<Recon
     eventId?: string | null;
   }> = [];
 
+  const userPrefs = await getNotificationPreferences(userId);
+  const reminderOverrides =
+    userPrefs.notifyReminders && userPrefs.reminderLeadTimeMins?.length
+      ? userPrefs.reminderLeadTimeMins.map((mins) => ({
+          method: mins >= 1440 ? 'email' : 'popup',
+          minutes: mins,
+        }))
+      : [
+          { method: 'popup', minutes: 30 },
+          { method: 'popup', minutes: 120 },
+          { method: 'email', minutes: 1440 },
+        ];
+
   for (const evt of events || []) {
     // NEVER sync registration deadlines to Google Calendar
     if (evt.event_type === 'registration_deadline') continue;
     if (!evt.start_time) continue;
 
     // Filter by user reminder preferences if configured
-    const userPrefs = await getNotificationPreferences(userId);
     if (userPrefs.notifyReminders && userPrefs.reminderEventTypes?.length) {
       if (!userPrefs.reminderEventTypes.includes(evt.event_type)) {
         continue;
@@ -503,23 +521,51 @@ export async function reconcileUserGoogleCalendar(userId: string): Promise<Recon
         endDate = fallbackEndDate || new Date(startDate.getTime() + 60 * 60 * 1000);
       }
 
+      const expectedSummary = match.title;
+      const expectedLocation = match.venue || 'Campus / Online';
+      const expectedDescription = `Placement Assessment / Event tracked by Where's My Offer.\nMode: ${match.mode || 'Offline'}\nVenue: ${match.venue || 'Campus / Online'}`;
+      const expectedStartIso = startDate.toISOString();
+      const expectedEndIso = endDate.toISOString();
+
+      const gStartIso = gItem.start?.dateTime ? new Date(gItem.start.dateTime).toISOString() : null;
+      const gEndIso = gItem.end?.dateTime ? new Date(gItem.end.dateTime).toISOString() : null;
+      const gSummary = gItem.summary || '';
+      const gLocation = gItem.location || '';
+      const gDescription = gItem.description || '';
+      const gDriveId = gItem.extendedProperties?.private?.placementDriveId || '';
+      const gEventId = gItem.extendedProperties?.private?.neotrackEventId || '';
+
+      const isUnchanged =
+        gSummary === expectedSummary &&
+        gLocation === expectedLocation &&
+        gDescription === expectedDescription &&
+        gStartIso === expectedStartIso &&
+        gEndIso === expectedEndIso &&
+        gDriveId === (match.placementDriveId || '') &&
+        gEventId === match.id;
+
+      if (isUnchanged) {
+        // Event is already strictly up-to-date in Google Calendar; avoid redundant API calls and update emails!
+        if (match.gcalEventId !== gItem.id) {
+          await supabase.from('events').update({ gcal_event_id: gItem.id }).eq('id', match.id);
+        }
+        continue;
+      }
+
       try {
         await calendar.events.update({
           calendarId: 'primary',
           eventId: gItem.id,
+          sendUpdates: 'none',
           requestBody: {
-            summary: match.title,
-            location: match.venue || 'Campus / Online',
-            description: `Placement Assessment / Event tracked by Where's My Offer.\nMode: ${match.mode || 'Offline'}\nVenue: ${match.venue || 'Campus / Online'}`,
-            start: { dateTime: startDate.toISOString(), timeZone: 'Asia/Kolkata' },
-            end: { dateTime: endDate.toISOString(), timeZone: 'Asia/Kolkata' },
+            summary: expectedSummary,
+            location: expectedLocation,
+            description: expectedDescription,
+            start: { dateTime: expectedStartIso, timeZone: 'Asia/Kolkata' },
+            end: { dateTime: expectedEndIso, timeZone: 'Asia/Kolkata' },
             reminders: {
               useDefault: false,
-              overrides: [
-                { method: 'popup', minutes: 30 },
-                { method: 'popup', minutes: 120 },
-                { method: 'email', minutes: 1440 },
-              ],
+              overrides: reminderOverrides,
             },
             extendedProperties: {
               private: {
@@ -545,6 +591,7 @@ export async function reconcileUserGoogleCalendar(userId: string): Promise<Recon
         await calendar.events.delete({
           calendarId: 'primary',
           eventId: gItem.id,
+          sendUpdates: 'none',
         });
         deletedCount++;
       } catch (delErr) {
@@ -570,6 +617,7 @@ export async function reconcileUserGoogleCalendar(userId: string): Promise<Recon
     try {
       const created = await calendar.events.insert({
         calendarId: 'primary',
+        sendUpdates: 'none',
         requestBody: {
           summary: ins.title,
           location: ins.venue || 'Campus / Online',
@@ -578,11 +626,7 @@ export async function reconcileUserGoogleCalendar(userId: string): Promise<Recon
           end: { dateTime: endDate.toISOString(), timeZone: 'Asia/Kolkata' },
           reminders: {
             useDefault: false,
-            overrides: [
-              { method: 'popup', minutes: 30 },
-              { method: 'popup', minutes: 120 },
-              { method: 'email', minutes: 1440 },
-            ],
+            overrides: reminderOverrides,
           },
           extendedProperties: {
             private: {

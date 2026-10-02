@@ -61,6 +61,7 @@ export interface DbPlacementDrive {
   identity_source: string | null;
   source_email_id: string | null;
   source_college_email_id?: string | null;
+  aliases?: string[] | null;
   created_at: string;
   updated_at: string;
 }
@@ -122,7 +123,6 @@ export interface DbCollegeEmail {
   content_key: string;
   sender_email: string;
   subject: string;
-  body_snippet: string | null;
   body_text: string | null;
   classification: string | null;
   classification_confidence: number | null;

@@ -389,6 +389,19 @@ describe('sanitizeAnnouncedRounds & parseAnnouncedProcessToken', () => {
     expect(parsed).not.toBeNull();
     expect(parsed!.map(r => r.shortLabel)).toEqual(['PPT', 'Test', 'Interview']);
   });
+
+  it('corrects inverted round order (Interview listed before Test) into canonical progression', () => {
+    const invertedRounds = [
+      { id: 'interview_1', label: 'Interview', shortLabel: 'Interview', roundType: 'interview' as const, roundNumber: 1 },
+      { id: 'test_1', label: 'Test', shortLabel: 'Test', roundType: 'test' as const, roundNumber: 1 },
+    ];
+    const notes = buildAnnouncedProcessToken(invertedRounds);
+    const parsed = parseAnnouncedProcessToken(notes);
+
+    expect(parsed).not.toBeNull();
+    expect(parsed!.map(r => r.roundType)).toEqual(['test', 'interview']);
+    expect(parsed!.map(r => r.shortLabel)).toEqual(['Test', 'Interview']);
+  });
 });
 
 

@@ -112,7 +112,7 @@ export default async function CompanyDetailPage(props: {
   // 2. Resolve all drives for this company
   const { data: companyDrives } = await supabase
     .from('placement_drives')
-    .select('id, drive_number, normalized_drive_number, drive_name, role, category, ctc, stipend, location, registration_deadline, eligibility, branches, cgpa_requirement, backlog_requirement, source_email_id, source_college_email_id, excluded_email_ids, created_at')
+    .select('id, drive_number, normalized_drive_number, drive_name, role, category, ctc, stipend, location, registration_deadline, eligibility, branches, cgpa_requirement, backlog_requirement, source_email_id, source_college_email_id, excluded_email_ids, created_at, aliases')
     .eq('company_id', company.id);
 
   const driveIds = (companyDrives || []).map((d) => d.id);
@@ -176,9 +176,11 @@ export default async function CompanyDetailPage(props: {
   const targetDriveIds = placementDriveId ? [placementDriveId] : driveIds;
   const driveFilterIds = targetDriveIds.length > 0 ? targetDriveIds : ['00000000-0000-0000-0000-000000000000'];
 
+  const driveAliases = (targetDrive as any)?.aliases || [];
   const companyAliases = Array.from(new Set([
     company.name,
     ...(company.aliases || []),
+    ...driveAliases,
     ...(targetDrive?.drive_number ? [targetDrive.drive_number] : []),
   ])).filter((a) => a && a.length >= 3);
 
@@ -317,7 +319,7 @@ export default async function CompanyDetailPage(props: {
         .in('id', missingLinkedIds),
       supabase
         .from('college_emails')
-        .select('id, subject, sender_email, received_at, created_at, body_snippet, classification')
+        .select('id, subject, sender_email, received_at, created_at, body_text, classification')
         .in('id', missingLinkedIds),
     ]);
     for (const em of (extraPersonal || [])) {
@@ -336,7 +338,8 @@ export default async function CompanyDetailPage(props: {
         subject: em.subject,
         sender: em.sender_email,
         received_at: em.received_at || em.created_at,
-        body_snippet: em.body_snippet,
+        body_snippet: (em as any).body_text ? (em as any).body_text.slice(0, 500) : '',
+        body_text: (em as any).body_text || '',
         classification: em.classification,
         is_college_broadcast: true,
       });
@@ -387,7 +390,18 @@ export default async function CompanyDetailPage(props: {
 
   // Also resolve college circulars explicitly linked to this drive by drive number
   const driveNumbers = Array.from(new Set(
-    relevantDrives.flatMap((d: any) => [d.drive_number, d.normalized_drive_number].filter(Boolean) as string[])
+    relevantDrives.flatMap((d: any) => {
+      const raw = [d.drive_number, d.normalized_drive_number].filter(Boolean) as string[];
+      const expanded: string[] = [];
+      for (const n of raw) {
+        expanded.push(n);
+        expanded.push(n.toLowerCase());
+        expanded.push(n.toUpperCase());
+        const digits = n.match(/\d+$/)?.[0];
+        if (digits) expanded.push(digits);
+      }
+      return expanded;
+    })
   ));
 
   for (const dNum of driveNumbers) {
@@ -424,7 +438,7 @@ export default async function CompanyDetailPage(props: {
   if (orConditions.length > 0) {
     const { data: collegeEmailRows } = await supabase
       .from('college_emails')
-      .select('id, subject, sender_email, received_at, created_at, body_snippet, body_text, classification, parsed_company_name, parsed_drive_numbers')
+      .select('id, subject, sender_email, received_at, created_at, classification, parsed_company_name, parsed_drive_numbers')
       .or(orConditions.join(','))
       .order('received_at', { ascending: false })
       .limit(50);
@@ -456,11 +470,16 @@ export default async function CompanyDetailPage(props: {
       if (normSub) seenCollegeSubjects.add(normSub);
 
       if (!allEmailsMap.has(ce.id)) {
-        const isDriveNumberMatch = driveNumbers.some((dNum) => {
-          const dLower = dNum.toLowerCase();
-          const parsedNums = ((ce as any).parsed_drive_numbers || []).map((n: string) => n.toLowerCase());
-          return parsedNums.includes(dLower);
-        });
+        const parsedDriveNums = (((ce as any).parsed_drive_numbers || []) as string[]).map((n) => n.toLowerCase());
+        const isDriveNumberMatch = driveNumbers.some((dNum) => parsedDriveNums.includes(dNum.toLowerCase()));
+
+        // Sibling drive boundary: If this circular explicitly targets drive numbers and NONE match
+        // the active drive, it belongs to a sibling drive (e.g. Infosys 1338 vs 1078). Reject it so
+        // it does not pollute this drive's timeline or cause false "Not Shortlisted" indicators.
+        if (driveNumbers.length > 0 && parsedDriveNums.length > 0 && !isDriveNumberMatch && !collegeEmailIds.has(ce.id)) {
+          continue;
+        }
+
         const isExplicitId = collegeEmailIds.has(ce.id) || isDriveNumberMatch;
         const sub = ce.subject || '';
         const parsedName = (ce as any).parsed_company_name || '';
@@ -510,7 +529,8 @@ export default async function CompanyDetailPage(props: {
             subject: ce.subject,
             sender: ce.sender_email || 'vitlions2027@vitbhopal.ac.in',
             received_at: ce.received_at || ce.created_at,
-            body_snippet: ce.body_text || ce.body_snippet || '',
+            body_snippet: '',
+            body_text: '',
             canonical_email_id: ce.id,
             classification: ce.classification || 'general',
             thread_id: null,
@@ -538,7 +558,7 @@ export default async function CompanyDetailPage(props: {
     const [canonicalRes, attachmentRes] = await Promise.all([
       supabase
         .from('college_emails')
-        .select('id, body_text, body_snippet, message_id')
+        .select('id, body_text, message_id')
         .in('id', canonicalIds),
       supabase
         .from('college_attachments')
@@ -550,7 +570,7 @@ export default async function CompanyDetailPage(props: {
       console.warn('[CompanyDetailPage] Could not load college email bodies:', canonicalRes.error.message);
     } else {
       for (const canonical of canonicalRes.data || []) {
-        const body = canonical.body_text || canonical.body_snippet || '';
+        const body = canonical.body_text || '';
         if (body) canonicalBodyById.set(canonical.id, body);
         if (canonical.message_id) canonicalMessageIdById.set(canonical.id, canonical.message_id);
       }
@@ -714,6 +734,7 @@ export default async function CompanyDetailPage(props: {
       collegeEmailId: cm.college_email_id || null,
       matchType: cm.match_type,
       matchedValue: cm.matched_value,
+      matchedRoundType: cm.matched_round_type || null,
       matchLocation: (cm as { match_location?: string | null }).match_location || null,
       neoId: (cm as { neo_id?: string | null }).neo_id || null,
       createdAt: cm.created_at,

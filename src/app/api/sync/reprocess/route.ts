@@ -22,6 +22,7 @@ import {
 } from '@/lib/sync/drive-correlator';
 import { pickRegistrationDeadline } from '@/lib/sync/events';
 import { classifyShortlistEmail, parseRecruitmentProcess, buildAnnouncedProcessToken, extractAnnouncedRoundsFromEmails } from '@/lib/sync/round-identity';
+import { normalizeDriveNumber } from '@/lib/drive-number';
 
 
 export const dynamic = 'force-dynamic';
@@ -48,6 +49,7 @@ export async function recalculateApplicationStatuses(
   onProgress?: (p: { step: number; totalSteps: number; message: string }) => void,
   options?: {
     deepGSheetScan?: boolean;
+    skipGSheetScan?: boolean;
     targetPlacementDriveIds?: string[];
     recalculateStatusesFromRemainingEvidence?: boolean;
     suppressNotifications?: boolean;
@@ -89,7 +91,7 @@ export async function recalculateApplicationStatuses(
   while (true) {
     const { data: chunk, error: chunkErr } = await supabase
       .from('personal_emails')
-      .select('id, subject, sender, body_snippet, gmail_account_id, gmail_message_id, canonical_email_id, college_email_id, college_emails!personal_emails_college_email_id_fkey(body_text, body_snippet), rfc_message_id, classification, placement_drive_id, received_at, assignment_state, assignment_source')
+      .select('id, subject, sender, body_snippet, gmail_account_id, gmail_message_id, canonical_email_id, college_email_id, college_emails!personal_emails_college_email_id_fkey(body_text), rfc_message_id, classification, placement_drive_id, received_at, assignment_state, assignment_source')
       .eq('user_id', userId)
       .order('received_at', { ascending: true })
       .range(page * pageSize, (page + 1) * pageSize - 1);
@@ -110,7 +112,7 @@ export async function recalculateApplicationStatuses(
       rawEmailChunks
         .filter((e) => {
           const canonical = Array.isArray(e.college_emails) ? e.college_emails[0] : e.college_emails;
-          return (!canonical?.body_text && !canonical?.body_snippet) && Boolean(e.rfc_message_id);
+          return !canonical?.body_text && Boolean(e.rfc_message_id);
         })
         .map((e) => e.rfc_message_id.toLowerCase().trim())
     ));
@@ -119,11 +121,11 @@ export async function recalculateApplicationStatuses(
       for (let from = 0; from < missingRfcIds.length; from += 200) {
         const { data: canonicalsWithBody } = await supabase
           .from('college_emails')
-          .select('id, message_id, body_snippet')
+          .select('id, message_id, body_text')
           .in('message_id', missingRfcIds.slice(from, from + 200));
 
         for (const c of canonicalsWithBody || []) {
-          const text = c.body_snippet || '';
+          const text = c.body_text || '';
           if (text && c.message_id && !canonicalByMsgId.has(c.message_id.toLowerCase().trim())) {
             canonicalByMsgId.set(c.message_id.toLowerCase().trim(), text);
           }
@@ -181,6 +183,7 @@ export async function recalculateApplicationStatuses(
     subject: string | null;
     sender: string | null;
     body_snippet: string | null;
+    body_text?: string | null;
     received_at: string | null;
     classification: string | null;
     parsed_company_name?: string | null;
@@ -199,7 +202,7 @@ export async function recalculateApplicationStatuses(
     while (true) {
       const { data: cChunk, error: cErr } = await supabase
         .from('college_emails')
-        .select('id, subject, sender_email, received_at, created_at, body_snippet, classification, parsed_company_name, parsed_drive_numbers')
+        .select('id, subject, sender_email, received_at, created_at, body_text, classification, parsed_company_name, parsed_drive_numbers')
         .order('received_at', { ascending: true })
         .range(clgPage * pageSize, (clgPage + 1) * pageSize - 1);
 
@@ -213,8 +216,8 @@ export async function recalculateApplicationStatuses(
         let classification = ce.classification;
         const dynamicClass = classifyEmail({
           subject: ce.subject || '',
-          bodySnippet: ce.body_snippet || '',
-          bodyPlain: ce.body_snippet || '',
+          bodySnippet: (ce as any).body_text ? (ce as any).body_text.slice(0, 500) : '',
+          bodyPlain: (ce as any).body_text || '',
           sender: ce.sender_email || '',
           senderEmail: ce.sender_email || '',
         } as any).classification;
@@ -233,7 +236,8 @@ export async function recalculateApplicationStatuses(
           subject: ce.subject,
           sender: ce.sender_email,
           received_at: ce.received_at || ce.created_at,
-          body_snippet: ce.body_snippet || '',
+          body_snippet: (ce as any).body_text ? (ce as any).body_text.slice(0, 500) : '',
+          body_text: (ce as any).body_text || '',
           classification,
           parsed_company_name: ce.parsed_company_name,
           parsed_drive_numbers: ce.parsed_drive_numbers || [],
@@ -241,7 +245,7 @@ export async function recalculateApplicationStatuses(
           college_email_id: ce.id,
           canonical_email_id: ce.id,
           assignment_source: 'college_broadcast',
-          has_canonical_body: Boolean(ce.body_snippet && ce.body_snippet.length > 500),
+          has_canonical_body: Boolean((ce as any).body_text?.length > 200),
         });
       }
 
@@ -554,11 +558,68 @@ export async function recalculateApplicationStatuses(
         }
 
         // 5. Fallback: college broadcast circulars matching company within active timeframe
+        const siblingDrives = allDrives.filter((d) => d.company_id === drive.company_id && d.id !== drive.id);
+        const thisDriveNumbers = [drive.drive_number, drive.normalized_drive_number]
+          .map((n) => normalizeDriveNumber(n))
+          .filter((n): n is string => Boolean(n));
+        const siblingDriveNumbers = new Set<string>(
+          siblingDrives
+            .flatMap((d) => [d.drive_number, d.normalized_drive_number])
+            .map((n) => normalizeDriveNumber(n))
+            .filter((n): n is string => Boolean(n))
+        );
+
+        // Precompute sibling email thread signatures: if any circular has a drive number matching a sibling,
+        // any other circular sharing the exact normalized subject belongs to that sibling thread.
+        const siblingSubjectSet = new Set<string>();
+        for (const ce of allCollegeEmails) {
+          const ceNums = (ce.parsed_drive_numbers || [])
+            .map((n: string) => normalizeDriveNumber(n))
+            .filter((n): n is string => Boolean(n));
+          if (ceNums.some((n) => siblingDriveNumbers.has(n)) && !ceNums.some((n) => thisDriveNumbers.includes(n))) {
+            const cleanSub = (ce.subject || '').toLowerCase().replace(/^(?:re|fwd|fw)\s*:\s*/gi, '').trim();
+            if (cleanSub) siblingSubjectSet.add(cleanSub);
+          }
+        }
+
         for (const ce of allCollegeEmails) {
           if (ce.classification === 'irrelevant' || !ce.subject || !ce.received_at) continue;
           if (driveExcluded && driveExcluded.has(ce.id)) continue;
           const eTime = new Date(ce.received_at).getTime();
           if (driveMinAllowedTime > 0 && eTime < driveMinAllowedTime) continue;
+
+          // Sibling drive boundary checks:
+          const ceDriveNums = (ce.parsed_drive_numbers || [])
+            .map((n: string) => normalizeDriveNumber(n))
+            .filter((n): n is string => Boolean(n));
+          if (ceDriveNums.length > 0) {
+            const matchesThis = ceDriveNums.some((n) => thisDriveNumbers.includes(n));
+            const matchesSibling = ceDriveNums.some((n) => siblingDriveNumbers.has(n));
+            if (matchesSibling && !matchesThis) {
+              continue; // Explicitly belongs to a sibling drive of the same company
+            }
+          }
+
+          // Thread boundary check: if this circular's thread subject was established by a sibling drive
+          const normCeSub = (ce.subject || '').toLowerCase().replace(/^(?:re|fwd|fw)\s*:\s*/gi, '').trim();
+          if (normCeSub && siblingSubjectSet.has(normCeSub)) {
+            const matchesThis = ceDriveNums.some((n) => thisDriveNumbers.includes(n));
+            if (!matchesThis) {
+              continue; // Belongs to a sibling drive's email thread (e.g. "Re: Infosys next round 28th Sept onwards")
+            }
+          }
+
+          // Category/Role discrimination if circular explicitly targets sibling role/profile
+          // E.g. Infosys DSE & Specialist Programmer (Drive 1078) vs Regular Offer (Drive 1338)
+          const subLower = (ce.subject || '').toLowerCase();
+          const isDriveRegular = (drive.category || '').toLowerCase().includes('regular') || (drive.role || '').toLowerCase().includes('regular');
+          const isDriveSuperDream = (drive.category || '').toLowerCase().includes('super') || (drive.category || '').toLowerCase().includes('dream');
+          const isCeDseOrSpe = /\bdse\b|\bspe\b|specialist\s+programmer/i.test(subLower);
+          const isCeRegular = /regular\s+offer/i.test(subLower);
+
+          if (isDriveRegular && isCeDseOrSpe) continue;
+          if (isDriveSuperDream && isCeRegular) continue;
+
           if (isCompanySubjectMatch(ce.subject) || (ce.parsed_company_name && isFuzzyCompanyMatch(comp.name, ce.parsed_company_name))) {
             if (!driveEmails.some(existing => existing.id === ce.id)) {
               driveEmails.push(ce as any);
@@ -650,11 +711,11 @@ export async function recalculateApplicationStatuses(
           }
         }
 
-        if (options?.deepGSheetScan) {
+        if (!options?.skipGSheetScan) {
           const { extractGoogleSheetUrls, scanGoogleSheetForCandidate } = await import('@/lib/sync/gsheet-parser');
 
           for (const email of companyEmails) {
-            const emailText = `${email.subject || ''}\n${email.body_snippet || ''}`;
+            const emailText = `${email.subject || ''}\n${(email as any).body_text || ''}\n${email.body_snippet || ''}`;
             const isRelevantCandidateEmail =
               /shortlist|selection|selected|test|assessment|interview|score|rank|eligible|candidates|students/i.test(
                 emailText
@@ -779,7 +840,6 @@ export async function recalculateApplicationStatuses(
         }
 
         // Find if there is a next drive for this company to avoid date bleed
-        const siblingDrives = allDrives.filter((d) => d.company_id === drive.company_id && d.id !== drive.id);
         let nextDriveStartDate: Date | null = null;
         if (driveStartDate && siblingDrives.length > 0) {
           for (const sib of siblingDrives) {
@@ -1519,7 +1579,10 @@ export async function recalculateApplicationStatuses(
         const travelReq = extractLatestTravelRequirement(newestFirstTravelTexts) ||
           (mainEmailText ? extractTravelRequirement(mainEmailText) : null) ||
           extractTravelRequirement(combinedEmailText);
-        const existingTravel = existingApp?.notes ? existingApp.notes.split('\n')[0]?.trim() : null;
+        const recognizedTravelNote = /^(?:bhopal|bhopal_lab|online|vellore|chennai|ap|respective_campus)$/i;
+        const existingTravel = existingApp?.notes
+          ? existingApp.notes.split('\n').map((l: string) => l.trim()).find((l: string) => recognizedTravelNote.test(l)) || null
+          : null;
         const hasCampusLabEvent = allExtractedEvents.some((e) => /campus\s*\/\s*offline|\blc\s*\d+\b|\blab\b/i.test(e.venue || ''));
         const hasOnlineEvent = allExtractedEvents.some((e) => e.mode === 'online' || /online|virtual/i.test(e.venue || ''));
 
@@ -1928,7 +1991,7 @@ export async function performReprocess(
   while (true) {
     const { data: chunk, error: chunkErr } = await supabase
       .from('personal_emails')
-      .select('id, subject, sender, body_snippet, gmail_account_id, gmail_message_id, canonical_email_id, college_email_id, is_relevant, college_emails!personal_emails_college_email_id_fkey(body_text, body_snippet), rfc_message_id, classification, placement_drive_id, received_at, assignment_state, assignment_source')
+      .select('id, subject, sender, body_snippet, gmail_account_id, gmail_message_id, canonical_email_id, college_email_id, is_relevant, college_emails!personal_emails_college_email_id_fkey(body_text), rfc_message_id, classification, placement_drive_id, received_at, assignment_state, assignment_source')
       .eq('user_id', userId)
       .order('received_at', { ascending: true })
       .range(page * pageSize, (page + 1) * pageSize - 1);
@@ -1950,7 +2013,7 @@ export async function performReprocess(
       rawReprocessEmails
         .filter((e) => {
           const canonical = Array.isArray(e.college_emails) ? e.college_emails[0] : e.college_emails;
-          return (!canonical?.body_text && !canonical?.body_snippet) && Boolean(e.rfc_message_id);
+          return !canonical?.body_text && Boolean(e.rfc_message_id);
         })
         .map((e) => e.rfc_message_id.toLowerCase().trim())
     ));
@@ -1959,12 +2022,12 @@ export async function performReprocess(
       for (let from = 0; from < missingRfcIds.length; from += 200) {
         const { data: canonicalBodies } = await supabase
           .from('college_emails')
-          .select('message_id, body_snippet')
+          .select('message_id, body_text')
           .in('message_id', missingRfcIds.slice(from, from + 200));
 
         for (const canonical of canonicalBodies || []) {
           const key = canonical.message_id?.toLowerCase().trim();
-          const text = canonical.body_snippet;
+          const text = canonical.body_text;
           if (key && text && !bodyByMessageId.has(key)) bodyByMessageId.set(key, text);
         }
       }
@@ -1990,7 +2053,7 @@ export async function performReprocess(
     has_canonical_body?: boolean;
   }> = rawReprocessEmails.map((email: any) => {
     const canonical = Array.isArray(email.college_emails) ? email.college_emails[0] : email.college_emails;
-    let fullBody = canonical?.body_text || canonical?.body_snippet ||
+    let fullBody = canonical?.body_text ||
       (email.rfc_message_id ? bodyByMessageId.get(email.rfc_message_id.toLowerCase().trim()) : null) || null;
     const hasCanonicalBody = Boolean(fullBody && fullBody.length > 500);
     if (!fullBody) {
@@ -2025,7 +2088,7 @@ export async function performReprocess(
   while (true) {
     const { data: cChunk, error: cErr } = await supabase
       .from('college_emails')
-      .select('id, subject, sender_email, received_at, created_at, body_snippet, classification, parsed_company_name, parsed_drive_numbers')
+      .select('id, subject, sender_email, received_at, created_at, body_text, classification, parsed_company_name, parsed_drive_numbers')
       .order('received_at', { ascending: true })
       .range(clgPage * pageSize, (clgPage + 1) * pageSize - 1);
 
@@ -2040,11 +2103,11 @@ export async function performReprocess(
       subject: ce.subject,
       sender: ce.sender_email,
       received_at: ce.received_at || ce.created_at,
-      body_snippet: ce.body_snippet || '',
+      body_snippet: ce.body_text ? ce.body_text.slice(0, 500) : '',
       classification: ce.classification,
       parsed_company_name: ce.parsed_company_name,
       parsed_drive_numbers: ce.parsed_drive_numbers || [],
-      has_canonical_body: Boolean(ce.body_snippet && ce.body_snippet.length > 500),
+      has_canonical_body: Boolean(ce.body_text && ce.body_text.length > 500),
       canonical_email_id: ce.id,
       college_email_id: ce.id,
     })));

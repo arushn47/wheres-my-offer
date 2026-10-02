@@ -583,7 +583,7 @@ export function parseRecruitmentProcess(text: string): AnnouncedRound[] | null {
     });
   }
 
-  return rounds;
+  return sanitizeAnnouncedRounds(rounds);
 }
 
 export function buildAnnouncedProcessToken(rounds: AnnouncedRound[]): string {
@@ -612,6 +612,33 @@ export function sanitizeAnnouncedRounds(rounds: AnnouncedRound[]): AnnouncedRoun
       roundNumber: 1,
     });
   }
+
+  // Canonical placement recruitment round order:
+  // PPT (1) -> Test (2) -> GD (3) -> Other/Game/Hackathon (4) -> Interview (5)
+  // An Interview MUST NEVER precede a Test unless explicitly dated strictly earlier.
+  const TYPE_ORDER: Record<AnnouncedRound['roundType'], number> = {
+    ppt: 1,
+    test: 2,
+    gd: 3,
+    other: 4,
+    interview: 5,
+  };
+
+  normalized.sort((a, b) => {
+    if (a.dateStr && b.dateStr) {
+      const timeA = parseScheduledDateInSubject(a.dateStr);
+      const timeB = parseScheduledDateInSubject(b.dateStr);
+      if (timeA && timeB && timeA !== timeB) {
+        return timeA - timeB;
+      }
+    }
+    const orderA = TYPE_ORDER[a.roundType] ?? 99;
+    const orderB = TYPE_ORDER[b.roundType] ?? 99;
+    if (orderA !== orderB) {
+      return orderA - orderB;
+    }
+    return (a.roundNumber ?? 1) - (b.roundNumber ?? 1);
+  });
 
   const totalTests = normalized.filter(r => r.roundType === 'test').length;
   const totalInterviews = normalized.filter(r => r.roundType === 'interview').length;

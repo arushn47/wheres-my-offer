@@ -361,19 +361,19 @@ export async function PATCH(
           const [canonicalsRes, collegeEmailsRes] = await Promise.all([
             supabase
               .from('college_emails')
-              .select('id, message_id, body_text, body_snippet')
+              .select('id, message_id, body_text')
               .not('message_id', 'is', null)
-              .or('body_text.not.is.null,body_snippet.not.is.null'),
+              .not('body_text', 'is', null),
             supabase
               .from('college_emails')
-              .select('id, subject, sender_email, received_at, created_at, body_snippet, body_text, classification, parsed_company_name, parsed_drive_numbers')
+              .select('id, subject, sender_email, received_at, created_at, body_text, classification, parsed_company_name, parsed_drive_numbers')
               .order('received_at', { ascending: true }),
           ]);
 
           if (canonicalsRes.data) {
             preloadedCanonicalMap = new Map();
             for (const c of canonicalsRes.data) {
-              const text = c.body_text || c.body_snippet || '';
+              const text = c.body_text || '';
               if (text && c.message_id) {
                 preloadedCanonicalMap.set(c.message_id.toLowerCase().trim(), text);
               }
@@ -386,7 +386,7 @@ export async function PATCH(
               subject: ce.subject,
               sender: ce.sender_email,
               received_at: ce.received_at || ce.created_at,
-              body_snippet: ce.body_text || ce.body_snippet || '',
+              body_snippet: ce.body_text ? ce.body_text.slice(0, 500) : '',
               classification: ce.classification,
               parsed_company_name: ce.parsed_company_name,
               parsed_drive_numbers: ce.parsed_drive_numbers || [],

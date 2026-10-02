@@ -477,7 +477,13 @@ export async function processEmailForEventsAndStatus(
   // Shortlist verdicts are written directly to applications.status by the archive
   // scanner (roster-absence) and below (roster-presence). No separate tracking state.
 
-  if (isNeoMatched && isCollegeBroadcast && hasConfirmedCollegeShortlistMatch) {
+  const shouldRecordMatch = isNeoMatched && (
+    (isCollegeBroadcast && hasConfirmedCollegeShortlistMatch) ||
+    (!isCollegeBroadcast && !isInAppliedList && !isEliminationEmail) ||
+    hasPersonalTestCredentials
+  );
+
+  if (shouldRecordMatch) {
     // Only record genuine shortlist matches (never applied/opt-in rosters)
     const matchPayload: any = {
       user_id: userId,
@@ -1319,7 +1325,11 @@ export async function processEmailForEventsAndStatus(
     } else if (newStatus === 'not_shortlisted' && isPostPptElimination) {
       noteParts.push(buildEliminationToken('post_ppt'));
     }
-    const prevTravel = existingApp?.notes?.split('\n')[0]?.trim();
+    const recognizedTravelNote = /^(?:bhopal|bhopal_lab|online|vellore|chennai|ap|respective_campus)$/i;
+    const prevTravel = existingApp?.notes
+      ?.split('\n')
+      .map((l: string) => l.trim())
+      .find((l: string) => recognizedTravelNote.test(l)) || null;
     const isEstablishedPhysical = ['vellore', 'chennai', 'ap', 'bhopal', 'bhopal_lab'].includes(prevTravel || '');
 
     if (travelReq) {

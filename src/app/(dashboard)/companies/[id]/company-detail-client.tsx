@@ -89,6 +89,7 @@ export interface CompanyDetail {
     collegeEmailId?: string | null;
     matchType: string;
     matchedValue: string | null;
+    matchedRoundType?: string | null;
     matchLocation?: string | null;
     neoId?: string | null;
     createdAt: string;
@@ -1002,7 +1003,16 @@ export default function CompanyDetailClient({
                   subLower.includes('final selection') ||
                   /(?:selection\s*list|final\s*selection|shortlist(?:ed\s+candidates)?\s+(?:released|published|attached|enclosed|announced)|find\s+(?:the\s+)?(?:below|attached)\s+shortlist)/i.test(email.snippet || '')
                 );
-              const isNotShortlisted = !shortlistVerificationPending && isUserAppliedOrRegistered && !matchedCandidate && (isExplicitShortlistEmail || hasRosterAttachment);
+
+              // If candidate has already advanced to Interview or Offer stage, an earlier test/screening shortlist circular
+              // must not brand them as "not shortlisted"
+              const isCandidateAdvancedPastTest =
+                getStageIndex(company.application?.status || '') >= 3 ||
+                company.candidateMatches.some((cm) => cm.matchedRoundType === 'interview' || cm.matchedRoundType === 'selected');
+              const isNotInterviewOrOfferNotice = !/(?:interview|selection\s*list|final\s*selection|selected\s*candidates|offer)/i.test(email.subject);
+              const isSupersededByAdvancedStage = isCandidateAdvancedPastTest && isNotInterviewOrOfferNotice;
+
+              const isNotShortlisted = !shortlistVerificationPending && isUserAppliedOrRegistered && !matchedCandidate && (isExplicitShortlistEmail || hasRosterAttachment) && !isSupersededByAdvancedStage;
 
               // isOffer is ONLY positive if candidate matched, or if not marked as not shortlisted in an explicit selection notice
               const isOffer = !isNotShortlisted && (

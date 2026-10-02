@@ -115,7 +115,6 @@ export async function backfillCanonicalEmails(
         content_key: contentKey,
         sender_email: parsedSenderEmail.toLowerCase().trim(),
         subject: parsedSubject,
-        body_snippet: bodyText.slice(0, 50000),
         body_text: bodyText,
         message_id: normalizeRfcMessageId(rfcMessageId),
         classification: null,
@@ -154,7 +153,6 @@ export async function backfillCanonicalEmails(
           content_key: contentKey,
           sender_email: parsedSenderEmail.toLowerCase().trim(),
           subject: parsedSubject,
-          body_snippet: bodyText.slice(0, 50000),
           body_text: bodyText,
           message_id: normalizedMessageId,
           classification: null,
@@ -207,7 +205,6 @@ export async function backfillCanonicalEmails(
             .from('college_emails')
             .update({
               body_text: bodyText,
-              body_snippet: bodyText.slice(0, 50000),
               parsed_job_details: extractJobDetails(bodyText),
               parsed_events: extractEvents({
                 subject: parsedSubject,

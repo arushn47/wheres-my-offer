@@ -26,7 +26,6 @@ export default async function CompaniesPage() {
     { data: events },
     { data: matches },
     { data: accounts },
-    { data: sharedDrives },
     { data: personalEmails },
     { data: emailDriveLinks },
   ] = await Promise.all([
@@ -62,11 +61,6 @@ export default async function CompaniesPage() {
       .eq('user_id', session.userId),
 
     supabase
-      .from('placement_drives')
-      .select('normalized_drive_number, drive_number, role, category, ctc, stipend, location')
-      .or('ctc.not.is.null,location.not.is.null,stipend.not.is.null,role.not.is.null'),
-
-    supabase
       .from('personal_emails')
       .select('placement_drive_id, received_at')
       .eq('user_id', session.userId)
@@ -88,7 +82,7 @@ export default async function CompaniesPage() {
   
   // Shared metadata map across all placement drives in the DB (for matching drive numbers)
   const sharedMetaMap = new Map<string, { role?: string | null; category?: string | null; ctc?: string | null; stipend?: string | null; location?: string | null }>();
-  for (const sd of (sharedDrives || [])) {
+  for (const sd of (placementDrives || [])) {
     const num = sd.normalized_drive_number || sd.drive_number;
     if (!num) continue;
     const key = num.toLowerCase().trim();

@@ -85,7 +85,6 @@ export async function recoverTruncatedEmailBodies(
             .from('college_emails')
             .update({
               body_text: fullBody,
-              body_snippet: fullBody.slice(0, 50000),
               parsed_job_details: jobDetails,
               parsed_events: events,
               identity_version: 2,

@@ -162,7 +162,7 @@ export async function GET(
     if (orConditions.length > 0) {
       const { data: collegeRows, error: collegeErr } = await supabase
         .from('college_emails')
-        .select('id, sender_email, subject, received_at, created_at, classification, body_snippet, parsed_company_name')
+        .select('id, sender_email, subject, received_at, created_at, classification, body_text, parsed_company_name')
         .or(orConditions.join(','))
         .order('received_at', { ascending: false })
         .limit(50);
@@ -204,7 +204,7 @@ export async function GET(
             subject: cr.subject,
             received_at: cr.received_at || cr.created_at,
             classification: cr.classification,
-            body_snippet: cr.body_snippet,
+            body_snippet: cr.body_text ? cr.body_text.slice(0, 500) : null,
             college_email_id: cr.id,
             canonical_email_id: cr.id,
           });

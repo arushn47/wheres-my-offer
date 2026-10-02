@@ -416,20 +416,37 @@ export function StageStepper({
           activeEliminatedStage === -1 &&
           i === activeCurrentStage;
 
+        // Locate this stage in the announced rounds list if applicable
+        const announcedRound = isAnnouncedPipeline
+          ? announcedRoundsForMap!.find(r => r.id === s.id)
+          : null;
+
+        const isInterviewRound = s.id.startsWith('interview') || announcedRound?.roundType === 'interview';
+        const isEliminatedBeforeInterview =
+          (activeEliminatedStage !== -1 && activeEliminatedStage <= i) ||
+          effective.effectiveStatus === 'rejected_test' ||
+          effective.effectiveStatus === 'not_shortlisted' ||
+          effective.eliminatedStage === 2 ||
+          effective.eliminatedStage === 1 ||
+          effective.eliminatedStage === 0;
+
         // Predecessor stages before current or elimination milestone are completed
-        const isPassed = !isEliminated && (
+        const rawIsPassed = !isEliminated && (
           i <= activeFurthestPassed ||
           (activeEliminatedStage !== -1 && i < activeEliminatedStage)
         );
+        const isPassed = rawIsPassed && !(isInterviewRound && isEliminatedBeforeInterview);
 
         // Historical passed stage (completed before current stage)
-        const isHistoricalPassed = !isEliminated && !isCurrent && (
+        const rawIsHistoricalPassed = !isEliminated && !isCurrent && (
           isPassed ||
           (i < activeCurrentStage && i <= activeFurthestPassed)
         );
+        const isHistoricalPassed = rawIsHistoricalPassed && !(isInterviewRound && isEliminatedBeforeInterview);
 
         // Has this stage been completed (either in past or as current completed milestone)?
-        const isCompleted = !isEliminated && (isPassed || i <= activeFurthestPassed);
+        const rawIsCompleted = !isEliminated && (isPassed || i <= activeFurthestPassed);
+        const isCompleted = rawIsCompleted && !(isInterviewRound && isEliminatedBeforeInterview);
 
         // ── Display label for this stage ───────────────────────────────────────
         let displayLabel = compact ? s.shortLabel : s.label;
@@ -449,19 +466,14 @@ export function StageStepper({
           }
         }
 
-        // Locate this stage in the announced rounds list if applicable
-        const announcedRound = isAnnouncedPipeline
-          ? announcedRoundsForMap!.find(r => r.id === s.id)
-          : null;
-
         if (!isEliminated) {
           if (announcedRound) {
-            const isRoundCompleted = isPassed || isHistoricalPassed || (isCurrent && (
+            const isRoundCompleted = !isEliminatedBeforeInterview && (isPassed || isHistoricalPassed || (isCurrent && (
               (announcedRound.roundType === 'test' && (effective.isTestCompleted || status === 'test_completed')) ||
               (announcedRound.roundType === 'interview' && (effective.isInterviewCompleted || status === 'interview_completed')) ||
               (announcedRound.roundType === 'ppt' && (effective.isPptCompleted || status === 'ppt_completed')) ||
               isCompleted
-            ));
+            )));
 
             if (isRoundCompleted) {
               displayLabel = compact ? `${announcedRound.shortLabel} Done` : `${announcedRound.shortLabel} Completed`;

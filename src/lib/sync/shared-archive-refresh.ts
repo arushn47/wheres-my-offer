@@ -344,7 +344,6 @@ export async function refreshSharedCollegeArchive(
             sender_email: normalizedAddress,
             subject: currentEmail.subject,
             body_text: bodyText,
-            body_snippet: bodyText.slice(0, 50000),
             message_id: normalizeRfcMessageId(currentEmail.messageId),
             metadata_key: metadataKey,
             has_attachments: Boolean(currentEmail.hasAttachments || currentEmail.attachments.length),

@@ -182,7 +182,6 @@ async function shadowWriteCanonical(
         content_key: contentKey,
         sender_email: senderEmail,
         subject: parsedEmail.subject,
-        body_snippet: bodyText.slice(0, 50000),
         body_text: bodyText,
         message_id: normalizedMessageId,
         identity_version: CANONICAL_IDENTITY_VERSION,
@@ -252,7 +251,6 @@ async function shadowWriteCanonical(
             .from('college_emails')
             .update({
               body_text: bodyText,
-              body_snippet: bodyText.slice(0, 50000),
               parsed_job_details: extractJobDetails(bodyText),
               parsed_events: canonicalEvents,
               parsed_drive_numbers: extractAllDriveNumbers(`${parsedEmail.subject}\n${bodyText}`),
@@ -307,7 +305,7 @@ async function findReusableCanonicalEmail(
 
   const { data, error } = await supabase
     .from('college_emails')
-    .select('id, content_key, message_id, sender_email, subject, body_text, body_snippet, classification, classification_confidence, parsed_company_name, parsed_drive_numbers, parsed_job_details, parsed_events, processing_status, identity_version, parser_version, has_attachments, metadata_key')
+    .select('id, content_key, message_id, sender_email, subject, body_text, classification, classification_confidence, parsed_company_name, parsed_drive_numbers, parsed_job_details, parsed_events, processing_status, identity_version, parser_version, has_attachments, metadata_key')
     .eq('message_id', normalizedMessageId)
     .eq('identity_version', CANONICAL_IDENTITY_VERSION)
     .maybeSingle();
@@ -335,8 +333,8 @@ function parsedEmailFromCanonical(
     messageId: metadata.messageId,
     subject: metadata.subject || canonical.subject,
     receivedAt: metadata.receivedAt,
-    bodySnippet: canonical.body_snippet || canonical.body_text || '',
-    bodyPlain: canonical.body_text || canonical.body_snippet || '',
+    bodySnippet: canonical.body_text?.slice(0, 500) || '',
+    bodyPlain: canonical.body_text || '',
     bodyHtml: '',
     hasAttachments: Boolean(canonical.has_attachments || attachments.length > 0),
     attachments: attachments,
@@ -1708,7 +1706,7 @@ export async function runSync(
       // This prevents loading all 1,500+ circulars with 50KB bodies on every sync run
       const { data: storedCirculars } = await supabase
         .from('college_emails')
-        .select('id, subject, sender:sender_email, body_snippet, received_at:created_at')
+        .select('id, subject, sender:sender_email, body_text, received_at:created_at')
         .or('subject.ilike.%apple%,subject.ilike.%honeywell%,subject.ilike.%zluri%,subject.ilike.%ey%');
 
       circularCatalog = buildCircularCatalog(storedCirculars || []);
@@ -2578,10 +2576,10 @@ export async function runSync(
                 if (fullEmail?.college_email_id) {
                   const { data: ce } = await supabase
                     .from('college_emails')
-                    .select('body_text, body_snippet')
+                    .select('body_text')
                     .eq('id', fullEmail.college_email_id)
                     .maybeSingle();
-                  emailBodySnippet = ce?.body_text || ce?.body_snippet || emailBodySnippet;
+                  emailBodySnippet = ce?.body_text || emailBodySnippet;
                 }
 
                 // Process reconciled circular for Events, CTC, and Roles
