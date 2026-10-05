@@ -596,8 +596,12 @@ export function StageStepper({
                 className={cn(
                   'mx-1 sm:mx-1.5 h-px flex-1 transition-colors',
                   compact ? 'mb-3.5' : 'mb-0 sm:mb-4',
-                  activeEliminatedStage !== -1 && i === activeEliminatedStage - 1
-                    ? 'bg-rose-500/70'
+                  activeEliminatedStage !== -1
+                    ? i === activeEliminatedStage - 1
+                      ? 'bg-rose-500/70'
+                      : i < activeEliminatedStage - 1
+                        ? 'bg-emerald-500/45'
+                        : 'bg-zinc-700/70'
                     : (isPassed || i < activeCurrentStage)
                       ? 'bg-emerald-500/45'
                       : 'bg-zinc-700/70'
