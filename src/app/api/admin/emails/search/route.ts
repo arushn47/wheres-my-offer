@@ -30,6 +30,9 @@ export async function GET(req: NextRequest) {
     const takenCollegeEmailIds = new Set<string>();
     // Subjects of direct personal emails (no college_email_id) already assigned to OTHER drives
     const takenBySubject = new Set<string>();
+    // Drive number variants for the target drive (all case forms); used to detect
+    // college emails already serving this drive via their parsed_drive_numbers field.
+    const driveNumVariants = new Set<string>();
     let boundary: { minAllowedDate: Date | null; registrationDate: Date | null; formattedRegistrationDate: string | null } = {
       minAllowedDate: null,
       registrationDate: null,
@@ -50,20 +53,48 @@ export async function GET(req: NextRequest) {
         else resolvedCompanyPattern = driveKey.trim();
       }
 
-      // Resolve the target drive(s)
-      let driveQuery = supabase
-        .from('placement_drives')
-        .select('id, drive_number, normalized_drive_number, drive_name, created_at, source_email_id, source_college_email_id, excluded_email_ids, companies(id, name, aliases)');
+      // Resolve the target drive(s).
+      // NOTE: Do NOT use .or() with hyphenated drive numbers — PostgREST parses
+      // hyphens as subtraction operators in the or() filter string, causing the
+      // query to silently return 0 rows. Use separate .eq() queries instead.
+      type TargetDrive = {
+        id: string;
+        drive_number: string;
+        normalized_drive_number: string;
+        drive_name: string;
+        created_at: string;
+        source_email_id: string | null;
+        source_college_email_id: string | null;
+        excluded_email_ids: string[];
+        companies: { id: string; name: string; aliases: string[] } | null;
+      };
+      let targetDrives: TargetDrive[] | null = null;
 
       if (resolvedDriveNumber) {
-        driveQuery = driveQuery.or(
-          `drive_number.eq.${resolvedDriveNumber},normalized_drive_number.eq.${resolvedDriveNumber}`
-        );
+        // Query by drive_number first, then by normalized_drive_number, merge results
+        const [byDriveNum, byNormalized] = await Promise.all([
+          supabase
+            .from('placement_drives')
+            .select('id, drive_number, normalized_drive_number, drive_name, created_at, source_email_id, source_college_email_id, excluded_email_ids, companies(id, name, aliases)')
+            .eq('drive_number', resolvedDriveNumber),
+          supabase
+            .from('placement_drives')
+            .select('id, drive_number, normalized_drive_number, drive_name, created_at, source_email_id, source_college_email_id, excluded_email_ids, companies(id, name, aliases)')
+            .eq('normalized_drive_number', resolvedDriveNumber),
+        ]);
+        const seen = new Set<string>();
+        const merged: TargetDrive[] = [];
+        for (const d of [...(byDriveNum.data || []), ...(byNormalized.data || [])]) {
+          if (!seen.has(d.id)) { seen.add(d.id); merged.push(d as unknown as TargetDrive); }
+        }
+        targetDrives = merged;
       } else if (resolvedCompanyPattern) {
-        driveQuery = driveQuery.ilike('drive_name', `%${resolvedCompanyPattern}%`);
+        const { data } = await supabase
+          .from('placement_drives')
+          .select('id, drive_number, normalized_drive_number, drive_name, created_at, source_email_id, source_college_email_id, excluded_email_ids, companies(id, name, aliases)')
+          .ilike('drive_name', `%${resolvedCompanyPattern}%`);
+        targetDrives = data as unknown as TargetDrive[];
       }
-
-      const { data: targetDrives } = await driveQuery;
 
       if (targetDrives && targetDrives.length > 0) {
         const driveIds = targetDrives.map((d) => d.id);
@@ -101,11 +132,22 @@ export async function GET(req: NextRequest) {
         }
 
         // 3. college_emails whose parsed_drive_numbers JSON array contains any of the target drive numbers
-        const driveNumVariants = new Set<string>();
-        if (resolvedDriveNumber) driveNumVariants.add(resolvedDriveNumber);
+        // driveNumVariants is declared in the outer scope so the college_emails loop can also use it.
+        const addVariants = (num: string) => {
+          if (!num) return;
+          driveNumVariants.add(num);
+          driveNumVariants.add(num.toUpperCase());
+          const parts = num.split('-');
+          if (parts.length >= 2) {
+            parts[1] = parts[1].toUpperCase();
+            driveNumVariants.add(parts.join('-'));
+          }
+        };
+
+        if (resolvedDriveNumber) addVariants(resolvedDriveNumber);
         for (const td of targetDrives) {
-          if (td.drive_number) driveNumVariants.add(td.drive_number);
-          if (td.normalized_drive_number) driveNumVariants.add(td.normalized_drive_number);
+          addVariants(td.drive_number);
+          addVariants(td.normalized_drive_number);
         }
 
         for (const num of driveNumVariants) {
@@ -121,30 +163,6 @@ export async function GET(req: NextRequest) {
           }
         }
 
-        // 4. College circulars matching the drive's company name/aliases
-        for (const td of targetDrives) {
-          const company = (td as any).companies;
-          const cName = company?.name || td.drive_name || '';
-          const cAliases: string[] = Array.isArray(company?.aliases) ? company.aliases : [];
-          const companyTerms = [cName, ...cAliases].filter((t) => typeof t === 'string' && t.trim().length >= 3);
-
-          for (const term of companyTerms) {
-            const cleanTerm = term.replace(/[.*+?^${}()|[\]\\,]/g, '').trim();
-            if (!cleanTerm) continue;
-
-            const { data: matchedByCompany } = await supabase
-              .from('college_emails')
-              .select('id, classification')
-              .or(`subject.ilike.%${cleanTerm}%,parsed_company_name.ilike.%${cleanTerm}%`)
-              .limit(50);
-
-            for (const cm of matchedByCompany || []) {
-              if (!excludedIds.has(cm.id) && cm.classification !== 'irrelevant') {
-                assignedCollegeEmailIds.add(cm.id);
-              }
-            }
-          }
-        }
 
         // 5. College circulars already assigned to ANY OTHER drive must never be
         // offered for linking again — one circular drives one placement drive.
@@ -284,8 +302,8 @@ export async function GET(req: NextRequest) {
     if (q) {
       let collegeQuery = supabase
         .from('college_emails')
-        .select('id, subject, sender_email, received_at, created_at, body_snippet')
-        .ilike('subject', `%${q}%`)
+        .select('id, subject, sender_email, received_at, created_at, body_text, parsed_drive_numbers')
+        .or(`subject.ilike.%${q}%,parsed_company_name.ilike.%${q}%`)
         .order('received_at', { ascending: false })
         .limit(30);
 
@@ -298,6 +316,15 @@ export async function GET(req: NextRequest) {
       for (const cm of collegeMatches || []) {
         // Skip if already assigned to the target drive (by ID or parsed_drive_numbers)
         if (assignedCollegeEmailIds.has(cm.id)) continue;
+        // parsed_drive_numbers ownership check: if this college email has been
+        // parsed to belong to ANY drive, it's "claimed". Show it only if it
+        // belongs to the TARGET drive. If it belongs to a sibling/other drive,
+        // never offer it for linking — one circular = one drive.
+        if (Array.isArray(cm.parsed_drive_numbers) && cm.parsed_drive_numbers.length > 0) {
+          const pdns: string[] = cm.parsed_drive_numbers;
+          const belongsToTarget = driveNumVariants.size > 0 && pdns.some((n) => driveNumVariants.has(n));
+          if (!belongsToTarget) continue; // claimed by another drive — skip
+        }
         // Skip circulars already consumed by any other drive
         if (takenCollegeEmailIds.has(cm.id)) continue;
         // Respect drive registration temporal boundary if set
@@ -312,7 +339,7 @@ export async function GET(req: NextRequest) {
             subject: cm.subject || 'No Subject',
             sender: cm.sender_email || 'vitlions2027@vitbhopal.ac.in',
             receivedAt: cm.received_at || cm.created_at,
-            snippet: (cm.body_snippet || '').slice(0, 300),
+            snippet: (cm.body_text || '').slice(0, 300),
             canonicalEmailId: cm.id,
             placementDriveId: null,
             receiptCount: 1,

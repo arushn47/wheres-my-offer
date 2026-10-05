@@ -296,10 +296,15 @@ export function parseDateTime(
 export function parseExplicitEndTime(text: string, startDate: Date): Date | null {
   if (!text || !startDate) return null;
 
+  // Range separator: "to", "until", or a dash/hyphen preceded by a digit, whitespace, am/pm, or line start
+  const rangeSep = /(?:\b(?:to|until)\b|(?<=\d|\s|am|pm|noon)[-–—]\s*(?=\d|\()|^\s*[-–—]\s*(?=\d|\())/i;
+
   // --- 1. Try AM/PM range first ---
-  const amPmMatch = text.match(
-    /(?:to|until|-|–|—)\s*\(?\s*(\d{1,2})\s*(?::|\.)?\s*(\d{2})?\s*(am|pm|a\.m\.|p\.m\.|noon|p\b|a\b)/i
+  const amPmRegex = new RegExp(
+    rangeSep.source + '\\s*(?:[^:\\r\\n]{0,60}?)\\(?\\s*(\\d{1,2})\\s*(?::|\\.)?\\s*(\\d{2})?\\s*(am|pm|a\\.m\\.|p\\.m\\.|noon|p\\b|a\\b)',
+    'i'
   );
+  const amPmMatch = text.match(amPmRegex);
   if (amPmMatch) {
     let endH = parseInt(amPmMatch[1], 10);
     const endIndicator = amPmMatch[3] ? amPmMatch[3].toLowerCase() : '';
@@ -313,17 +318,22 @@ export function parseExplicitEndTime(text: string, startDate: Date): Date | null
     const istDateStr = new Date(istDateMs).toISOString().slice(0, 10);
     const endD = new Date(`${istDateStr}T${endHourStr}:${endMinStr}:00+05:30`);
     if (!isNaN(endD.getTime()) && endD.getTime() > startDate.getTime()) return endD;
+    // Crosses midnight to next day only for true overnight windows (e.g. 23:00 to 06:00)
+    const startIstH = new Date(istDateMs).getUTCHours();
+    if (endH < startIstH) {
+      const nextDayMs = istDateMs + 24 * 60 * 60 * 1000;
+      const nextDayStr = new Date(nextDayMs).toISOString().slice(0, 10);
+      const nextDayD = new Date(`${nextDayStr}T${endHourStr}:${endMinStr}:00+05:30`);
+      if (!isNaN(nextDayD.getTime()) && nextDayD.getTime() > startDate.getTime()) return nextDayD;
+    }
   }
 
-  // --- 2. Try 24-hour range (e.g. "23:59 Hours", "18:00") ---
-  // Match patterns like:
-  //   "to October 4, 2026, 23:59 Hours"
-  //   "to 23:59 Hours"
-  //   "until 18:00"
-  //   "- 17:30"
-  const h24Match = text.match(
-    /(?:to|until|-|–|—)\s*(?:[^\d]{0,40}?)(\d{1,2}):(\d{2})\s*(?:hours?|hrs?)?\s*(?:[^\d]|$)/i
+  // --- 2. Try 24-hour range (e.g. "23:59 Hours", "18:00", "to October 4, 2026, 23:59 Hours") ---
+  const h24Regex = new RegExp(
+    rangeSep.source + '\\s*(?:[^:\\r\\n]{0,60}?)(\\d{1,2}):(\\d{2})\\s*(?:hours?|hrs?)?\\s*(?:[^\\d]|$)',
+    'i'
   );
+  const h24Match = text.match(h24Regex);
   if (h24Match) {
     const endH = parseInt(h24Match[1], 10);
     const endM = parseInt(h24Match[2], 10);
@@ -335,6 +345,14 @@ export function parseExplicitEndTime(text: string, startDate: Date): Date | null
       const istDateStr = new Date(istDateMs).toISOString().slice(0, 10);
       const endD = new Date(`${istDateStr}T${endHourStr}:${endMinStr}:00+05:30`);
       if (!isNaN(endD.getTime()) && endD.getTime() > startDate.getTime()) return endD;
+      // Crosses midnight to next day only for true overnight windows (e.g. 23:00 to 06:00)
+      const startIstH = new Date(istDateMs).getUTCHours();
+      if (endH < startIstH) {
+        const nextDayMs = istDateMs + 24 * 60 * 60 * 1000;
+        const nextDayStr = new Date(nextDayMs).toISOString().slice(0, 10);
+        const nextDayD = new Date(`${nextDayStr}T${endHourStr}:${endMinStr}:00+05:30`);
+        if (!isNaN(nextDayD.getTime()) && nextDayD.getTime() > startDate.getTime()) return nextDayD;
+      }
     }
   }
 
@@ -380,8 +398,8 @@ export function extractRegistrationDeadline(
   score: number;
   idx: number;
 } | null {
-  const segments = text
-    .replace(/[*_`>#]/g, ' ')
+  const cleanedText = text.replace(/[*_`>#]/g, '');
+  const segments = cleanedText
     .split(/\n\s*\n|(?<=[.!?])\s+(?=[A-Z(])/)
     .map((s) => s.replace(/\s+/g, ' ').trim())
     .filter(Boolean);
@@ -395,11 +413,13 @@ export function extractRegistrationDeadline(
         if (cue.score === 95 && !/regist|deadline|last\s+date|appl(?:y|ication)/i.test(seg)) continue;
         if (cue.score === 100 && /\b(?:test|assessment|interview|ppt|pre[\s-]*placement|shortlist)/i.test(m[0])) continue;
         const tail = seg.slice((m.index ?? 0) + m[0].length);
-        const dm = tail.slice(0, 45).match(DEADLINE_DATE_RE);
+        const lookaheadSegs = [segments[idx + 1], segments[idx + 2]].filter(Boolean).join(' ');
+        const searchWindow = tail.trim().length <= 25 && lookaheadSegs ? `${tail} ${lookaheadSegs}` : tail;
+        const dm = searchWindow.slice(0, 60).match(DEADLINE_DATE_RE);
         if (!dm || dm.index === undefined) {
           // Relative-date fallback: "on or before 2 pm tomorrow" carries no calendar
           // date, but the parser resolves supported relative keywords (tomorrow/tomm).
-          const relWindow = tail.slice(0, 60);
+          const relWindow = searchWindow.slice(0, 60);
           if (!/\b(?:tomm|tomorrow|tmrw|next\s+day)\b/i.test(relWindow)) continue;
           if (/\b(?:test|assessment|interview|ppt|pre[\s-]*placement|joining|date\s+of\s+visit|sent|posted|received|published|generated)\b/i.test(relWindow)) continue;
           const parsedRel = parseDateTimeWithConfidence(relWindow, refDate);
@@ -411,8 +431,8 @@ export function extractRegistrationDeadline(
           continue;
         }
         if (/\b(?:test|assessment|interview|ppt|pre[\s-]*placement|joining|date\s+of\s+visit|sent|posted|received|published|generated)\b/i
-          .test(tail.slice(0, dm.index))) continue;
-        const parsed = parseDateTimeWithConfidence(tail.slice(0, dm.index + dm[0].length + 30), refDate);
+          .test(searchWindow.slice(0, dm.index))) continue;
+        const parsed = parseDateTimeWithConfidence(searchWindow.slice(0, dm.index + dm[0].length + 30), refDate);
         if (!parsed.date) continue;
         const score = cue.score + (parsed.hasExplicitTime ? 5 : 0);
         if (!best || score > best.score || (score === best.score && idx >= best.idx)) {
@@ -586,9 +606,9 @@ export function extractEvents(email: ParsedEmail): ExtractedEvent[] {
   const subjectMentionsInterview = /interview/i.test(email.subject);
 
   // GUARDS against false assessment creation:
-  // 1. Post-test / Already completed emails (e.g. "shortlisted based on the test", "already completed the assessment")
+  // 1. Post-test / Already completed emails (e.g. "shortlisted based on the test", "already completed the assessment", "completes the test")
   const hasAssessmentAlreadyCompleted =
-    /already\s+completed\s+(?:the\s+)?(?:assessment|test)|shortlisted\s+based\s+on\s+(?:the\s+)?test|not\s+(?:the\s+)?shortlist\s+for\s+(?:the\s+)?(?:further|next)\s+(?:selection\s+process|round)|not\s+to\s+consider\s+the\s+attached\s+list\s+as\s+(?:the\s+)?shortlist/i.test(cleanNormalizedText);
+    /already\s+completed\s+(?:the\s+)?(?:assessment|test)|completes?\s+(?:the\s+)?(?:assessment|test)|shortlisted\s+based\s+on\s+(?:the\s+)?test|not\s+(?:the\s+)?shortlist\s+for\s+(?:the\s+)?(?:further|next)\s+(?:selection\s+process|round)|not\s+to\s+consider\s+the\s+attached\s+list\s+as\s+(?:the\s+)?shortlist/i.test(cleanNormalizedText);
 
   // 2. Google Form / Location Preference submission emails
   const isFormOrPreferenceOnly =
@@ -600,7 +620,7 @@ export function extractEvents(email: ParsedEmail): ExtractedEvent[] {
   // prospective test dates are tentative campus drive milestones, NOT confirmed test invitations.
   // Also guard against emails that are purely about filling a Google Form or where the test is already completed!
   const testMatch = cleanNormalizedText.match(
-    /(?:(?:online|coding|aptitude|assessment|written)?\s*test(?:\s+(?:date|link|1|2|3|round))?|date\s+of\s+visit[\s\S]{0,40}?\btest|test\s+link)\s*[:\-–—\t]?\s*([^\r\n]{1,100})/i
+    /(?:(?:online|coding|aptitude|assessment|written)?\s*test(?:\s+(?:date|link|1|2|3|round))?\s*[:\-–—\t]\s*|date\s+of\s+visit[\s\S]{0,40}?\btest\s*[:\-–—\t]?\s*|test\s+link\s*[:\-–—\t]?\s*|(?:online|coding|aptitude|assessment|written)?\s*test\s+(?:is\s+)?scheduled\s+(?:on|for|from)?\s*|(?:online|coding|aptitude|assessment|written)?\s*test\s+on\s+|test\s+window\s*[:\-–—\t]?\s*|take\s+the\s+(?:open\s+window\s+)?assessment\s+on\s*)([^\r\n]{1,100})/i
   );
 
   // For bare test-link emails ("Link - https://tests.mettl.com … Time - 7:00 PM"),
@@ -732,25 +752,28 @@ export function extractEvents(email: ParsedEmail): ExtractedEvent[] {
 export function extractVenue(text: string): string | null {
   if (!text) return null;
 
+  // Strip email addresses so domains like @vitbhopal.ac.in are never parsed as venues
+  const cleanText = text.replace(/[\w.+-]+@[\w-]+\.[\w.-]+/g, ' ');
+
   // 1. Explicit lab / campus mentions in user commands or emails
-  if (/\b(?:respective\s+labs?|computer\s+labs?|in\s+labs?|at\s+labs?|physical\s+at\s+labs?)\b/i.test(text)) {
+  if (/\b(?:respective\s+labs?|computer\s+labs?|in\s+labs?|at\s+labs?|physical\s+at\s+labs?)\b/i.test(cleanText)) {
     return 'Respective Labs (Offline)';
   }
-  if (/\b(?:physical|offline)\s+(?:at|in)\s+([A-Za-z0-9\s,\-]{2,40})/i.test(text)) {
-    const m = text.match(/\b(?:physical|offline)\s+(?:at|in)\s+([A-Za-z0-9\s,\-]{2,40})/i);
+  if (/\b(?:physical|offline)\s+(?:at|in)\s+([A-Za-z0-9\s,\-]{2,40})/i.test(cleanText)) {
+    const m = cleanText.match(/\b(?:physical|offline)\s+(?:at|in)\s+([A-Za-z0-9\s,\-]{2,40})/i);
     if (m && m[1]) {
       const clean = m[1].replace(/\s*(?:not\s+online|online|and).*$/i, '').trim();
       return `${clean} (Offline)`;
     }
   }
-  if (/\b(?:lab|computer\s+lab)\b/i.test(text)) {
-    if (/physical|offline|in\s+person|not\s+online/i.test(text)) return 'Respective Labs (Offline)';
+  if (/\b(?:lab|computer\s+lab)\b/i.test(cleanText)) {
+    if (/physical|offline|in\s+person|not\s+online/i.test(cleanText)) return 'Respective Labs (Offline)';
   }
 
   // 2. Explicit "venue: <place>" (Exclude job work locations like "Location - Bangalore")
   const isJobCity = /^(?:bangalore|bengaluru|hyderabad|pune|mumbai|delhi|noida|gurgaon|gurugram|chennai|kolkata|coimbatore|kochi|ernakulam|trivandrum|ahmedabad|jaipur|chandigarh|pan\s+india|remote)\*?$/i;
 
-  const venueMatch = text.match(
+  const venueMatch = cleanText.match(
     /(?:venue|room|hall|place)\s*[:\-–—]\s*([^\r\n.,]+)/i
   );
   if (venueMatch && venueMatch[1]) {
@@ -759,27 +782,30 @@ export function extractVenue(text: string): string | null {
   }
 
   // 3. Check @ <place>
-  const atMatch = text.match(/@\s*([A-Za-z0-9\s,\-]{3,45})(?:\r?\n|$|\.|\(|\b)/);
+  const atMatch = cleanText.match(/(?:^|\s)@\s*([A-Za-z0-9\s,\-]{3,45})(?:\r?\n|$|\.|\()/);
   if (atMatch && atMatch[1]) {
     const raw = atMatch[1].trim();
-    if (/own\s+location/i.test(raw)) return 'Own Location';
-    if (/pearl\s+research\s+park|prp/i.test(raw)) return 'Pearl Research Park (PRP)';
-    if (/anna\s+auditorium/i.test(raw)) return 'Anna Auditorium';
-    if (/channa\s+reddy/i.test(raw)) return 'Channa Reddy Auditorium';
-    if (/sarojini\s+naidu/i.test(raw)) return 'Sarojini Naidu Gallery';
-    if (/respective\s+campus/i.test(raw)) return 'Respective Campus Venues';
-    if (/lab/i.test(raw)) return 'Respective Labs (Offline)';
-    if (!isJobCity.test(raw)) return raw;
+    // Guard against email domains or college domains accidentally leaking
+    if (!/^(?:vitbhopal|vitstudent|vit|gmail|yahoo|outlook)$/i.test(raw) && !/\.(?:ac|in|edu|com|org)$/i.test(raw)) {
+      if (/own\s+location/i.test(raw)) return 'Own Location';
+      if (/pearl\s+research\s+park|prp/i.test(raw)) return 'Pearl Research Park (PRP)';
+      if (/anna\s+auditorium/i.test(raw)) return 'Anna Auditorium';
+      if (/channa\s+reddy/i.test(raw)) return 'Channa Reddy Auditorium';
+      if (/sarojini\s+naidu/i.test(raw)) return 'Sarojini Naidu Gallery';
+      if (/respective\s+campus/i.test(raw)) return 'Respective Campus Venues';
+      if (/lab/i.test(raw)) return 'Respective Labs (Offline)';
+      if (!isJobCity.test(raw)) return raw;
+    }
   }
 
   // 4. "at <building/room>"
-  const atPlaceMatch = text.match(/\bat\s+(SJT\s*\d+|PRP\s*\d+|TT\s*\d+|MB\s*\d+|SMV\s*\d+|CB\s*\d+|Sarojini\s+Naidu|Anna\s+Auditorium|Channa\s+Reddy|Pearl\s+Research\s+Park|CDC\s+Office)/i);
+  const atPlaceMatch = cleanText.match(/\bat\s+(SJT\s*\d+|PRP\s*\d+|TT\s*\d+|MB\s*\d+|SMV\s*\d+|CB\s*\d+|Sarojini\s+Naidu|Anna\s+Auditorium|Channa\s+Reddy|Pearl\s+Research\s+Park|CDC\s+Office)/i);
   if (atPlaceMatch && atPlaceMatch[1]) {
     return atPlaceMatch[1].trim();
   }
 
   // 4b. "in / at <academic block / audi / auditorium / hall / lab>"
-  const audiMatch = text.match(/\b(?:in|at)\s+([A-Za-z0-9\s,\-&/]+?(?:audi(?:torium)?|lab|hall|gallery|block|prp|sjt|mb|tt|smv|ab\s*\d+)(?:\s+and\s+[A-Za-z0-9\s,\-&/]+)?)/i);
+  const audiMatch = cleanText.match(/\b(?:in|at)\s+([A-Za-z0-9\s,\-&/]+?(?:audi(?:torium)?|lab|hall|gallery|block|prp|sjt|mb|tt|smv|ab\s*\d+)(?:\s+and\s+[A-Za-z0-9\s,\-&/]+)?)/i);
   if (audiMatch && audiMatch[1]) {
     const raw = audiMatch[1].trim();
     if (raw.length >= 3 && !isJobCity.test(raw)) {
@@ -787,13 +813,13 @@ export function extractVenue(text: string): string | null {
     }
   }
 
-  if (/own\s+location/i.test(text) && !/not\s+own\s+location/i.test(text)) {
+  if (/own\s+location/i.test(cleanText) && !/not\s+own\s+location/i.test(cleanText)) {
     return 'Own Location';
   }
 
   // 5. Check online vs offline
-  const isExplicitOffline = /physical|offline|in[\s-]person|not\s+online/i.test(text);
-  if (!isExplicitOffline && /online|virtual|teams|zoom|meet|google\s+meet/i.test(text)) {
+  const isExplicitOffline = /physical|offline|in[\s-]person|not\s+online/i.test(cleanText);
+  if (!isExplicitOffline && /online|virtual|teams|zoom|meet|google\s+meet/i.test(cleanText)) {
     return 'Online / Virtual';
   }
 
@@ -853,21 +879,46 @@ export function extractTravelRequirement(text: string): TravelRequirement {
     return 'respective_campus';
   }
 
-  // 2. Bhopal exemption / deferred schedule / virtual mode check:
+  // Respective Campus Labs / On-campus Bhopal venues (LC, Gaming lab, AB Audi, campus lab)
+  const isBhopalCampusVenue =
+    /@\s*respective\s+campus\s+(?:labs|venues|lab)/i.test(cleanBody) ||
+    /in\s+campus\s+lab\s+only/i.test(cleanBody) ||
+    /\breport\s+to\s+lc\b/i.test(cleanBody) ||
+    /\bcome\s+to\s+lc\b/i.test(cleanBody) ||
+    /@\s*lc\b/i.test(cleanBody) ||
+    /\blc\s*[-–—:]?\s*\d+\b/i.test(cleanBody) ||
+    /\blab\s+complex\b/i.test(cleanBody) ||
+    /\bab\s*[12]\s*audi/i.test(cleanBody) ||
+    /\bgaming\s+lab\b/i.test(cleanBody) ||
+    /\breport\s+to\s+(?:the\s+)?campus\b/i.test(cleanBody) ||
+    /campus\s*\/\s*offline/i.test(cleanBody) ||
+    /conducted\s+on-campus/i.test(cleanBody) ||
+    /recruitment\s+program\s+will\s+be\s+conducted\s+on-campus/i.test(cleanBody);
+
+  if (isBhopalCampusVenue) {
+    return 'bhopal';
+  }
+
+  // Bhopal exemption / deferred schedule / virtual mode check:
   // e.g. "Virtual Interview : 31st August 2026 (AP & Bhopal Campus Students)"
   // or "Interview Date: ... @ VIT Vellore campus (** VIT AP & VIT Bhopal shortlist in virtual mode)"
-  // or "Amaravati and Bhopal campus students test dates will be confirmed shortly"
-  const isBhopalVirtualOrExempt =
+  const isBhopalVirtual =
     /virtual\s+interview[^(]*?\(\s*(?:ap\s*&?\s*)?bhopal/i.test(targetText) ||
     /(?:vit\s+ap\s*(?:&|and)\s*)?vit\s+bhopal[^\n)]*?(?:in\s+virtual\s+mode|virtual|online)/i.test(targetText) ||
-    /bhopal[^\n)]*?(?:shortlist\s+in\s+virtual\s+mode|in\s+virtual\s+mode)/i.test(targetText) ||
+    /bhopal[^\n)]*?(?:shortlist\s+in\s+virtual\s+mode|in\s+virtual\s+mode)/i.test(targetText);
+
+  if (isBhopalVirtual) {
+    return 'online';
+  }
+
+  // Amaravati and Bhopal campus students test dates will be confirmed shortly / wait for update
+  // When an email explicitly defers Bhopal students, any dates/venues given for other campuses do not apply to Bhopal.
+  const isBhopalDeferred =
     /(?:amaravati\s+and\s+)?bhopal\s+campus\s+students\s+test\s+dates?\s+will\s+be\s+confirmed\s+shortly/i.test(cleanBody) ||
     /bhopal\s+campus\s+students[^.\n]*?(?:confirmed\s+shortly|wait\s+for\s+the\s+update|separate\s+schedule|dates?\s+will\s+be\s+announced)/i.test(cleanBody);
 
-  if (isBhopalVirtualOrExempt) {
-    if (/@\s*respective\s+campus\s+(?:venues|labs|campuses)|in\s+campus\s+lab|conducted\s+on-campus/i.test(cleanBody)) return 'bhopal';
-    if (/virtual|online/i.test(targetText)) return 'online';
-    return 'bhopal';
+  if (isBhopalDeferred) {
+    return null;
   }
 
   // 3. Campus travel regexes with full parity across Vellore, Chennai, and AP
@@ -903,9 +954,22 @@ export function extractTravelRequirement(text: string): TravelRequirement {
 
   // Check the explicit Date of Visit / schedule section first if present
   const checkVenue = (sample: string): TravelRequirement => {
-    if (chennaiRegexes.some((r) => r.test(sample))) return 'chennai';
-    if (velloreRegexes.some((r) => r.test(sample))) return 'vellore';
-    if (apRegexes.some((r) => r.test(sample))) return 'ap';
+    if (chennaiRegexes.some((r) => r.test(sample))) {
+      // If the venue mention is explicitly prefixed with "Chennai campus students", it is not for Bhopal students
+      if (!/chennai\s+campus\s+students/i.test(sample) || /bhopal[\s\S]{0,80}?travel[\s\S]{0,40}?chennai/i.test(sample)) {
+        return 'chennai';
+      }
+    }
+    if (velloreRegexes.some((r) => r.test(sample))) {
+      if (!/vellore\s+campus\s+students/i.test(sample) || /bhopal[\s\S]{0,80}?travel[\s\S]{0,40}?vellore/i.test(sample)) {
+        return 'vellore';
+      }
+    }
+    if (apRegexes.some((r) => r.test(sample))) {
+      if (!/(?:ap|amaravati)\s+campus\s+students/i.test(sample) || /bhopal[\s\S]{0,80}?travel[\s\S]{0,40}?(?:ap|amaravati)/i.test(sample)) {
+        return 'ap';
+      }
+    }
     return null;
   };
 
@@ -915,18 +979,6 @@ export function extractTravelRequirement(text: string): TravelRequirement {
   // Otherwise check the rest of the cleaned email body (without signature)
   const bodyVenue = checkVenue(cleanBody);
   if (bodyVenue) return bodyVenue;
-
-  // 6. Respective Campus Labs (All stages in campus labs / venues at Bhopal)
-  if (
-    /@\s*respective\s+campus\s+(?:labs|venues|lab)/i.test(targetText) ||
-    /in\s+campus\s+lab\s+only/i.test(targetText) ||
-    /report\s+to\s+lc\s*\d+/i.test(targetText) ||
-    /@\s*lc\s*\d+/i.test(targetText) ||
-    /campus\s*\/\s*offline/i.test(targetText) ||
-    /conducted\s+on-campus/i.test(targetText)
-  ) {
-    return 'bhopal';
-  }
 
   // 6. Online / Virtual
   if (

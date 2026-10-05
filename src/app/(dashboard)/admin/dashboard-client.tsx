@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import Link from 'next/link';
 import {
   Building2,
@@ -103,6 +103,8 @@ export default function DashboardClient() {
     fetchDashboardData();
   }, []);
 
+  const studentUsers = useMemo(() => users.filter((u) => u.role !== 'admin'), [users]);
+
   const handleReprocessAll = async () => {
     setShowConfirmReprocessAll(false);
     setReprocessingAll(true);
@@ -112,7 +114,7 @@ export default function DashboardClient() {
       mode: 'all',
       currentUser: 'Initializing…',
       currentUserIndex: 1,
-      totalUsers: users.length,
+      totalUsers: studentUsers.length,
       step: 1,
       totalSteps: 5,
       stageMessage: 'Starting global placement reprocess across students…',
@@ -356,7 +358,7 @@ export default function DashboardClient() {
             <Users className="w-4 h-4 text-indigo-400" />
           </div>
           <div className="text-2xl font-bold text-white mt-3 flex items-baseline justify-between">
-            <span>{loading ? '—' : users.length}</span>
+            <span>{loading ? '—' : studentUsers.length}</span>
             <span className="text-xs text-indigo-400 font-medium group-hover:translate-x-0.5 transition-transform flex items-center gap-1">
               Directory <ArrowRight className="w-3 h-3" />
             </span>
@@ -533,7 +535,7 @@ export default function DashboardClient() {
             </div>
 
             <p className="text-xs text-zinc-300 leading-relaxed">
-              This will re-evaluate all circular assignments, CTC offers, and application stages across all {users.length} registered students in the system.
+              This will re-evaluate all circular assignments, CTC offers, and application stages across all {studentUsers.length} registered students in the system.
             </p>
 
             <div className="flex items-center justify-end gap-3 pt-2">

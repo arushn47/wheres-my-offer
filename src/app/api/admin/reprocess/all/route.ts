@@ -37,9 +37,8 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: usersErr?.message || 'Failed to fetch users' }, { status: 500 });
     }
 
-    const connectedUserIds = new Set((connectedAccounts || []).map((a) => a.user_id));
-    // Include all non-admin users, plus admin accounts if they actually have connected inboxes
-    const usersToProcess = users.filter((u) => u.role !== 'admin' || connectedUserIds.has(u.id));
+    // Strictly reprocess student accounts only (exclude admin accounts)
+    const usersToProcess = users.filter((u) => u.role !== 'admin');
 
     if (isStream) {
       const encoder = new TextEncoder();

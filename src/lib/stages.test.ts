@@ -235,6 +235,23 @@ Physical Interview 31 august - Will be announced later`;
       'offer',
     ]);
   });
+
+  it('determines registration_open with countdown when registration deadline is upcoming', () => {
+    const futureDate = new Date(Date.now() + 15 * 60 * 60 * 1000); // 15 hours from now
+    const effective = getEffectiveStage('not_applied', null, [{
+      event_type: 'registration_deadline',
+      start_time: futureDate,
+    }]);
+
+    expect(effective.effectiveStatus).toBe('registration_open');
+    expect(effective.statusSubtitle).toContain('Closes in');
+  });
+
+  it('preserves registration_open when raw status is registration_open', () => {
+    const effective = getEffectiveStage('registration_open', null, []);
+    expect(effective.effectiveStatus).toBe('registration_open');
+    expect(effective.statusSubtitle).toBe('Registration Open');
+  });
 });
 
 

@@ -6,25 +6,7 @@ import CompanyDetailClient, { type CompanyDetail } from './company-detail-client
 import { detectCampus, detectBranch, detectRegNo } from '@/lib/utils';
 import { extractAnnouncedRoundsFromEmails, buildAnnouncedProcessToken } from '@/lib/sync/round-identity';
 
-function parseScheduledDate(sub: string): number | null {
-  const m1 = sub.match(/scheduled\s+on\s+[([]?(\d{1,2}(?:st|nd|rd|th)?)\s+([A-Za-z]+)(?:\s+(20\d{2}|\b2[4-7]\b))?/i);
-  if (m1) {
-    const day = m1[1].replace(/\D/g, '');
-    const month = m1[2];
-    const year = m1[3] ? (m1[3].length === 2 ? '20' + m1[3] : m1[3]) : '2026';
-    const p = Date.parse(`${day} ${month} ${year} UTC`);
-    if (!isNaN(p)) return p;
-  }
-  const m2 = sub.match(/scheduled\s+on\s+[([]?(\d{1,2})[-/.](\d{1,2})[-/.](20\d{2}|\b2[4-7]\b)/i);
-  if (m2) {
-    const day = parseInt(m2[1], 10);
-    const month = parseInt(m2[2], 10) - 1;
-    let year = parseInt(m2[3], 10);
-    if (year < 100) year += 2000;
-    return Date.UTC(year, month, day);
-  }
-  return null;
-}
+import { parseScheduledDate } from '@/lib/sync/drive-temporal-boundary';
 
 export async function generateMetadata({
   params,
@@ -425,6 +407,16 @@ export default async function CompanyDetailPage(props: {
     if (escaped) {
       orConditions.push(`parsed_company_name.ilike.%${escaped}%`);
       orConditions.push(`subject.ilike.%${escaped}%`);
+      if (escaped.includes(' ')) {
+        const hyphenated = escaped.replace(/\s+/g, '-');
+        orConditions.push(`parsed_company_name.ilike.%${hyphenated}%`);
+        orConditions.push(`subject.ilike.%${hyphenated}%`);
+      }
+      if (escaped.includes('-')) {
+        const spaced = escaped.replace(/-/g, ' ');
+        orConditions.push(`parsed_company_name.ilike.%${spaced}%`);
+        orConditions.push(`subject.ilike.%${spaced}%`);
+      }
     }
   }
   for (const alias of substantiveAliases) {
@@ -432,13 +424,23 @@ export default async function CompanyDetailPage(props: {
     if (escaped && escaped.length >= 4 && escaped.toLowerCase() !== company.name.toLowerCase()) {
       orConditions.push(`subject.ilike.%${escaped}%`);
       orConditions.push(`parsed_company_name.ilike.%${escaped}%`);
+      if (escaped.includes(' ')) {
+        const hyphenated = escaped.replace(/\s+/g, '-');
+        orConditions.push(`subject.ilike.%${hyphenated}%`);
+        orConditions.push(`parsed_company_name.ilike.%${hyphenated}%`);
+      }
+      if (escaped.includes('-')) {
+        const spaced = escaped.replace(/-/g, ' ');
+        orConditions.push(`subject.ilike.%${spaced}%`);
+        orConditions.push(`parsed_company_name.ilike.%${spaced}%`);
+      }
     }
   }
 
   if (orConditions.length > 0) {
     const { data: collegeEmailRows } = await supabase
       .from('college_emails')
-      .select('id, subject, sender_email, received_at, created_at, classification, parsed_company_name, parsed_drive_numbers')
+      .select('id, subject, sender_email, received_at, created_at, classification, parsed_company_name, parsed_drive_numbers, body_text')
       .or(orConditions.join(','))
       .order('received_at', { ascending: false })
       .limit(50);
@@ -463,24 +465,23 @@ export default async function CompanyDetailPage(props: {
         .replace(/^(?:(?:re|fw|fwd)\s*:\s*)+/i, '')
         .trim()
         .toLowerCase();
-      // Deduplicate broadcast copies with identical normalized subjects
-      if (normSub && seenCollegeSubjects.has(normSub)) {
+
+      const parsedDriveNums = (((ce as any).parsed_drive_numbers || []) as string[]).map((n) => n.toLowerCase());
+      const isDriveNumberMatch = driveNumbers.some((dNum) => parsedDriveNums.includes(dNum.toLowerCase()));
+      const isExplicitId = collegeEmailIds.has(ce.id) || isDriveNumberMatch;
+
+      // Deduplicate broadcast copies with identical normalized subjects (unless explicitly linked to this drive)
+      if (!isExplicitId && normSub && seenCollegeSubjects.has(normSub)) {
         continue;
       }
-      if (normSub) seenCollegeSubjects.add(normSub);
 
       if (!allEmailsMap.has(ce.id)) {
-        const parsedDriveNums = (((ce as any).parsed_drive_numbers || []) as string[]).map((n) => n.toLowerCase());
-        const isDriveNumberMatch = driveNumbers.some((dNum) => parsedDriveNums.includes(dNum.toLowerCase()));
-
         // Sibling drive boundary: If this circular explicitly targets drive numbers and NONE match
         // the active drive, it belongs to a sibling drive (e.g. Infosys 1338 vs 1078). Reject it so
         // it does not pollute this drive's timeline or cause false "Not Shortlisted" indicators.
         if (driveNumbers.length > 0 && parsedDriveNums.length > 0 && !isDriveNumberMatch && !collegeEmailIds.has(ce.id)) {
           continue;
         }
-
-        const isExplicitId = collegeEmailIds.has(ce.id) || isDriveNumberMatch;
         const sub = ce.subject || '';
         const parsedName = (ce as any).parsed_company_name || '';
         const matchesWordBoundary = substantiveAliases.some((alias) => {
@@ -505,8 +506,8 @@ export default async function CompanyDetailPage(props: {
             continue;
           }
 
-          // 2. Reject circulars whose subject explicitly specifies a scheduled date in the distant past
-          const scheduledDate = parseScheduledDate(sub);
+          // 2. Reject circulars whose scheduled date is in the distant past (respecting body date for forwards/replies)
+          const scheduledDate = parseScheduledDate(sub, (ce as any).body_text);
           if (scheduledDate && driveMinAllowedTime > 0 && scheduledDate < driveMinAllowedTime - 7 * 86400000) {
             continue;
           }

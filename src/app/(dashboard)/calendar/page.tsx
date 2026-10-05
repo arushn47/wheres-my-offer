@@ -1,7 +1,9 @@
 import type { Metadata } from 'next';
 import { requireSession } from '@/lib/auth';
-import { createAdminClient } from '@/lib/supabase/admin';
+import { deriveEventEndTime } from '@/lib/event-duration';
 import { isInactiveStatus } from '@/lib/stages';
+import { createAdminClient } from '@/lib/supabase/admin';
+
 import CalendarClient, { type CalendarEvent } from './calendar-client';
 
 export const metadata: Metadata = {
@@ -59,16 +61,19 @@ export default async function CalendarPage() {
 
   // Map application status to the highest pipeline stage the user is allowed to see events for
   const STATUS_MAX_STAGE: Record<string, number> = {
+    not_applied: 0,        // not registered — only future registration deadlines (handled separately)
     applied: 2,            // can see PPT and scheduled test events
     ppt_scheduled: 2,      // can see PPT and scheduled test events
+    ppt_completed: 2,      // PPT done — still show test events
     shortlisted: 2,        // shortlisted for test
     test_scheduled: 2,     // can see test events
+    test_completed: 3,     // test done — show interview events too
     interview_scheduled: 3, // can see interview events
+    interview_completed: 4,
     selected: 5,
     offer_received: 5,
-    rejected: 0,           // nothing (entire company excluded above)
+    rejected: 0,
     not_shortlisted: 0,
-    not_applied: 0,
     declined: 0,
     withdrawn: 0,
   };
@@ -95,8 +100,9 @@ export default async function CalendarPage() {
           continue;
         }
       } else {
-        // Exclude eliminated, opted-out, or not-applied companies unless manually added
-        if (isInactiveStatus(status) && !isManual) {
+        // Hide PPT/test/interview for drives you did not apply to, plus eliminated/opted-out.
+        // Future registration deadlines stay visible via the branch above.
+        if (!isManual && isInactiveStatus(status)) {
           continue;
         }
 
@@ -125,7 +131,11 @@ export default async function CalendarPage() {
           eventType: evt.event_type,
           title: evt.title,
           startTime: evt.start_time,
-          endTime: evt.end_time,
+          endTime:
+            evt.end_time ||
+            (evt.start_time && evt.event_type !== 'registration_deadline'
+              ? deriveEventEndTime(evt.event_type, evt.title, evt.start_time)?.toISOString() || null
+              : null),
           venue: evt.venue,
           mode: evt.mode,
         });

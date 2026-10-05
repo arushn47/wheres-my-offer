@@ -142,4 +142,32 @@ Physical Interview - Will be announced later`;
     expect(refreshTravelModeNote('Interviewed · Not Selected\nvellore', 'respective_campus'))
       .toBe('Interviewed · Not Selected\nrespective_campus');
   });
+
+  it('does not attribute chennai to bhopal students when email defers bhopal test dates', async () => {
+    const { extractTravelRequirement } = await import('./events');
+    const emailText = `
+      Kind Attention!!
+      Infosys Online test is scheduled on 21-07-2026 to 24-07-2026.
+      Vellore campus students test date - 21-07-2026 & 22-07-2026 at PRP lab.
+      Chennai campus students test date - 23-07-2026 & 24-07-2026 at campus Lab.
+      Shortlisted students will have interviews at chennai campus on 25-07-2026
+      Amaravati and Bhopal campus students test dates will be confirmed shortly.
+      Kindly wait for the update.
+    `;
+    expect(extractTravelRequirement(emailText)).toBeNull();
+  });
+
+  it('extracts bhopal for on-campus Lab Complex (LC) instructions', async () => {
+    const { extractTravelRequirement } = await import('./events');
+    const { getDriveMode } = await import('../utils');
+    const emailText = `
+      Please carry a original photo id and report to LC with your user id and password.
+      LC - 2 pm reporting times
+      LC second floor - LC 206 First batch
+    `;
+    const req = extractTravelRequirement(emailText);
+    expect(req).toBe('bhopal');
+    expect(getDriveMode(req, 'VIT Bhopal')).toBe('Bhopal Labs');
+  });
 });
+

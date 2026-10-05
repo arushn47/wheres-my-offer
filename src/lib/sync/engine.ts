@@ -16,6 +16,9 @@ import {
   checkAcronymMatch,
   extractCompanyAliases,
   ENGLISH_STOPWORDS,
+  boundedLevenshtein,
+  GENERIC_MATCH_TOKENS,
+  isFuzzyCompanyMatch,
   type ClassificationResult,
 } from '@/lib/sync/classifier';
 import { extractDriveNumber, extractAllDriveNumbers, extractJobDetails, extractEvents } from '@/lib/sync/events';
@@ -667,6 +670,16 @@ async function processSingleMessage(
       // College: ONLY vitlions2027@vitbhopal.ac.in (+ noreply.cdcinfo@vitstudent.ac.in)
       // Discard all other senders immediately (<1ms) without downloading full body
       if (!isTrustedPlacementSender(senderLower, isPersonal) || BLOCKED_SENDERS.test(senderLower)) {
+        shouldFetchFull = false;
+      }
+
+      // Discard generic LMS course enrollments and non-placement practice assessments
+      if (
+        isPersonal && (
+          /you\s+have\s+been\s+enrolled\s+in\s+a\s+course|enrolled\s+in\s+(?:a\s+)?course/i.test(subj) ||
+          (/practice\s+(?:assessments?|tests?)/i.test(subj) && !/placement\s+drive|super\s+dream|dream\s+internship/i.test(subj))
+        )
+      ) {
         shouldFetchFull = false;
       }
 
@@ -2759,196 +2772,7 @@ export async function runSync(
 // Company Matching Helpers
 // ============================================
 
-const GENERIC_MATCH_TOKENS = new Set([
-  'pvt', 'ltd', 'limited', 'private', 'inc', 'corp', 'corporation',
-  'co', 'company', 'llc', 'llp',
-  'super', 'dream', 'regular', 'core', 'internship', 'placement', 'drive',
-  'finance', 'financial', 'services', 'service',
-  'technologies', 'technology', 'tech', 'solutions', 'solution',
-  'consulting', 'consultancy', 'holdings', 'holding',
-  'group', 'enterprises', 'enterprise', 'international', 'global',
-  'management', 'advisory', 'capital', 'systems', 'system',
-  'labs', 'lab', 'analytics', 'industries', 'industry',
-  'batch', '2026', '2027', '2028', 'urgent', 'extended', 'deadline',
-  'update', 'updated', 'campus', 'hiring', 'recruitment', 'talk', 'test',
-  'intelligence', 'intelligent', 'artificial', 'hardware',
-  'software', 'india', 'data', 'digital', 'media', 'network', 'networks',
-  'security', 'centre', 'center', 'hub', 'engineering', 'products',
-  'development', 'research', 'interactive', 'communications', 'communication',
-  'design', 'health', 'healthcare', 'energy', 'mobility', 'smart', 'power',
-  'cloud', 'retail', 'games', 'game', 'life', 'science', 'sciences', 'part',
-  'bank', 'banking', 'small', 'additional', 'selects', 'shortlist',
-  'shortlisted', 'candidates', 'students', 'applied', 'round', 'process',
-  'portal', 'interview', 'assessment', 'announcement', 'office', 'location',
-  'virtual', 'online', 'offline', 'physical', 'associate', 'engineer',
-  'intern', 'trainee', 'analyst', 'developer',
-  ...ENGLISH_STOPWORDS,
-]);
-
-/**
- * Robust fuzzy matcher for company names based on distinctive token overlap.
- * Prevents false matches (e.g. "Kinaxis Super Dream" matching "Superjoin Finance").
- */
-/**
- * Levenshtein distance with an early exit once the budget is exceeded.
- * Used only for short brand-name typo tolerance, never for long prose.
- */
-function boundedLevenshtein(a: string, b: string, maxDistance: number): number {
-  if (Math.abs(a.length - b.length) > maxDistance) return maxDistance + 1;
-  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
-  for (let i = 1; i <= a.length; i++) {
-    const curr = [i];
-    let rowMin = i;
-    for (let j = 1; j <= b.length; j++) {
-      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-      curr[j] = Math.min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost);
-      rowMin = Math.min(rowMin, curr[j]);
-    }
-    if (rowMin > maxDistance) return maxDistance + 1;
-    prev = curr;
-  }
-  return prev[b.length];
-}
-
-export function isFuzzyCompanyMatch(compName: string, targetName: string): boolean {
-  let cLower = compName.toLowerCase().trim();
-  let tLower = targetName.toLowerCase().trim();
-
-  // Guard: Never merge "EY <Track>" with a non-EY company (e.g. "EY SAP" with "SAP")
-  const cHasEy = /\b(?:ey|ernst\s*&\s*young)\b/.test(cLower);
-  const tHasEy = /\b(?:ey|ernst\s*&\s*young)\b/.test(tLower);
-  if (cHasEy !== tHasEy) {
-    return false;
-  }
-
-  // Track Token Guard: If either company has a specific technical track token (SAP, GDS, SDET, SRE, Aerospace),
-  // they MUST both have the SAME track token to match. A specialized track never merges with another track or bare brand.
-  const TRACK_TOKENS = ['sdet', 'sre', 'sap', 'gds', 'aerospace'];
-  for (const track of TRACK_TOKENS) {
-    const cHasTrack = new RegExp(`\\b${track}\\b`, 'i').test(cLower);
-    const tHasTrack = new RegExp(`\\b${track}\\b`, 'i').test(tLower);
-    if (cHasTrack !== tHasTrack) {
-      return false;
-    }
-  }
-
-  // Normalize known typos
-  cLower = cLower.replace(/\bunthikable\b/g, 'unthinkable');
-  tLower = tLower.replace(/\bunthikable\b/g, 'unthinkable');
-
-  if (cLower === tLower) return true;
-
-  // --- Step 0.5: Collapsed alphanumeric match ---
-  // Matches "Valuelabs" ↔ "Value Labs", "SquadStack" ↔ "Squad Stack", "BlackRock" ↔ "Black Rock"
-  const cAlpha = cLower.replace(/[^a-z0-9]/g, '');
-  const tAlpha = tLower.replace(/[^a-z0-9]/g, '');
-  if (cAlpha.length >= 3 && tAlpha.length >= 3 && cAlpha === tAlpha) {
-    return true;
-  }
-
-  // --- Step 0.8: Typo-tolerant collapsed match ---
-  // CDC circulars mangle brand names: "Goldamnsachs" (Goldman Sachs), "Deliotte"
-  // (Deloitte). A prefix-guarded edit distance on the collapsed alphanumeric form
-  // catches single transpositions/typos without merging unrelated brands: both
-  // names must start with the same 2 characters and stay within a small distance
-  // budget (2 for names >= 8 chars, 1 for shorter ones).
-  if (cAlpha.length >= 6 && tAlpha.length >= 6) {
-    const allowed = cAlpha.length >= 8 && tAlpha.length >= 8 ? 2 : 1;
-    const samePrefix = cAlpha.slice(0, 2) === tAlpha.slice(0, 2);
-    if (samePrefix && boundedLevenshtein(cAlpha, tAlpha, allowed) <= allowed) {
-      return true;
-    }
-  }
-
-  // --- Step 1: Normalized-key match ---
-  // Strips legal words, removes spaces/punctuation, then compares.
-  // This catches: "goldmansachs" == "goldman sachs", "ExxonMobil" == "Exxon Mobil",
-  //               "HCL Tech" == "HCL Technologies", "Infosys BPM" == "Infosys"
-  const cKey = computeNormalizedKey(compName);
-  const tKey = computeNormalizedKey(targetName);
-  if (cKey.length >= 3 && tKey.length >= 3 && cKey === tKey) {
-    return true;
-  }
-
-  // --- Step 1.5: Acronym / Initialism match ---
-  // Matches "WTW" ↔ "Willis Towers Watson", "TCS" ↔ "Tata Consultancy Services",
-  // parenthetical aliases "(WTW India)", known initialisms, etc.
-  if (checkAcronymMatch(cLower, tLower) || checkAcronymMatch(tLower, cLower)) {
-    return true;
-  }
-
-  // --- Step 2: Distinctive token overlap (handles abbreviations / partial names) ---
-  const KNOWN_SHORT_BRANDS = new Set(['ey', 'hp', 'ge', 'bp', 'gs', 'ti', 'de']);
-  const cTokens = cLower
-    .replace(/[^a-z0-9\s]/g, ' ')
-    .split(/\s+/)
-    .filter((w) => (w.length >= 3 || KNOWN_SHORT_BRANDS.has(w)) && !GENERIC_MATCH_TOKENS.has(w));
-
-  const tTokens = tLower
-    .replace(/[^a-z0-9\s]/g, ' ')
-    .split(/\s+/)
-    .filter((w) => (w.length >= 3 || KNOWN_SHORT_BRANDS.has(w)) && !GENERIC_MATCH_TOKENS.has(w));
-
-  if (cTokens.length === 0 || tTokens.length === 0) {
-    return false;
-  }
-
-  const STEM_SYNONYMS: Record<string, string> = {
-    tech: 'technologies',
-    technology: 'technologies',
-    technologies: 'technologies',
-    info: 'information',
-    information: 'information',
-    infosystems: 'information',
-    sys: 'systems',
-    systems: 'systems',
-    sol: 'solutions',
-    soln: 'solutions',
-    solutions: 'solutions',
-  };
-
-  const tokenMatches = (a: string, b: string) => {
-    if (a === b) return true;
-    if (STEM_SYNONYMS[a] && STEM_SYNONYMS[a] === STEM_SYNONYMS[b]) return true;
-    // Allow minor stem variations (e.g. plural s, es) but strictly limit length difference to <= 2
-    if (a.length >= 5 && b.length >= 5 && (a.startsWith(b) || b.startsWith(a))) {
-      return Math.abs(a.length - b.length) <= 2;
-    }
-    // Typo tolerance on substantial tokens: "goldamn" vs "goldman" style typos
-    // inside multi-token names. Same 2-char prefix + tiny edit distance only.
-    if (a.length >= 6 && b.length >= 6) {
-      const allowed = a.length >= 8 && b.length >= 8 ? 2 : 1;
-      if (a.slice(0, 2) === b.slice(0, 2) && boundedLevenshtein(a, b, allowed) <= allowed) {
-        return true;
-      }
-    }
-    return false;
-  };
-
-  // If both have 1 token: they must match
-  if (cTokens.length === 1 && tTokens.length === 1) {
-    return tokenMatches(cTokens[0], tTokens[0]);
-  }
-
-  // If one has 1 token and the other has >= 2 tokens:
-  // The single token must match the FIRST (primary brand) token of the multi-token company
-  if (cTokens.length === 1 && tTokens.length >= 2) {
-    return tokenMatches(cTokens[0], tTokens[0]);
-  }
-  if (tTokens.length === 1 && cTokens.length >= 2) {
-    return tokenMatches(tTokens[0], cTokens[0]);
-  }
-
-  // Both have >= 2 tokens:
-  // Require that the primary first token matches AND all tokens of target exist in comp or vice versa
-  const firstTokenMatches = tokenMatches(cTokens[0], tTokens[0]);
-  if (!firstTokenMatches) return false;
-
-  const allTargetInComp = tTokens.every((t) => cTokens.some((c) => tokenMatches(c, t)));
-  const allCompInTarget = cTokens.every((c) => tTokens.some((t) => tokenMatches(c, t)));
-
-  return allTargetInComp || allCompInTarget;
-}
+export { boundedLevenshtein, isFuzzyCompanyMatch, GENERIC_MATCH_TOKENS };
 
 // ============================================
 // Company Upsert

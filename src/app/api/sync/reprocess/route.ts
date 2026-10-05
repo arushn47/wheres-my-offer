@@ -23,6 +23,11 @@ import {
 import { pickRegistrationDeadline } from '@/lib/sync/events';
 import { classifyShortlistEmail, parseRecruitmentProcess, buildAnnouncedProcessToken, extractAnnouncedRoundsFromEmails } from '@/lib/sync/round-identity';
 import { normalizeDriveNumber } from '@/lib/drive-number';
+import {
+  getStartOfRegistrationDate,
+  isCircularAllowedByScheduledDate,
+  parseScheduledDate,
+} from '@/lib/sync/drive-temporal-boundary';
 
 
 export const dynamic = 'force-dynamic';
@@ -457,6 +462,38 @@ export async function recalculateApplicationStatuses(
     ? allDrives.filter((d) => targetDriveSet.has(d.id))
     : allDrives.filter((d) => userRelevantDriveIds.has(d.id));
 
+  // Precompute authoritative minimum allowed registration date for every drive to process.
+  // Rule: Only emails received on or after the calendar date of the drive's NeoPAT
+  // registration announcement (or created_at) can affect this drive.
+  const driveMinAllowedTimeMap = new Map<string, number>();
+  const driveIdsToQuery = drivesToProcess.map((d) => d.id);
+  if (driveIdsToQuery.length > 0) {
+    const { data: neopatEmails } = await supabase
+      .from('personal_emails')
+      .select('placement_drive_id, received_at')
+      .in('placement_drive_id', driveIdsToQuery)
+      .or('sender.ilike.%noreply.cdcinfo@vitstudent.ac.in%,classification.in.(registration,registration_confirmation),subject.ilike.%eligible%,subject.ilike.%registration%')
+      .not('received_at', 'is', null)
+      .order('received_at', { ascending: true });
+
+    const earliestByDrive = new Map<string, string>();
+    for (const ne of neopatEmails || []) {
+      if (ne.placement_drive_id && !earliestByDrive.has(ne.placement_drive_id) && ne.received_at) {
+        earliestByDrive.set(ne.placement_drive_id, ne.received_at);
+      }
+    }
+
+    for (const d of drivesToProcess) {
+      const regAt = earliestByDrive.get(d.id) || d.created_at;
+      if (regAt) {
+        const dDate = new Date(regAt);
+        if (!isNaN(dDate.getTime())) {
+          driveMinAllowedTimeMap.set(d.id, getStartOfRegistrationDate(dDate).getTime());
+        }
+      }
+    }
+  }
+
   const DRIVE_BATCH_SIZE = 8;
   for (let bIdx = 0; bIdx < drivesToProcess.length; bIdx += DRIVE_BATCH_SIZE) {
     const driveBatch = drivesToProcess.slice(bIdx, bIdx + DRIVE_BATCH_SIZE);
@@ -471,15 +508,26 @@ export async function recalculateApplicationStatuses(
         const comp = companyMap.get(drive.company_id);
         if (!comp) return;
 
-        const driveEmails = [...(emailsByDriveId.get(drive.id) || [])];
+        const driveMinAllowedTime = driveMinAllowedTimeMap.get(drive.id) || 0;
+        const driveEmails = (emailsByDriveId.get(drive.id) || []).filter((e) => {
+          if (driveMinAllowedTime > 0 && e.received_at) {
+            return new Date(e.received_at).getTime() >= driveMinAllowedTime;
+          }
+          return true;
+        });
         const driveExcluded = driveExclusionsMap.get(drive.id);
 
-        // 1. Include college email set as source on drive
+        // 1. Include college email set as source on drive (strictly guarded by registration date boundary)
         if ((drive as any).source_college_email_id) {
           const ce = collegeEmailById.get((drive as any).source_college_email_id);
           if (ce && (!driveExcluded || !driveExcluded.has(ce.id))) {
-            if (!driveEmails.some((existing) => existing.id === ce.id)) {
-              driveEmails.push(ce as any);
+            const ceTime = ce.received_at ? new Date(ce.received_at).getTime() : 0;
+            if (driveMinAllowedTime === 0 || ceTime >= driveMinAllowedTime) {
+              if (isCircularAllowedByScheduledDate(ce.subject, driveMinAllowedTime, 7, ce.body_text || ce.body_snippet)) {
+                if (!driveEmails.some((existing) => existing.id === ce.id)) {
+                  driveEmails.push(ce as any);
+                }
+              }
             }
           }
         }
@@ -491,6 +539,9 @@ export async function recalculateApplicationStatuses(
           const numMatches = collegeEmailsByDriveNum.get(cleanNum) || [];
           for (const ce of numMatches) {
             if (driveExcluded && driveExcluded.has(ce.id)) continue;
+            const ceTime = ce.received_at ? new Date(ce.received_at).getTime() : 0;
+            if (driveMinAllowedTime > 0 && ceTime > 0 && ceTime < driveMinAllowedTime) continue;
+            if (!isCircularAllowedByScheduledDate(ce.subject, driveMinAllowedTime, 7, ce.body_text || ce.body_snippet)) continue;
             if (!driveEmails.some((existing) => existing.id === ce.id)) {
               driveEmails.push(ce as any);
             }
@@ -504,23 +555,14 @@ export async function recalculateApplicationStatuses(
           if (refId && collegeEmailById.has(refId)) {
             const ce = collegeEmailById.get(refId)!;
             if (driveExcluded && driveExcluded.has(ce.id)) continue;
+            const ceTime = ce.received_at ? new Date(ce.received_at).getTime() : 0;
+            if (driveMinAllowedTime > 0 && ceTime > 0 && ceTime < driveMinAllowedTime) continue;
+            if (!isCircularAllowedByScheduledDate(ce.subject, driveMinAllowedTime, 7, ce.body_text || ce.body_snippet)) continue;
             if (!driveEmails.some((existing) => existing.id === ce.id)) {
               driveEmails.push(ce as any);
             }
           }
         }
-
-        // Determine verified start date of this drive from its official assigned emails
-        const verifiedTimes = driveEmails
-          .map((e) => new Date(e.received_at || 0).getTime())
-          .filter((t) => t > 0);
-        const verifiedDriveStartTime = verifiedTimes.length > 0
-          ? Math.min(...verifiedTimes)
-          : null;
-        const fallbackDriveTime = drive.created_at ? new Date(drive.created_at).getTime() : 0;
-        const driveMinAllowedTime = verifiedDriveStartTime
-          ? verifiedDriveStartTime - 24 * 60 * 60 * 1000
-          : (fallbackDriveTime ? fallbackDriveTime - 24 * 60 * 60 * 1000 : 0);
 
         const aliases = (comp.aliases || []).map((a: string) => a.toLowerCase().trim());
         const compNameLower = comp.name.toLowerCase().trim();
@@ -602,6 +644,7 @@ export async function recalculateApplicationStatuses(
           if (driveExcluded && driveExcluded.has(ce.id)) continue;
           const eTime = new Date(ce.received_at).getTime();
           if (driveMinAllowedTime > 0 && eTime < driveMinAllowedTime) continue;
+          if (!isCircularAllowedByScheduledDate(ce.subject, driveMinAllowedTime, 7, ce.body_text || ce.body_snippet)) continue;
 
           // Sibling drive boundary checks:
           const ceDriveNums = (ce.parsed_drive_numbers || [])
@@ -874,15 +917,17 @@ export async function recalculateApplicationStatuses(
           const eTime = new Date(e.received_at || 0).getTime();
           // Allow circulars that arrived up to 24h before the drive announcement
           if (driveStartDate && eTime < driveStartDate.getTime() - 24 * 60 * 60 * 1000) return false;
+          if (driveMinAllowedTime > 0 && eTime < driveMinAllowedTime) return false;
+          if (!isCircularAllowedByScheduledDate(e.subject, driveMinAllowedTime, 7, (e as any).body_text || e.body_snippet)) return false;
           if (nextDriveStartDate && eTime >= nextDriveStartDate.getTime() - 5 * 60 * 1000) return false;
           return true;
         });
 
-        const mainEmailText = mainCircularEmail ? `${mainCircularEmail.subject || ''}\n${mainCircularEmail.body_snippet || ''}` : '';
+        const mainEmailText = mainCircularEmail ? `${mainCircularEmail.subject || ''}\n${(mainCircularEmail as any).body_text || mainCircularEmail.body_snippet || ''}` : '';
         const mainJobDetails = extractJobDetails(mainEmailText);
 
         const combinedEmailText = activeDriveEmails
-          .map((e) => `${e.subject || ''}\n${e.body_snippet || ''}`)
+          .map((e) => `${e.subject || ''}\n${(e as any).body_text || e.body_snippet || ''}`)
           .join('\n\n');
 
         const extractedJob = {
@@ -1666,7 +1711,7 @@ export async function recalculateApplicationStatuses(
         // value from the original registration circular.
         const newestFirstTravelTexts = [...activeDriveEmails]
           .sort((a, b) => new Date(b.received_at || 0).getTime() - new Date(a.received_at || 0).getTime())
-          .map((email) => `${email.subject || ''}\n${email.body_snippet || ''}`);
+          .map((email) => `${email.subject || ''}\n${(email as any).body_text || email.body_snippet || ''}`);
         const travelReq = extractLatestTravelRequirement(newestFirstTravelTexts) ||
           (mainEmailText ? extractTravelRequirement(mainEmailText) : null) ||
           extractTravelRequirement(combinedEmailText);
@@ -1695,7 +1740,7 @@ export async function recalculateApplicationStatuses(
         let announcedRounds = mainEmailText ? parseRecruitmentProcess(mainEmailText) : null;
         if (!announcedRounds && collegeCompanyEmails.length > 0) {
           for (const cEmail of collegeCompanyEmails) {
-            const text = `${cEmail.subject || ''}\n${cEmail.body_snippet || ''}`;
+            const text = `${cEmail.subject || ''}\n${(cEmail as any).body_text || cEmail.body_snippet || ''}`;
             announcedRounds = parseRecruitmentProcess(text);
             if (announcedRounds) break;
           }
@@ -1850,6 +1895,15 @@ export async function recalculateApplicationStatuses(
           await supabase.from('applications').update(appPayload).eq('id', existingApp.id);
         } else {
           await supabase.from('applications').insert(appPayload);
+        }
+
+        const driveFieldUpdates: Record<string, any> = {};
+        if (finalRole && !drive.role) driveFieldUpdates.role = finalRole;
+        if (workLocation && !drive.location) driveFieldUpdates.location = workLocation;
+        if (finalCtc && !drive.ctc) driveFieldUpdates.ctc = finalCtc;
+        if (finalStipend && !drive.stipend) driveFieldUpdates.stipend = finalStipend;
+        if (Object.keys(driveFieldUpdates).length > 0) {
+          await supabase.from('placement_drives').update(driveFieldUpdates).eq('id', drive.id);
         }
 
         const manualEvents = manualEventsByDriveId.get(drive.id) || [];
@@ -2018,6 +2072,227 @@ export async function recalculateApplicationStatuses(
 
   console.log(`[recalculateApplicationStatuses] User ${userId}: holistic calculation updated ${updatedAppsCount} applications.`);
   return { updatedCount: updatedAppsCount, results: applicationResults };
+}
+
+/**
+ * Phase 5: Catches up any notifications for recent placement drives, events, or shortlists
+ * that were missed due to sync errors, extraction bugs, or transient failures.
+ *
+ * Safety Guards:
+ * - Age Guard: ONLY inspects drives / emails received within the last 48 hours or events scheduled in the future / last 24h.
+ * - Deduplication Guard: Checks against existing dedupe_keys in the notifications table. Already-sent alerts are never repeated.
+ * - Category & Stage Guard: Adheres to user notification preferences and candidate elimination stages.
+ */
+export async function catchUpMissingNotifications(
+  supabase: any,
+  userId: string
+): Promise<{ newDrivesNotified: number; eventsNotified: number; shortlistsNotified: number }> {
+  let newDrivesNotified = 0;
+  let eventsNotified = 0;
+  let shortlistsNotified = 0;
+
+  const now = Date.now();
+  const maxEmailAgeMs = 48 * 60 * 60 * 1000; // 48 hours
+  const recentThresholdIso = new Date(now - maxEmailAgeMs).toISOString();
+
+  // 1. Fetch user candidate identity (Neo ID / registration number)
+  const candidateIdentity = await loadUserCandidateIdentity(supabase, userId);
+  const userNeoId = candidateIdentity.neoId || candidateIdentity.emails[0] || '';
+
+  // 2. Fetch user's active applications
+  const { data: userApps } = await supabase
+    .from('applications')
+    .select('id, placement_drive_id, status, role, ctc, stipend, location, notes, category')
+    .eq('user_id', userId);
+
+  if (!userApps || userApps.length === 0) {
+    return { newDrivesNotified, eventsNotified, shortlistsNotified };
+  }
+
+  const driveIds = userApps.map((a: any) => a.placement_drive_id).filter(Boolean);
+  if (driveIds.length === 0) {
+    return { newDrivesNotified, eventsNotified, shortlistsNotified };
+  }
+
+  // 3. Fetch placement drives & company names
+  const { data: placementDrives } = await supabase
+    .from('placement_drives')
+    .select('id, drive_name, company_id, created_at, source_college_email_id')
+    .in('id', driveIds);
+
+  const drivesMap = new Map<string, any>((placementDrives || []).map((d: any) => [d.id, d]));
+  const companyIds = Array.from(
+    new Set((placementDrives || []).map((d: any) => d.company_id).filter(Boolean))
+  );
+
+  const { data: companies } = await supabase
+    .from('companies')
+    .select('id, name')
+    .in('id', companyIds);
+
+  const companyMap = new Map<string, any>((companies || []).map((c: any) => [c.id, c.name]));
+
+  // 4. Pre-fetch all existing notification dedupe_keys for this user
+  const { data: existingNotifs } = await supabase
+    .from('notifications')
+    .select('dedupe_key')
+    .eq('user_id', userId);
+
+  const existingDedupeKeys = new Set(
+    (existingNotifs || []).map((n: any) => n.dedupe_key).filter(Boolean)
+  );
+
+  const { notifyNewDrive, notifyEventScheduled, notifyShortlistMatch } = await import(
+    '@/lib/notifications/service'
+  );
+  const { getDriveMode } = await import('@/lib/utils');
+
+  // 5. Evaluate each tracked drive for missing notifications
+  for (const app of userApps as any[]) {
+    const driveId = app.placement_drive_id;
+    const drive: any = drivesMap.get(driveId);
+    if (!drive) continue;
+
+    const companyName = (drive.company_id && companyMap.get(drive.company_id)) || drive.drive_name || 'Placement Drive';
+
+    // A. Check for missing New Drive notification
+    const newDriveDedupeKey = `new_drive:${userId}:${driveId}`;
+    if (!existingDedupeKeys.has(newDriveDedupeKey)) {
+      // Check personal emails for this drive
+      const { data: pEmail } = await supabase
+        .from('personal_emails')
+        .select('id, received_at')
+        .eq('user_id', userId)
+        .eq('placement_drive_id', driveId)
+        .gte('received_at', recentThresholdIso)
+        .order('received_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      let isRecent = Boolean(pEmail);
+      let sourceEmailId = pEmail?.id;
+
+      if (!isRecent && drive.source_college_email_id) {
+        const { data: cEmail } = await supabase
+          .from('college_emails')
+          .select('id, received_at')
+          .eq('id', drive.source_college_email_id)
+          .gte('received_at', recentThresholdIso)
+          .maybeSingle();
+
+        if (cEmail) {
+          isRecent = true;
+          sourceEmailId = cEmail.id;
+        }
+      }
+
+      if (!isRecent && drive.created_at && now - new Date(drive.created_at).getTime() <= maxEmailAgeMs) {
+        isRecent = true;
+      }
+
+      if (isRecent) {
+        const driveMode = getDriveMode(app.notes as string);
+        await notifyNewDrive({
+          userId,
+          placementDriveId: driveId,
+          companyName,
+          role: app.role || null,
+          ctc: app.ctc || null,
+          stipend: app.stipend || null,
+          location: app.location || null,
+          driveMode,
+          category: app.category || null,
+          sourceEmailId,
+        });
+        existingDedupeKeys.add(newDriveDedupeKey);
+        newDrivesNotified++;
+      }
+    }
+
+    // B. Check for missing Event notifications
+    const { data: driveEvents } = await supabase
+      .from('events')
+      .select('id, event_type, title, start_time, venue, mode')
+      .eq('user_id', userId)
+      .eq('placement_drive_id', driveId);
+
+    for (const evt of (driveEvents || []) as any[]) {
+      if (!evt.start_time) continue;
+      if (evt.event_type === 'registration_deadline') continue;
+
+      const evtStartMs = new Date(evt.start_time).getTime();
+      const isUpcomingOrRecent = evtStartMs >= now - 24 * 60 * 60 * 1000;
+      if (!isUpcomingOrRecent) continue;
+
+      const dateKey = new Date(evt.start_time).toISOString().slice(0, 10);
+      const eventDedupeKey = `event:${userId}:${driveId}:${evt.event_type}:${dateKey}`;
+
+      if (!existingDedupeKeys.has(eventDedupeKey)) {
+        await notifyEventScheduled({
+          userId,
+          placementDriveId: driveId,
+          companyName,
+          eventType: evt.event_type,
+          startTime: new Date(evt.start_time),
+          venue: evt.venue,
+          eventId: evt.id,
+          candidateConfirmed: ['shortlisted', 'test_scheduled', 'interview_scheduled'].includes(app.status),
+        });
+        existingDedupeKeys.add(eventDedupeKey);
+        eventsNotified++;
+      }
+    }
+
+    // C. Check for missing Shortlist Match notification
+    const { data: candidateMatches } = await supabase
+      .from('candidate_matches')
+      .select('id, college_email_id, personal_email_id, created_at')
+      .eq('user_id', userId)
+      .eq('placement_drive_id', driveId)
+      .limit(5);
+
+    for (const match of (candidateMatches || []) as any[]) {
+      const emailId = match.college_email_id || match.personal_email_id || match.id;
+      const shortlistDedupeKey = `shortlist:${userId}:${driveId}:${userNeoId}:${emailId}`;
+
+      if (!existingDedupeKeys.has(shortlistDedupeKey)) {
+        let isMatchRecent = false;
+        let subject = `${companyName} Shortlist`;
+
+        if (match.college_email_id) {
+          const { data: cEmail } = await supabase
+            .from('college_emails')
+            .select('subject, received_at')
+            .eq('id', match.college_email_id)
+            .maybeSingle();
+
+          if (cEmail?.received_at && now - new Date(cEmail.received_at).getTime() <= maxEmailAgeMs) {
+            isMatchRecent = true;
+            if (cEmail.subject) subject = cEmail.subject;
+          }
+        }
+
+        if (!isMatchRecent && match.created_at && now - new Date(match.created_at).getTime() <= maxEmailAgeMs) {
+          isMatchRecent = true;
+        }
+
+        if (isMatchRecent) {
+          await notifyShortlistMatch({
+            userId,
+            placementDriveId: driveId,
+            companyName,
+            neoId: userNeoId,
+            emailSubject: subject,
+            sourceEmailId: emailId,
+          });
+          existingDedupeKeys.add(shortlistDedupeKey);
+          shortlistsNotified++;
+        }
+      }
+    }
+  }
+
+  return { newDrivesNotified, eventsNotified, shortlistsNotified };
 }
 
 export async function performReprocess(
@@ -2624,15 +2899,6 @@ export async function performReprocess(
     collegeEmailId: string;
     placementDriveId: string;
   }> = [];
-  const collegeEmailDriveLinks: Array<{
-    user_id: string;
-    email_id: string;
-    placement_drive_id: string;
-    link_type: string;
-    confidence: string;
-    assignment_source: string;
-    is_primary: boolean;
-  }> = [];
 
   for (const email of collegeEmails) {
     if (email.assignment_source === 'admin_unlinked' || email.classification === 'irrelevant') {
@@ -2735,7 +3001,9 @@ export async function performReprocess(
           const dStart = driveDateMap.get(compDrives[0].id);
           // Only link if email is not older than the drive start (24h grace only for registration circulars)
           if (!dStart || emailDate.getTime() >= dStart.getTime() - graceMs) {
-            matchedDriveId = compDrives[0].id;
+            if (isCircularAllowedByScheduledDate(subject, dStart?.getTime(), 7, (email as any).body_text || bodySnippet)) {
+              matchedDriveId = compDrives[0].id;
+            }
           }
         } else if (compDrives.length > 1) {
           // Check for explicit category match first (e.g. Super Dream vs Dream)
@@ -2763,9 +3031,12 @@ export async function performReprocess(
           }
 
           // Date-scoped circular linking: filter to drives whose startDate <= emailDate (+ graceMs only for registration)
+          // and reject circulars with scheduled date in distant past
           const eligibleDrives = candidateDrives.filter((d: any) => {
             const dStart = driveDateMap.get(d.id);
-            return !dStart || dStart.getTime() <= emailDate.getTime() + graceMs;
+            if (!dStart) return true;
+            if (dStart.getTime() > emailDate.getTime() + graceMs) return false;
+            return isCircularAllowedByScheduledDate(subject, dStart.getTime(), 7, (email as any).body_text || bodySnippet);
           });
           if (eligibleDrives.length > 0) {
             eligibleDrives.sort((a: any, b: any) => {
@@ -2802,7 +3073,10 @@ export async function performReprocess(
         });
       }
 
-      if (targetDriveObj && !targetDriveObj.source_college_email_id && /registration/i.test(subject)) {
+      const isRegCircular = classification.classification === 'registration' || /registration/i.test(subject);
+      const dStart = targetDriveObj ? driveDateMap.get(targetDriveObj.id) : null;
+      const withinDateBoundary = !dStart || emailDate.getTime() >= (dStart.getTime() - 24 * 60 * 60 * 1000);
+      if (targetDriveObj && !targetDriveObj.source_college_email_id && isRegCircular && withinDateBoundary) {
         if (!driveSourceUpdates.some((d) => d.driveId === targetDriveObj.id)) {
           driveSourceUpdates.push({
             driveId: targetDriveObj.id,
@@ -2814,16 +3088,6 @@ export async function performReprocess(
       personalReceiptUpdates.push({
         collegeEmailId: email.id,
         placementDriveId: matchedDriveId,
-      });
-
-      collegeEmailDriveLinks.push({
-        user_id: userId,
-        email_id: email.id,
-        placement_drive_id: matchedDriveId,
-        link_type: 'college_circular',
-        confidence: 'high',
-        assignment_source: 'college_circular_match',
-        is_primary: false,
       });
     } else {
       collegeDiscardedCount++;
@@ -2912,15 +3176,7 @@ export async function performReprocess(
     }
   }
 
-  // 5. Link matched college circulars to placement drive for this user in email_drive_links
-  if (collegeEmailDriveLinks.length > 0) {
-    for (let i = 0; i < collegeEmailDriveLinks.length; i += 100) {
-      const chunk = collegeEmailDriveLinks.slice(i, i + 100);
-      await supabase
-        .from('email_drive_links')
-        .upsert(chunk, { onConflict: 'email_id,placement_drive_id,link_type', ignoreDuplicates: true });
-    }
-  }
+
 
   // Reuse parsed canonical College attachments for only this user's evidenced
   // drives. Never rescan an individual College Gmail inbox during user reprocess.
@@ -2941,7 +3197,18 @@ export async function performReprocess(
 );
   const updatedAppsCount = phase4Res.updatedCount;
   const applicationResults = phase4Res.results || [];
-  onProgress?.({ step: 5, totalSteps: 5, message: 'Drive statuses updated' });
+  onProgress?.({ step: 5, totalSteps: 5, message: 'Drive statuses updated. Checking catch-up notifications…' });
+
+  // 7. Phase 5: Catch-up notifications for recent un-notified drives, events, and shortlists
+  let catchUpStats = { newDrivesNotified: 0, eventsNotified: 0, shortlistsNotified: 0 };
+  try {
+    catchUpStats = await catchUpMissingNotifications(supabase, userId);
+    if (catchUpStats.newDrivesNotified > 0 || catchUpStats.eventsNotified > 0 || catchUpStats.shortlistsNotified > 0) {
+      console.log(`[performReprocess] User ${userId}: caught up missing notifications:`, catchUpStats);
+    }
+  } catch (notifErr: any) {
+    console.warn('[performReprocess] Catch-up notifications non-critical warning:', notifErr.message);
+  }
 
   return {
     success: true,
@@ -2952,6 +3219,7 @@ export async function performReprocess(
     collegeCircularsDiscarded: collegeDiscardedCount,
     updatedApplications: updatedAppsCount,
     results: applicationResults,
+    catchUpNotifications: catchUpStats,
   };
 }
 

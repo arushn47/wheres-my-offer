@@ -207,7 +207,6 @@ export async function runSharedCollegeSync(options: { limit?: number } = {}) {
       } else {
         const deleted = new Set(history.deletedMessageIds);
         state.pending_message_ids = history.messageIds.filter((id) => !deleted.has(id));
-        fanOutNeeded = state.pending_message_ids.length > 0;
         state.pending_offset = 0;
         state.pending_next_page_token = null;
         state.pending_history_id = history.latestHistoryId;

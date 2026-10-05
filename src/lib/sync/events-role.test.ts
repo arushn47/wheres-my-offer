@@ -263,6 +263,20 @@ Company's Registration Link - https://campus.lntedutech.com/...`,
     expect(regEvent?.hasExplicitTime).toBe(true);
     expect(regEvent?.startTime).toEqual(new Date('2026-09-24T08:30:00.000Z'));
   });
+
+  it('extracts multiline registration deadline with markdown formatted time like Mercedes Benz', () => {
+    const email = {
+      subject: 'Mercedes-Benz India Pvt Ltd - Dream Internship - 2027 Batch',
+      receivedAt: new Date('2026-10-05T14:46:08Z'),
+      bodySnippet: `Category\n* Dream Internship*\nCTC\n*7 LPA **(If converted)*\nStipend\n*58,333* *per month*\nLast date for Registration\n\n*6-10-2026 (1**.00 p**m)*\n\nWebsite`,
+    } as any;
+
+    const regEvent = extractEvents(email).find((e) => e.eventType === 'registration_deadline');
+    expect(regEvent).toBeDefined();
+    expect(regEvent?.hasExplicitTime).toBe(true);
+    // 6 Oct 2026, 1:00 PM IST is 07:30 UTC
+    expect(regEvent?.startTime).toEqual(new Date('2026-10-06T07:30:00.000Z'));
+  });
 });
 
 describe('isTrustedPlacementSender', () => {

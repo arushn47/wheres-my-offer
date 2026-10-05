@@ -2,26 +2,11 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireAdmin } from '@/lib/auth/admin';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { normalizeDriveNumber } from '@/lib/drive-number';
-
-function parseScheduledDate(sub: string): number | null {
-  const m1 = sub.match(/scheduled\s+on\s+[([]?(\d{1,2}(?:st|nd|rd|th)?)\s+([A-Za-z]+)(?:\s+(20\d{2}|\b2[4-7]\b))?/i);
-  if (m1) {
-    const day = m1[1].replace(/\D/g, '');
-    const month = m1[2];
-    const year = m1[3] ? (m1[3].length === 2 ? '20' + m1[3] : m1[3]) : '2026';
-    const p = Date.parse(`${day} ${month} ${year} UTC`);
-    if (!isNaN(p)) return p;
-  }
-  const m2 = sub.match(/scheduled\s+on\s+[([]?(\d{1,2})[-/.](\d{1,2})[-/.](20\d{2}|\b2[4-7]\b)/i);
-  if (m2) {
-    const day = parseInt(m2[1], 10);
-    const month = parseInt(m2[2], 10) - 1;
-    let year = parseInt(m2[3], 10);
-    if (year < 100) year += 2000;
-    return Date.UTC(year, month, day);
-  }
-  return null;
-}
+import {
+  getDriveRegistrationDateBoundary,
+  isCircularAllowedByScheduledDate,
+  parseScheduledDate,
+} from '@/lib/sync/drive-temporal-boundary';
 
 export const dynamic = 'force-dynamic';
 
@@ -84,6 +69,10 @@ export async function GET(
     const aliases: string[] = Array.isArray(company?.aliases) ? company.aliases : [];
     const driveCat = (firstDrive?.category || '').toLowerCase();
 
+    // Enforce drive registration date boundary
+    const boundary = await getDriveRegistrationDateBoundary(supabase, driveIds, firstDrive?.created_at);
+    const driveMinAllowedTime = boundary.minAllowedDate ? boundary.minAllowedDate.getTime() : 0;
+
     // Collect all excluded email IDs across matching placement_drives
     const excludedEmailIds = new Set<string>();
     for (const d of matchedDrives || []) {
@@ -122,19 +111,14 @@ export async function GET(
           if (excludedEmailIds.has(em.id)) return false;
           if (em.college_email_id && excludedEmailIds.has(em.college_email_id)) return false;
           if (em.canonical_email_id && excludedEmailIds.has(em.canonical_email_id)) return false;
+          if (driveMinAllowedTime > 0 && em.received_at) {
+            const emTime = new Date(em.received_at).getTime();
+            if (emTime < driveMinAllowedTime) return false;
+          }
           return true;
         });
       }
     }
-
-    // Determine anchor time for unassigned/college circular filtering
-    const anchorEmailTimes = emails
-      .map((em: any) => em.received_at ? new Date(em.received_at).getTime() : 0)
-      .filter((t: number) => t > 0);
-    const driveStartTime = anchorEmailTimes.length > 0
-      ? Math.min(...anchorEmailTimes)
-      : (firstDrive?.created_at ? new Date(firstDrive.created_at).getTime() : 0);
-    const driveMinAllowedTime = driveStartTime ? driveStartTime - 24 * 60 * 60 * 1000 : 0;
 
     // 4. Resolve relevant college broadcast circulars for this drive
     const orConditions: string[] = [];
@@ -148,6 +132,16 @@ export async function GET(
       if (escaped) {
         orConditions.push(`parsed_company_name.ilike.%${escaped}%`);
         orConditions.push(`subject.ilike.%${escaped}%`);
+        if (escaped.includes(' ')) {
+          const hyphenated = escaped.replace(/\s+/g, '-');
+          orConditions.push(`parsed_company_name.ilike.%${hyphenated}%`);
+          orConditions.push(`subject.ilike.%${hyphenated}%`);
+        }
+        if (escaped.includes('-')) {
+          const spaced = escaped.replace(/-/g, ' ');
+          orConditions.push(`parsed_company_name.ilike.%${spaced}%`);
+          orConditions.push(`subject.ilike.%${spaced}%`);
+        }
       }
     }
     for (const alias of aliases) {
@@ -155,6 +149,16 @@ export async function GET(
       if (escaped && escaped.length >= 4 && escaped.toLowerCase() !== companyName.toLowerCase()) {
         orConditions.push(`subject.ilike.%${escaped}%`);
         orConditions.push(`parsed_company_name.ilike.%${escaped}%`);
+        if (escaped.includes(' ')) {
+          const hyphenated = escaped.replace(/\s+/g, '-');
+          orConditions.push(`subject.ilike.%${hyphenated}%`);
+          orConditions.push(`parsed_company_name.ilike.%${hyphenated}%`);
+        }
+        if (escaped.includes('-')) {
+          const spaced = escaped.replace(/-/g, ' ');
+          orConditions.push(`subject.ilike.%${spaced}%`);
+          orConditions.push(`parsed_company_name.ilike.%${spaced}%`);
+        }
       }
     }
 
@@ -175,27 +179,25 @@ export async function GET(
           if (excludedEmailIds.has(cr.id)) continue;
           if (cr.classification === 'irrelevant') continue;
 
-          const isExplicit = (matchedDrives || []).some((d: any) => d.source_college_email_id === cr.id);
           const crTime = cr.received_at ? new Date(cr.received_at).getTime() : (cr.created_at ? new Date(cr.created_at).getTime() : 0);
           const sub = cr.subject || '';
 
-          if (!isExplicit) {
-            if (driveMinAllowedTime > 0 && crTime > 0 && crTime < driveMinAllowedTime) {
-              continue;
-            }
-            const scheduledDate = parseScheduledDate(sub);
-            if (scheduledDate && driveMinAllowedTime > 0 && scheduledDate < driveMinAllowedTime - 7 * 86400000) {
-              continue;
-            }
-            const isDreamDrive = driveCat.includes('dream') || driveCat.includes('super');
-            const isRegularDrive = driveCat.includes('regular');
-            const subLower = sub.toLowerCase();
-            if (isDreamDrive && subLower.includes('regular internship') && !subLower.includes('dream')) {
-              continue;
-            }
-            if (isRegularDrive && (subLower.includes('dream internship') || subLower.includes('super dream'))) {
-              continue;
-            }
+          // RULE: Strictly reject any circulars received before the registration date boundary,
+          // EVEN if they are currently set as source_college_email_id.
+          if (driveMinAllowedTime > 0 && crTime > 0 && crTime < driveMinAllowedTime) {
+            continue;
+          }
+          if (!isCircularAllowedByScheduledDate(sub, driveMinAllowedTime, 7, cr.body_text)) {
+            continue;
+          }
+          const isDreamDrive = driveCat.includes('dream') || driveCat.includes('super');
+          const isRegularDrive = driveCat.includes('regular');
+          const subLower = sub.toLowerCase();
+          if (isDreamDrive && subLower.includes('regular internship') && !subLower.includes('dream')) {
+            continue;
+          }
+          if (isRegularDrive && (subLower.includes('dream internship') || subLower.includes('super dream'))) {
+            continue;
           }
 
           collegeEmails.push({

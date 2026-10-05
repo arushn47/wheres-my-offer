@@ -66,6 +66,7 @@ export interface CompanyDetail {
     eventType: string;
     title: string | null;
     startTime: string | null;
+    endTime?: string | null;
     venue: string | null;
     mode: string | null;
   }[];
@@ -883,12 +884,31 @@ export default function CompanyDetailClient({
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
             <div>
               <span className="font-semibold">{nextUpcomingEvent.title || 'Assessment Instructions'}:</span>{' '}
-              {new Date(nextUpcomingEvent.startTime!).toLocaleString('en-US', {
-                month: 'short',
-                day: 'numeric',
-                hour: 'numeric',
-                minute: '2-digit',
-              })}
+              {(() => {
+                const start = new Date(nextUpcomingEvent.startTime!);
+                const isDeadline = nextUpcomingEvent.eventType === 'registration_deadline';
+                const end = nextUpcomingEvent.endTime
+                  ? new Date(nextUpcomingEvent.endTime)
+                  : !isDeadline
+                  ? new Date(start.getTime() + 2 * 60 * 60 * 1000)
+                  : null;
+
+                const startStr = start.toLocaleString('en-US', {
+                  month: 'short',
+                  day: 'numeric',
+                  hour: 'numeric',
+                  minute: '2-digit',
+                });
+
+                if (end && !isNaN(end.getTime()) && end.getTime() > start.getTime()) {
+                  const endStr = end.toLocaleTimeString('en-US', {
+                    hour: 'numeric',
+                    minute: '2-digit',
+                  });
+                  return `${startStr} – ${endStr}`;
+                }
+                return startStr;
+              })()}
               {nextUpcomingEvent.venue && ` · Venue: ${nextUpcomingEvent.venue}`}
               {nextUpcomingEvent.mode && ` (${nextUpcomingEvent.mode})`}
             </div>

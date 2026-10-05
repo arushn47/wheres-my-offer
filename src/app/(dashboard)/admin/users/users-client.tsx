@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import {
   Users,
   Search,
@@ -278,7 +278,7 @@ export default function UsersClient() {
       mode: 'all',
       currentUser: 'Initializing…',
       currentUserIndex: 1,
-      totalUsers: users.length,
+      totalUsers: studentUsers.length,
       step: 1,
       totalSteps: 5,
       stageMessage: 'Starting global placement reprocess across students…',
@@ -412,15 +412,18 @@ export default function UsersClient() {
     }
   };
 
-  const filteredUsers = users.filter((u) => {
-    if (u.role === 'admin') return false;
+  const studentUsers = useMemo(() => users.filter((u) => u.role !== 'admin'), [users]);
+
+  const filteredUsers = useMemo(() => {
     const q = searchQuery.toLowerCase().trim();
-    if (!q) return true;
-    const nameMatch = u.name?.toLowerCase().includes(q);
-    const emailMatch = u.email.toLowerCase().includes(q);
-    const accountMatch = u.accounts.some((a) => a.email.toLowerCase().includes(q));
-    return nameMatch || emailMatch || accountMatch;
-  });
+    if (!q) return studentUsers;
+    return studentUsers.filter((u) => {
+      const nameMatch = u.name?.toLowerCase().includes(q);
+      const emailMatch = u.email.toLowerCase().includes(q);
+      const accountMatch = u.accounts.some((a) => a.email.toLowerCase().includes(q));
+      return nameMatch || emailMatch || accountMatch;
+    });
+  }, [studentUsers, searchQuery]);
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto pb-16">
@@ -504,7 +507,7 @@ export default function UsersClient() {
           />
         </div>
         <div className="text-xs text-zinc-400 font-mono self-center">
-          Showing <span className="text-indigo-400 font-bold">{filteredUsers.length}</span> of {users.length} registered students
+          Showing <span className="text-indigo-400 font-bold">{filteredUsers.length}</span> of {studentUsers.length} registered students
         </div>
       </div>
 
@@ -986,7 +989,7 @@ export default function UsersClient() {
             </div>
 
             <p className="text-xs text-zinc-300 leading-relaxed">
-              This will re-evaluate all circular assignments, CTC offers, and application stages across all {users.length} registered students in the system.
+              This will re-evaluate all circular assignments, CTC offers, and application stages across all {studentUsers.length} registered students in the system.
             </p>
 
             <div className="flex items-center justify-end gap-3 pt-2">

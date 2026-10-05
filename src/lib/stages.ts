@@ -364,6 +364,24 @@ export function getEffectiveStage(
         };
       }
 
+      if (s === 'registration_open') {
+        return {
+          stageIndex: 0,
+          effectiveStatus: 'registration_open',
+          eliminatedStage: -1,
+          furthestPassedStage: -1,
+          statusSubtitle: 'Registration Open',
+          hasPpt,
+          hasTest,
+          hasInterview,
+          isTestCompleted,
+          isPptCompleted,
+          isInterviewCompleted,
+          eliminatedStageId: null,
+          eliminationLabel: null,
+        };
+      }
+
       return {
         stageIndex: 0,
         effectiveStatus: 'not_applied',
@@ -769,6 +787,24 @@ export function getEffectiveStage(
         isInterviewCompleted,
       eliminatedStageId: null,
       eliminationLabel: null,
+      };
+    }
+
+    if (s === 'registration_open') {
+      return {
+        stageIndex: 0,
+        effectiveStatus: 'registration_open',
+        eliminatedStage: -1,
+        furthestPassedStage: -1,
+        statusSubtitle: 'Registration Open',
+        hasPpt,
+        hasTest,
+        hasInterview,
+        isTestCompleted,
+        isPptCompleted,
+        isInterviewCompleted,
+        eliminatedStageId: null,
+        eliminationLabel: null,
       };
     }
 

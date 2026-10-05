@@ -99,6 +99,8 @@ export async function POST(
       .filter(Boolean);
 
     const distinctUserIds = allCandidateUserIds.filter((uid) => {
+      const hasApp = (apps || []).some((a) => a.user_id === uid);
+      if (hasApp) return true; // Always reprocess users who have an application for this drive
       const u = (userRoles || []).find((r) => r.id === uid);
       if (!u) return true; // include if we can't determine role
       if (u.role === 'admin') return false;
@@ -109,7 +111,7 @@ export async function POST(
     if (distinctUserIds.length === 0) {
       return NextResponse.json({
         success: true,
-        message: 'No non-admin users found tracking this drive',
+        message: 'No users found tracking this drive',
         usersAffected: 0,
       });
     }
@@ -119,18 +121,23 @@ export async function POST(
     const preloadedCollegeEmails: any[] = [];
     let clgPage = 0;
     while (true) {
-      const { data: cChunk } = await supabase
+      const { data: cChunk, error: cChunkErr } = await supabase
         .from('college_emails')
-        .select('id, subject, sender_email, received_at, created_at, body_snippet, body_text, classification, parsed_company_name, parsed_drive_numbers')
+        .select('id, subject, sender_email, received_at, created_at, body_text, classification, parsed_company_name, parsed_drive_numbers')
         .order('received_at', { ascending: true })
         .range(clgPage * pageSize, (clgPage + 1) * pageSize - 1);
+      if (cChunkErr) {
+        console.error('[Admin Drive Reprocess] Error loading college emails:', cChunkErr);
+        break;
+      }
       if (!cChunk || cChunk.length === 0) break;
       preloadedCollegeEmails.push(...cChunk.map((ce: any) => ({
         id: ce.id,
         subject: ce.subject,
         sender: ce.sender_email,
         received_at: ce.received_at || ce.created_at,
-        body_snippet: ce.body_text || ce.body_snippet || '',
+        body_snippet: ce.body_text ? ce.body_text.slice(0, 500) : '',
+        body_text: ce.body_text || '',
         classification: ce.classification,
         parsed_company_name: ce.parsed_company_name,
         parsed_drive_numbers: ce.parsed_drive_numbers || [],
@@ -148,11 +155,11 @@ export async function POST(
     {
       const { data: canonicals } = await supabase
         .from('college_emails')
-        .select('id, message_id, body_text, body_snippet')
+        .select('id, message_id, body_text')
         .not('message_id', 'is', null)
-        .or('body_text.not.is.null,body_snippet.not.is.null');
+        .not('body_text', 'is', null);
       for (const c of canonicals || []) {
-        const text = c.body_text || c.body_snippet || '';
+        const text = c.body_text || '';
         if (text && c.message_id && !preloadedCanonicalMap.has(c.message_id.toLowerCase().trim())) {
           preloadedCanonicalMap.set(c.message_id.toLowerCase().trim(), text);
         }

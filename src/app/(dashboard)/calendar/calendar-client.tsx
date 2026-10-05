@@ -25,6 +25,7 @@ import {
   eachDayOfInterval,
   isSameMonth,
   isSameDay,
+  differenceInCalendarDays,
   format,
   isToday,
   addMonths,
@@ -63,29 +64,105 @@ function normalizeEventType(type: string): 'ppt' | 'test' | 'interview' | 'deadl
   return 'test';
 }
 
-function timeLabel(dateStr: string | null) {
+export function formatEventTimeRange(
+  startTime: string | Date | null | undefined,
+  endTime: string | Date | null | undefined,
+  eventType?: string | null
+): string | null {
+  if (!startTime) return null;
+  const start = startTime instanceof Date ? startTime : new Date(startTime);
+  if (isNaN(start.getTime())) return null;
+
+  const startFormatted = format(start, 'h:mm a');
+
+  const norm = normalizeEventType(eventType || '');
+  const isDeadline = norm === 'deadline';
+
+  let end: Date | null = null;
+  if (endTime) {
+    const parsed = endTime instanceof Date ? endTime : new Date(endTime);
+    if (!isNaN(parsed.getTime())) {
+      end = parsed;
+    }
+  }
+
+  // If no explicit endTime:
+  // For deadlines, it's a point-in-time cutoff (do not fabricate a duration window).
+  // For test, assessment, interview, ppt, assume 2 hours as requested.
+  if (!end && !isDeadline) {
+    end = new Date(start.getTime() + 2 * 60 * 60 * 1000);
+  }
+
+  if (!end || end.getTime() <= start.getTime()) {
+    return startFormatted;
+  }
+
+  const endFormatted = format(end, 'h:mm a');
+  if (startFormatted === endFormatted) {
+    return startFormatted;
+  }
+
+  const daysDiff = differenceInCalendarDays(end, start);
+  const nextDaySuffix = daysDiff > 0 ? ` (+${daysDiff}d)` : '';
+
+  return `${startFormatted} – ${endFormatted}${nextDaySuffix}`;
+}
+
+function timeLabel(
+  dateStr: string | null,
+  endTime?: string | null,
+  eventType?: string | null
+) {
   if (!dateStr) return '';
   const d = new Date(dateStr);
+  if (isNaN(d.getTime())) return '';
   const now = new Date();
   const diffHours = Math.round((d.getTime() - now.getTime()) / (1000 * 60 * 60));
   const diffDays = Math.round((d.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+  const range = formatEventTimeRange(dateStr, endTime, eventType) || format(d, 'h:mm a');
 
   if (diffHours > 0 && diffHours < 24) {
-    return `in ${diffHours} hrs · ${format(d, 'h:mm a')}`;
+    return `in ${diffHours} hrs · ${range}`;
   }
   if (diffDays > 0 && diffDays <= 7) {
-    return `in ${diffDays} days · ${format(d, 'h:mm a')}`;
+    return `in ${diffDays} days · ${range}`;
   }
   if (diffDays < 0) {
-    return `${Math.abs(diffDays)}d ago`;
+    return `${Math.abs(diffDays)}d ago · ${range}`;
   }
-  return format(d, 'd MMM · h:mm a');
+  return `${format(d, 'd MMM')} · ${range}`;
 }
 
-function getGcalUrl(companyName: string, title: string | null, label: string, startTime: string | null, venue: string | null) {
+function getGcalUrl(
+  companyName: string,
+  title: string | null,
+  label: string,
+  startTime: string | null,
+  endTime: string | null,
+  venue: string | null,
+  eventType?: string | null
+) {
   if (!startTime) return null;
-  const startIso = new Date(startTime).toISOString().replace(/-|:|\.\d+/g, '');
-  const endIso = new Date(new Date(startTime).getTime() + 3600000).toISOString().replace(/-|:|\.\d+/g, '');
+  const start = new Date(startTime);
+  if (isNaN(start.getTime())) return null;
+
+  const isDeadline = label.toLowerCase() === 'deadline' || (eventType && /deadline|registration/i.test(eventType));
+  let end: Date;
+  if (endTime) {
+    const parsedEnd = new Date(endTime);
+    end = !isNaN(parsedEnd.getTime()) ? parsedEnd : new Date(start.getTime() + (isDeadline ? 30 * 60 * 1000 : 2 * 60 * 60 * 1000));
+  } else if (isDeadline) {
+    end = new Date(start.getTime() + 30 * 60 * 1000);
+  } else {
+    end = new Date(start.getTime() + 2 * 60 * 60 * 1000); // Assume 2 hours
+  }
+
+  if (end.getTime() <= start.getTime()) {
+    end = new Date(start.getTime() + 2 * 60 * 60 * 1000);
+  }
+
+  const startIso = start.toISOString().replace(/-|:|\.\d+/g, '');
+  const endIso = end.toISOString().replace(/-|:|\.\d+/g, '');
   const cleanTitle = cleanEventTitle(title, companyName, label);
   return `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${encodeURIComponent(
     `${companyName} — ${cleanTitle}`
@@ -339,7 +416,7 @@ export default function CalendarClient({ events }: CalendarClientProps) {
                         }
                       }
                     }}
-                    className={`min-h-[56px] sm:min-h-[70px] lg:min-h-[80px] xl:min-h-[88px] cursor-pointer border-b border-r border-zinc-800/60 p-1 sm:p-1.5 transition-all hover:bg-zinc-800/30 ${
+                    className={`min-h-[56px] sm:min-h-[60px] lg:min-h-[90px] xl:min-h-[100px] cursor-pointer border-b border-r border-zinc-800/60 p-1 sm:p-1.5 transition-all hover:bg-zinc-800/30 ${
                       !inMonth ? 'opacity-25' : ''
                     } ${
                       isSelected
@@ -463,7 +540,7 @@ export default function CalendarClient({ events }: CalendarClientProps) {
                     {selectedDayEvents.map((e) => {
                       const norm = normalizeEventType(e.eventType);
                       const m = EVENT_META[norm];
-                      const gcalUrl = getGcalUrl(e.companyName, e.title, m.label, e.startTime, e.venue);
+                      const gcalUrl = getGcalUrl(e.companyName, e.title, m.label, e.startTime, e.endTime, e.venue, e.eventType);
 
                       return (
                         <div
@@ -492,8 +569,8 @@ export default function CalendarClient({ events }: CalendarClientProps) {
                             </div>
 
                             {e.startTime && (
-                              <span className="shrink-0 rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-1 font-mono text-xs font-bold text-amber-300">
-                                {format(new Date(e.startTime), 'h:mm a')}
+                              <span className="shrink-0 whitespace-nowrap rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-1 font-mono text-xs font-bold text-amber-300">
+                                {formatEventTimeRange(e.startTime, e.endTime, e.eventType)}
                               </span>
                             )}
                           </div>
@@ -617,7 +694,7 @@ export default function CalendarClient({ events }: CalendarClientProps) {
 
                     <div className="flex items-center gap-3">
                       <span className="hidden shrink-0 items-center gap-1.5 font-tabular font-mono text-[11px] text-amber-300 sm:flex">
-                        <Clock className="h-3.5 w-3.5" /> {timeLabel(e.startTime)}
+                        <Clock className="h-3.5 w-3.5" /> {timeLabel(e.startTime, e.endTime, e.eventType)}
                       </span>
                       <Link
                         href={`/companies/${e.companyId}`}
@@ -709,7 +786,7 @@ export default function CalendarClient({ events }: CalendarClientProps) {
 
                         <div className="flex items-center gap-3">
                           <span className="hidden shrink-0 items-center gap-1.5 font-tabular font-mono text-[11px] text-zinc-500 sm:flex">
-                            <Clock className="h-3.5 w-3.5" /> {timeLabel(e.startTime)}
+                            <Clock className="h-3.5 w-3.5" /> {timeLabel(e.startTime, e.endTime, e.eventType)}
                           </span>
                           <Link
                             href={`/companies/${e.companyId}`}
@@ -795,7 +872,7 @@ export default function CalendarClient({ events }: CalendarClientProps) {
                   selectedDayEvents.map((evt) => {
                     const norm = normalizeEventType(evt.eventType);
                     const meta = EVENT_META[norm];
-                    const gcalUrl = getGcalUrl(evt.companyName, evt.title, meta.label, evt.startTime, evt.venue);
+                    const gcalUrl = getGcalUrl(evt.companyName, evt.title, meta.label, evt.startTime, evt.endTime, evt.venue, evt.eventType);
 
                     return (
                       <div
@@ -825,8 +902,8 @@ export default function CalendarClient({ events }: CalendarClientProps) {
                             })()}
                           </div>
                           {evt.startTime && (
-                            <span className="shrink-0 rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-1 font-mono text-[11px] font-bold text-amber-300">
-                              {format(new Date(evt.startTime), 'h:mm a')}
+                            <span className="shrink-0 whitespace-nowrap rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-1 font-mono text-[11px] font-bold text-amber-300">
+                              {formatEventTimeRange(evt.startTime, evt.endTime, evt.eventType)}
                             </span>
                           )}
                         </div>

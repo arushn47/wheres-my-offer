@@ -4,7 +4,7 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import { createGmailClient, fetchMessageDetail, type GmailAccount, type ParsedAttachment, type ParsedEmail } from '@/lib/gmail/client';
 import { CANONICAL_IDENTITY_VERSION, CANONICAL_PARSER_VERSION, canonicalBodyFromEmail, computeCanonicalContentKey, computeCanonicalMetadataKey, isApprovedCanonicalSender, isGatedCollegeSender, normalizeRfcMessageId } from '@/lib/sync/canonical-email';
 import { scoreCollegeMessageRelevance } from '@/lib/sync/college-relevance';
-import { classifyEmail } from '@/lib/sync/classifier';
+import { classifyEmail, isFuzzyCompanyMatch } from '@/lib/sync/classifier';
 import { extractAllDriveNumbers, extractEvents, extractJobDetails } from '@/lib/sync/events';
 import { processEmailForEventsAndStatus } from '@/lib/sync/status-engine';
 import { hasSharedDriveFanOutEvidence, isShortlistMatchEvidence } from '@/lib/sync/participation-evidence';
@@ -16,6 +16,7 @@ import {
   TRANSIENT_ATTACHMENT_ERROR,
 } from '@/lib/sync/attachment-status';
 import { isPdfAttachment, mergePdfJobDetails, parsePdfAttachment } from '@/lib/sync/pdf-parser';
+import { getDriveRegistrationDateBoundary, isEmailAllowedByDriveBoundary } from '@/lib/sync/drive-temporal-boundary';
 
 interface SharedDriveRow {
   id: string;
@@ -56,7 +57,7 @@ async function findDriveForCircular(
     const number = rawNumber.toLowerCase().replace(/[^a-z0-9]/g, '');
     const { data } = await supabase
       .from('placement_drives')
-      .select('id,company_id,companies(name)')
+      .select('id,company_id,drive_name,drive_number,normalized_drive_number,source_college_email_id,location,role,ctc,stipend,companies(name,aliases)')
       .or(`normalized_drive_number.eq.${number},drive_number.eq.${rawNumber}`)
       .maybeSingle();
     if (data) return data;
@@ -65,7 +66,7 @@ async function findDriveForCircular(
   if (!params.parsedCompanyName) return null;
   const { data: drives } = await supabase
     .from('placement_drives')
-    .select('id,company_id,drive_number,normalized_drive_number,drive_name,companies(name)');
+    .select('id,company_id,drive_number,normalized_drive_number,drive_name,source_college_email_id,location,role,ctc,stipend,companies(name,aliases)');
   if (!drives?.length) return null;
   const byNumber = drives.filter((drive) => {
     const number = drive.normalized_drive_number || drive.drive_number;
@@ -75,7 +76,14 @@ async function findDriveForCircular(
   const name = params.parsedCompanyName.toLowerCase().trim();
   const byCompany = drives.filter((drive) => {
     const company = Array.isArray(drive.companies) ? drive.companies[0] : drive.companies;
-    return (company?.name || '').toLowerCase().trim() === name || (drive.drive_name || '').toLowerCase().trim() === name;
+    const cName = (company?.name || '').toLowerCase().trim();
+    const dName = (drive.drive_name || '').toLowerCase().trim();
+    if (cName === name || dName === name) return true;
+    if (company?.name && isFuzzyCompanyMatch(company.name, params.parsedCompanyName!)) return true;
+    if (drive.drive_name && isFuzzyCompanyMatch(drive.drive_name, params.parsedCompanyName!)) return true;
+    const aliases = (company?.aliases || []) as string[];
+    if (aliases.some((a) => a.toLowerCase().trim() === name || isFuzzyCompanyMatch(a, params.parsedCompanyName!))) return true;
+    return false;
   });
   if (byCompany.length === 1) return byCompany[0];
 
@@ -396,6 +404,34 @@ export async function ingestSharedCollegeCircular(params: {
   });
   if (!drive) return { canonicalId, appliedUsers: 0, skippedUsers: 0, attachmentErrors };
 
+  // If this circular is a registration circular within the drive's registration boundary,
+  // link this canonical circular as source_college_email_id and backfill any missing location/role/ctc/stipend
+  const driveUpdates: Record<string, any> = {};
+  const isRegistration = classification.classification === 'registration' || /registration/i.test(parsedEmail.subject);
+  if (isRegistration) {
+    const boundary = await getDriveRegistrationDateBoundary(supabase, [drive.id]);
+    if (isEmailAllowedByDriveBoundary(parsedEmail.receivedAt, boundary.minAllowedDate)) {
+      if (!drive.source_college_email_id || classification.classification === 'registration') {
+        driveUpdates.source_college_email_id = canonicalId;
+      }
+    }
+  }
+  if (jobDetails.location && !drive.location) {
+    driveUpdates.location = jobDetails.location;
+  }
+  if (jobDetails.role && !drive.role) {
+    driveUpdates.role = jobDetails.role;
+  }
+  if (jobDetails.ctc && !drive.ctc) {
+    driveUpdates.ctc = jobDetails.ctc;
+  }
+  if (jobDetails.stipend && !drive.stipend) {
+    driveUpdates.stipend = jobDetails.stipend;
+  }
+  if (Object.keys(driveUpdates).length > 0) {
+    await supabase.from('placement_drives').update(driveUpdates).eq('id', drive.id);
+  }
+
   const { data: eligibleReceipts, error: receiptError } = await supabase
     .from('personal_emails')
     .select('user_id')
@@ -515,7 +551,13 @@ export async function fanOutSharedCollegeArchiveToUser(userId: string): Promise<
       const driveNumbers = (circular.parsed_drive_numbers || []).map((number: string) => normalizeDriveNumber(number));
       const normalizedDriveNumber = normalizeDriveNumber(drive.normalized_drive_number || drive.drive_number || '');
       const numberMatch = Boolean(normalizedDriveNumber && driveNumbers.includes(normalizedDriveNumber));
-      const companyMatch = Boolean(circular.parsed_company_name && circular.parsed_company_name.toLowerCase().trim() === company.name.toLowerCase().trim());
+      const companyMatch = Boolean(
+        circular.parsed_company_name && (
+          circular.parsed_company_name.toLowerCase().trim() === company.name.toLowerCase().trim() ||
+          isFuzzyCompanyMatch(company.name, circular.parsed_company_name) ||
+          (company.aliases || []).some((a) => isFuzzyCompanyMatch(a, circular.parsed_company_name!))
+        )
+      );
       const sameCompanyDrives = (drivesResult.data || []).filter((candidate) => candidate.company_id === drive.company_id);
       if (direct || numberMatch || (companyMatch && sameCompanyDrives.length === 1)) {
         candidateCircularIds.add(circular.id);
@@ -591,7 +633,13 @@ export async function fanOutSharedCollegeArchiveToUser(userId: string): Promise<
       const driveNumbers = (circular.parsed_drive_numbers || []).map((number: string) => normalizeDriveNumber(number));
       const normalizedDriveNumber = normalizeDriveNumber(drive.normalized_drive_number || drive.drive_number || '');
       const numberMatch = Boolean(normalizedDriveNumber && driveNumbers.includes(normalizedDriveNumber));
-      const companyMatch = Boolean(circular.parsed_company_name && circular.parsed_company_name.toLowerCase().trim() === company.name.toLowerCase().trim());
+      const companyMatch = Boolean(
+        circular.parsed_company_name && (
+          circular.parsed_company_name.toLowerCase().trim() === company.name.toLowerCase().trim() ||
+          isFuzzyCompanyMatch(company.name, circular.parsed_company_name) ||
+          (company.aliases || []).some((a) => isFuzzyCompanyMatch(a, circular.parsed_company_name!))
+        )
+      );
       const sameCompanyDrives = (drivesResult.data || []).filter((candidate) => candidate.company_id === drive.company_id);
       if (!direct && !numberMatch && !(companyMatch && sameCompanyDrives.length === 1)) continue;
       if (!seen.add(`${drive.id}|${circular.id}`)) continue;

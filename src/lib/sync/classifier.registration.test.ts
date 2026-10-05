@@ -123,4 +123,24 @@ describe('classifier: registration circulars vs shortlists', () => {
     );
     expect(classifyEmail(amz).classification).toBe('test');
   });
+
+  it('classifies generic course enrollments and practice assessments as irrelevant', () => {
+    const courseEmail = makeEmail(
+      'You have been enrolled in a course',
+      'You have been enrolled in the following course: Python Basics'
+    );
+    expect(classifyEmail(courseEmail).classification).toBe('irrelevant');
+
+    const practiceAssessmentEmail = makeEmail(
+      'Updated TCS NQT Pattern – Practice Assessments',
+      'Please practice the mock assessments on the portal before the main exam.'
+    );
+    expect(classifyEmail(practiceAssessmentEmail).classification).toBe('irrelevant');
+
+    const practiceTestReminder = makeEmail(
+      'Reminder: Complete Your TCS NQT Practice Tests',
+      'This is a reminder to complete your practice tests on NeoPAT.'
+    );
+    expect(classifyEmail(practiceTestReminder).classification).toBe('irrelevant');
+  });
 });

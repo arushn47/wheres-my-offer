@@ -35,9 +35,7 @@ export function stripQuotedContent(text: string | undefined | null): string {
     .replace(/^>+.*$/gm, ' ')
     .replace(/\n?[- ]*Forwarded message[- ]*\n[\s\S]*$/i, ' ')
     .replace(/\n?Begin forwarded message:\s*[\s\S]*$/i, ' ')
-    .replace(/\n?-----Original Message-----[\s\S]*$/i, ' ')
-    .replace(/\n?On\s+[A-Za-z]{3},\s+[A-Za-z]{3}\s+\d{1,2},\s+\d{4}\s+at\s+[\d:apm\s.]+(?:[^\n\r]*?)wrote:?\s*[\s\S]*$/i, ' ')
-    .replace(/\n?On\s+\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}\s+at\s+[\d:apm\s.]+(?:[^\n\r]*?)wrote:?\s*[\s\S]*$/i, ' ')
+    .replace(/(?:\r?\n|^)\s*On\s+[\w,.\s/\-–—]{5,80}?(?:at|,)\s*[\d:apm\s.]+(?:[\s\S]{1,300}?)wrote:?\s*[\s\S]*$/i, ' ')
     .replace(/\n?Warm\s+regards[\s\S]*?(?:Dr\.?V\.?Samuel\s+Rajkumar|Director\(Career\s+Development\s+Centre\))[\s\S]*$/i, ' ')
     .trim();
 }
