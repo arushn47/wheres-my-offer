@@ -84,6 +84,13 @@ export async function recalculateApplicationStatuses(
     for (const [k, v] of options.preloadedCanonicalMap) canonicalByMsgId.set(k, v);
   }
 
+  // Purge any irrelevant spam personal emails first
+  await supabase
+    .from('personal_emails')
+    .delete()
+    .eq('user_id', userId)
+    .eq('classification', 'irrelevant');
+
   // Fetch all emails for this user (paginated)
   const rawEmailChunks: any[] = [];
   const pageSize = 1000;
@@ -536,6 +543,14 @@ export async function recalculateApplicationStatuses(
             if (!a || a.length < 4 || ['ngi', 'pan', 'work', 'part', 'pls', 'data', 'asia', 'tech'].includes(a)) continue;
             const escaped = a.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
             if (new RegExp(`\\b${escaped}\\b`, 'i').test(sub)) {
+              return true;
+            }
+          }
+          // Match root brand stem (e.g. "Axxela" from "Axxela Research & Analytics")
+          const rootStem = comp.name.replace(/\s+(?:research|analytics|technologies|technology|services|service|solutions|solution|consulting|group|capital|systems|system|labs|lab)\b/gi, '').replace(/\s*(?:&|and)\s*$/i, '').trim().toLowerCase();
+          if (rootStem && rootStem.length >= 4) {
+            const escaped = rootStem.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            if (new RegExp(`(?:^|[^a-z0-9])${escaped}(?:[^a-z0-9]|$)`, 'i').test(sub)) {
               return true;
             }
           }
@@ -1185,6 +1200,37 @@ export async function recalculateApplicationStatuses(
 
         const testEmails = activeDriveEmails.filter(isTestEmail);
 
+        // Distinguish pre-test screening shortlists (shortlists published for Test 1 before it occurs)
+        // from post-test round shortlists (Round 2, Game Round, Technical Interview, or Next Round).
+        const earliestTestEmailTime = testEmails.reduce((min, e) => {
+          const t = e.received_at ? new Date(e.received_at).getTime() : Infinity;
+          return Math.min(min, t);
+        }, Infinity);
+
+        const isPostTestRoundShortlist = (e: { subject?: string | null; body_snippet?: string | null; received_at?: string | null }) => {
+          const s = e.subject || '';
+          const b = e.body_snippet || '';
+          const full = `${s} ${b}`;
+          if (/next\s+round|game\s+round|gamified|round\s*2|test\s*2|second\s+round/i.test(full)) return true;
+          const classifiedRound = classifyShortlistEmail(s, full);
+          if (classifiedRound === 'test_r2' || classifiedRound === 'interview' || classifiedRound === 'selected') return true;
+          return false;
+        };
+
+        const latestTestEmailTime = testEmails.reduce(
+          (max, e) => Math.max(max, e.received_at ? new Date(e.received_at).getTime() : 0),
+          0
+        );
+
+        const preTestShortlistEmails = testShortlistEmails.filter((e) => {
+          if (latestTestEmailTime > 0 && e.received_at) {
+            const t = new Date(e.received_at).getTime();
+            if (t > latestTestEmailTime) return false;
+          }
+          return !isPostTestRoundShortlist(e);
+        });
+        const postTestShortlistEmails = testShortlistEmails.filter((e) => !preTestShortlistEmails.includes(e));
+
         const hasDirectPersonalTestInvitation = activeDriveEmails.some((e) => {
           if (!isAfterRegistration(e)) return false;
           const senderLower = (e.sender || '').toLowerCase();
@@ -1274,10 +1320,21 @@ export async function recalculateApplicationStatuses(
               m.match_type !== 'xlsx_applied_list'
           );
         }
-        // A personal test invitation email (e.g. Goldman Sachs direct link) only establishes shortlisting
-        // when NO explicit test shortlist roster (Excel/attachment) exists for this drive.
-        // If an explicit shortlist was published (e.g. Work India), only candidates actually in that shortlist were shortlisted.
-        if (!isMatchedInTest && hasDirectPersonalTestInvitation && testShortlistEmails.length === 0) {
+        // A personal test invitation email (e.g. Goldman Sachs direct link) or an open test announcement
+        // addressed to all registered/applied students with direct test link (e.g. Axxela Mettl link) establishes
+        // test participation when NO explicit pre-test shortlist roster (Excel/attachment) exists for this drive.
+        // If an explicit shortlist was published (e.g. Work India, BlackRock, ValueLabs), only candidates actually in that shortlist were shortlisted.
+        const hasOpenTestInvitation = testEmails.some((e) => {
+          if (!isAfterRegistration(e)) return false;
+          const full = `${e.subject || ''} ${e.body_snippet || ''}`.toLowerCase();
+          const hasDirectTestLink = /tests?\.mettl\.com|hackerrank\.com\/test|codility\.com\/c\/|assessment\.shl\.com|hackerearth\.com\/challenges\/test|assessment\.glider\.ai|xobin\.com|hirepro\.in|testgorilla\.com|myamcat\.com/i.test(full);
+          const hasGenericTestLink = /https?:\/\/[^\s]+/i.test(full) && /test\s*link|assessment\s*link|exam\s*link/i.test(full);
+          const isAddressedToApplied = /applied\s+(?:students?|candidates?)|all\s+applied|registered\s+students/i.test(full);
+          const hasActionableTestLink = hasDirectTestLink || (isAddressedToApplied && hasGenericTestLink);
+          return hasActionableTestLink && !/shortlist|shortlisted/i.test(e.subject || '');
+        });
+
+        if (!isMatchedInTest && hasConfirmedRegistration && preTestShortlistEmails.length === 0 && (hasDirectPersonalTestInvitation || hasOpenTestInvitation)) {
           isMatchedInTest = true;
         }
 
@@ -1433,20 +1490,31 @@ export async function recalculateApplicationStatuses(
             (max, e) => Math.max(max, e.startTime ? e.startTime.getTime() : 0),
             0
           );
-          const testTime = latestTestEventTime || testMatchTime;
+          const latestTestEmailTime = testEmails.reduce(
+            (max, e) => Math.max(max, e.received_at ? new Date(e.received_at).getTime() : 0),
+            0
+          );
+          const testTime = latestTestEventTime || testMatchTime || latestTestEmailTime;
 
-          const subsequentPostTestEmails = nextRoundEmails.filter((e) => {
+          const referenceTestTime = testTime > 0 ? testTime : testMatchTime;
+          const isMatchedInPostTestRound = postTestShortlistEmails.some((e) =>
+            roundForMatchedEmail(e as any, 'test') || roundForMatchedEmail(e as any, 'interview')
+          );
+          const subsequentPostTestEmails = [
+            ...nextRoundEmails,
+            ...postTestShortlistEmails,
+          ].filter((e) => {
             const t = e.received_at ? new Date(e.received_at).getTime() : 0;
-            return t > (testMatchTime + 30 * 60 * 1000);
+            return referenceTestTime > 0 ? t > (referenceTestTime + 30 * 60 * 1000) : t > 0;
           });
 
-          if (!hasUpcomingTestEvent && subsequentPostTestEmails.length > 0) {
+          if (!hasUpcomingTestEvent && (subsequentPostTestEmails.length > 0 || (postTestShortlistEmails.length > 0 && !isMatchedInPostTestRound))) {
             computedStatus = 'rejected';
             // User was shortlisted for the test (matched in test email) but a post-test
-            // round email came without them â†’ Eliminated in Test Round
+            // round email came without them → Eliminated in Test Round
             computedRejectionNote = 'Eliminated in Test Round';
           } else if (!hasUpcomingTestEvent && selectionEmails.some((e) =>
-            Boolean(e.received_at && new Date(e.received_at).getTime() > testMatchTime + 30 * 60 * 1000))) {
+            Boolean(e.received_at && new Date(e.received_at).getTime() > referenceTestTime + 30 * 60 * 1000))) {
             computedStatus = 'rejected';
             computedRejectionNote = 'Eliminated in Test Round';
           } else if (!hasUpcomingTestEvent && testTime > 0 && testTime < Date.now()) {
@@ -1457,8 +1525,31 @@ export async function recalculateApplicationStatuses(
             computedStatus = 'test_scheduled';
           }
         } else if (hasConfirmedRegistration) {
-          if (selectionEmails.length > 0 || nextRoundEmails.length > 0 || testShortlistEmails.length > 0) {
+          if (preTestShortlistEmails.length > 0) {
+            // An explicit pre-test shortlist was published and candidate was not in it
             computedStatus = 'not_shortlisted';
+          } else if (selectionEmails.length > 0 || nextRoundEmails.length > 0 || postTestShortlistEmails.length > 0) {
+            // A subsequent round was published after an open test round.
+            // Only mark as 'Eliminated in Test Round' if the candidate was CONFIRMED to have
+            // sat the test (isMatchedInTest). A company-wide test announcement email in the
+            // inbox is NOT evidence the candidate personally took the test — it's a broadcast.
+            // Without a positive ID match in the test round, keep not_shortlisted.
+            if (isMatchedInTest) {
+              const testEvents = allExtractedEvents.filter(
+                (e) => ['online_test', 'coding_test'].includes(e.eventType) && e.startTime
+              );
+              const hasUpcomingTestEvent = testEvents.some((e) => Boolean(e.startTime && e.startTime.getTime() > Date.now()));
+              if (!hasUpcomingTestEvent) {
+                computedStatus = 'rejected';
+                computedRejectionNote = 'Eliminated in Test Round';
+              } else {
+                computedStatus = 'test_scheduled';
+              }
+            } else {
+              // No confirmed test participation → genuinely not shortlisted
+              computedStatus = 'not_shortlisted';
+            }
+
           } else if (testEmails.length > 0) {
             const testEvents = allExtractedEvents.filter(
               (e) => ['online_test', 'coding_test'].includes(e.eventType) && e.startTime
@@ -1983,6 +2074,13 @@ export async function performReprocess(
     }
   }
 
+  // Purge any irrelevant spam personal emails first
+  await supabase
+    .from('personal_emails')
+    .delete()
+    .eq('user_id', userId)
+    .eq('classification', 'irrelevant');
+
   // 2. Fetch ALL stored emails for this user with automatic pagination.
   // Full content lives in college_emails after body_snippet was capped at 500 chars.
   const rawReprocessEmails: any[] = [];
@@ -2306,6 +2404,22 @@ export async function performReprocess(
             companiesByName.set(a.toLowerCase(), newComp);
           }
         }
+      } else {
+        // Refresh aliases if newly supported patterns (e.g. root brand stem) are missing
+        const generatedAliases = extractCompanyAliases(companyName, comp.name, driveName);
+        if (driveNumber && !generatedAliases.includes(driveNumber.toLowerCase())) {
+          generatedAliases.push(driveNumber.toLowerCase());
+        }
+        const existingAliases = comp.aliases || [];
+        const missingAliases = generatedAliases.filter((a) => !existingAliases.includes(a));
+        if (missingAliases.length > 0) {
+          const updatedAliases = [...existingAliases, ...missingAliases];
+          comp.aliases = updatedAliases;
+          companiesToUpdate.set(comp.id, { ...(companiesToUpdate.get(comp.id) || {}), aliases: updatedAliases });
+          for (const a of missingAliases) {
+            companiesByName.set(a.toLowerCase(), comp);
+          }
+        }
       }
 
       if (!comp) continue;
@@ -2510,6 +2624,15 @@ export async function performReprocess(
     collegeEmailId: string;
     placementDriveId: string;
   }> = [];
+  const collegeEmailDriveLinks: Array<{
+    user_id: string;
+    email_id: string;
+    placement_drive_id: string;
+    link_type: string;
+    confidence: string;
+    assignment_source: string;
+    is_primary: boolean;
+  }> = [];
 
   for (const email of collegeEmails) {
     if (email.assignment_source === 'admin_unlinked' || email.classification === 'irrelevant') {
@@ -2580,6 +2703,20 @@ export async function performReprocess(
             matchedCompId = cId;
             break;
           }
+          // Also check aliases and root stem
+          const aliasesToCheck = [
+            ...(comp.aliases || []),
+            comp.name.replace(/\s+(?:research|analytics|technologies|technology|services|service|solutions|solution|consulting|group|capital|systems|system|labs|lab)\b/gi, '').replace(/\s*(?:&|and)\s*$/i, '').trim(),
+          ];
+          for (const alias of aliasesToCheck) {
+            if (!alias || alias.length < 4 || isInvalidCompanyName(alias)) continue;
+            const aEscaped = alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            if (new RegExp(`(?:^|[^a-z0-9])${aEscaped}(?:[^a-z0-9]|$)`, 'i').test(subjectLower)) {
+              matchedCompId = cId;
+              break;
+            }
+          }
+          if (matchedCompId) break;
         }
       }
 
@@ -2678,6 +2815,16 @@ export async function performReprocess(
         collegeEmailId: email.id,
         placementDriveId: matchedDriveId,
       });
+
+      collegeEmailDriveLinks.push({
+        user_id: userId,
+        email_id: email.id,
+        placement_drive_id: matchedDriveId,
+        link_type: 'college_circular',
+        confidence: 'high',
+        assignment_source: 'college_circular_match',
+        is_primary: false,
+      });
     } else {
       collegeDiscardedCount++;
     }
@@ -2762,6 +2909,16 @@ export async function performReprocess(
             .eq('id', receipt.id);
         }
       }
+    }
+  }
+
+  // 5. Link matched college circulars to placement drive for this user in email_drive_links
+  if (collegeEmailDriveLinks.length > 0) {
+    for (let i = 0; i < collegeEmailDriveLinks.length; i += 100) {
+      const chunk = collegeEmailDriveLinks.slice(i, i + 100);
+      await supabase
+        .from('email_drive_links')
+        .upsert(chunk, { onConflict: 'email_id,placement_drive_id,link_type', ignoreDuplicates: true });
     }
   }
 

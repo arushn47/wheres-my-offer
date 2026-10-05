@@ -282,26 +282,63 @@ export function parseDateTime(
 }
 
 /**
- * Extracts explicit end time from time range expressions (e.g. "4:00 PM to 5:00 PM", "10 AM - 12 PM").
+ * Extracts explicit end time from time range expressions.
+ *
+ * Handles both 12-hour AM/PM ranges (e.g. "4:00 PM to 5:00 PM", "10 AM - 12 PM")
+ * and 24-hour ranges common in CDC circulars
+ * (e.g. "00:01 Hours to October 4, 2026, 23:59 Hours",
+ *        "from 9:00 Hours to 18:00 Hours").
+ *
+ * When the end time is on a different calendar date than the start time
+ * (e.g. start 00:01, end 23:59 on the same day, or a window that crosses midnight)
+ * the date is resolved relative to the start date's IST calendar date.
  */
 export function parseExplicitEndTime(text: string, startDate: Date): Date | null {
   if (!text || !startDate) return null;
-  const endTimeMatch = text.match(
+
+  // --- 1. Try AM/PM range first ---
+  const amPmMatch = text.match(
     /(?:to|until|-|–|—)\s*\(?\s*(\d{1,2})\s*(?::|\.)?\s*(\d{2})?\s*(am|pm|a\.m\.|p\.m\.|noon|p\b|a\b)/i
   );
-  if (!endTimeMatch) return null;
-  let endH = parseInt(endTimeMatch[1], 10);
-  const endIndicator = endTimeMatch[3] ? endTimeMatch[3].toLowerCase() : '';
-  const endIsPm = endIndicator.startsWith('p') || endIndicator === 'noon';
-  if (endIsPm && endH < 12) endH += 12;
-  if (!endIsPm && endIndicator && endIndicator !== 'noon' && endH === 12) endH = 0;
-  const endM = endTimeMatch[2] ? parseInt(endTimeMatch[2], 10) : 0;
-  const endHourStr = String(endH).padStart(2, '0');
-  const endMinStr = String(endM).padStart(2, '0');
-  const istDateMs = startDate.getTime() + (5 * 60 + 30) * 60 * 1000;
-  const istDateStr = new Date(istDateMs).toISOString().slice(0, 10);
-  const endD = new Date(`${istDateStr}T${endHourStr}:${endMinStr}:00+05:30`);
-  return !isNaN(endD.getTime()) && endD.getTime() > startDate.getTime() ? endD : null;
+  if (amPmMatch) {
+    let endH = parseInt(amPmMatch[1], 10);
+    const endIndicator = amPmMatch[3] ? amPmMatch[3].toLowerCase() : '';
+    const endIsPm = endIndicator.startsWith('p') || endIndicator === 'noon';
+    if (endIsPm && endH < 12) endH += 12;
+    if (!endIsPm && endIndicator && endIndicator !== 'noon' && endH === 12) endH = 0;
+    const endM = amPmMatch[2] ? parseInt(amPmMatch[2], 10) : 0;
+    const endHourStr = String(endH).padStart(2, '0');
+    const endMinStr = String(endM).padStart(2, '0');
+    const istDateMs = startDate.getTime() + (5 * 60 + 30) * 60 * 1000;
+    const istDateStr = new Date(istDateMs).toISOString().slice(0, 10);
+    const endD = new Date(`${istDateStr}T${endHourStr}:${endMinStr}:00+05:30`);
+    if (!isNaN(endD.getTime()) && endD.getTime() > startDate.getTime()) return endD;
+  }
+
+  // --- 2. Try 24-hour range (e.g. "23:59 Hours", "18:00") ---
+  // Match patterns like:
+  //   "to October 4, 2026, 23:59 Hours"
+  //   "to 23:59 Hours"
+  //   "until 18:00"
+  //   "- 17:30"
+  const h24Match = text.match(
+    /(?:to|until|-|–|—)\s*(?:[^\d]{0,40}?)(\d{1,2}):(\d{2})\s*(?:hours?|hrs?)?\s*(?:[^\d]|$)/i
+  );
+  if (h24Match) {
+    const endH = parseInt(h24Match[1], 10);
+    const endM = parseInt(h24Match[2], 10);
+    if (endH >= 0 && endH <= 23 && endM >= 0 && endM <= 59) {
+      const endHourStr = String(endH).padStart(2, '0');
+      const endMinStr = String(endM).padStart(2, '0');
+      // Resolve against start date's IST calendar date
+      const istDateMs = startDate.getTime() + (5 * 60 + 30) * 60 * 1000;
+      const istDateStr = new Date(istDateMs).toISOString().slice(0, 10);
+      const endD = new Date(`${istDateStr}T${endHourStr}:${endMinStr}:00+05:30`);
+      if (!isNaN(endD.getTime()) && endD.getTime() > startDate.getTime()) return endD;
+    }
+  }
+
+  return null;
 }
 
 // ============================================
@@ -604,11 +641,15 @@ export function extractEvents(email: ParsedEmail): ExtractedEvent[] {
     const isBareTestLinkEmail = Boolean(testLinkMatch) && Boolean(testMatch || /\btoday\b|time\s*[-–:]|\d{1,2}:\d{2}\s*(?:am|pm)/i.test(cleanNormalizedText));
 
     if (parsed.date && (hasExplicitDate || isBareTestLinkEmail || /hiring\s+test|coding\s+test\s+invitation|test\s+is\s+scheduled/i.test(cleanNormalizedText))) {
+      // Prefer an explicit end time stated in the email (e.g. "00:01 Hours to 23:59 Hours").
+      // Fall back to the canonical 2-hour duration only when nothing is stated.
+      const explicitTestEndTime = parseExplicitEndTime(snippetForTest, parsed.date)
+        || parseExplicitEndTime(cleanNormalizedText, parsed.date);
       events.push({
         eventType: 'online_test',
         title: /coding/i.test(cleanNormalizedText) ? 'Coding Test' : 'Online Assessment',
         startTime: parsed.date,
-        endTime: deriveEventEndTime('online_test', 'Online Assessment', parsed.date),
+        endTime: explicitTestEndTime || deriveEventEndTime('online_test', 'Online Assessment', parsed.date),
         venue: venue || 'Online Link / Mettl / HackerRank',
         mode: 'online',
         confidence: parsed.hasExplicitTime ? 'high' : 'medium',

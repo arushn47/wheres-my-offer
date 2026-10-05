@@ -48,6 +48,10 @@ describe('classifyShortlistEmail', () => {
     expect(classifyShortlistEmail('Round 2 Assessment - Shortlisted Candidates', '')).toBe('test_r2');
   });
 
+  it('D2: classifies game round / gamified assessment as test_r2', () => {
+    expect(classifyShortlistEmail('Fwd: Axxela-Campus Communication - 2026 -2027', 'Shortlist for game round.')).toBe('test_r2');
+  });
+
   // Scenario E: Round 2 interview
   it('E: classifies round 2 interview', () => {
     expect(classifyShortlistEmail('Second Round Interview Schedule', '')).toBe('interview_r2');
@@ -302,8 +306,8 @@ Physical Interview 31 august - Will be announced later`;
     expect(rounds).not.toBeNull();
     expect(rounds!.map(r => ({ id: r.id, label: r.label, shortLabel: r.shortLabel }))).toEqual([
       { id: 'test_1', label: 'Test 1', shortLabel: 'Test 1' },
-      { id: 'test_2', label: 'Test 2', shortLabel: 'Test 2' },
       { id: 'game_round', label: 'Game Round', shortLabel: 'Game Round' },
+      { id: 'test_2', label: 'Test 2', shortLabel: 'Test 2' },
       { id: 'interview_1', label: 'Interview', shortLabel: 'Interview' },
     ]);
   });

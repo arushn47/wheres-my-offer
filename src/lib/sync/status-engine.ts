@@ -1003,6 +1003,25 @@ export async function processEmailForEventsAndStatus(
     });
   }
 
+  // If candidate was in an open test round (where all applied candidates took the test without a roster)
+  // and has reached test_completed / test_scheduled, that confirms test participation.
+  if (!hasPreviousRoundMatch && predecessorTypes?.includes('test')) {
+    if (existingApp?.status === 'test_completed' || existingApp?.status === 'test_scheduled') {
+      hasPreviousRoundMatch = true;
+    } else if (existingApp?.applied_at || ['applied', 'ppt_scheduled'].includes(existingApp?.status || '')) {
+      const { data: driveEvents } = await supabase
+        .from('events')
+        .select('event_type, start_time')
+        .eq('user_id', userId)
+        .eq('placement_drive_id', targetDriveId)
+        .in('event_type', ['online_test', 'coding_test']);
+
+      if (driveEvents && driveEvents.length > 0) {
+        hasPreviousRoundMatch = true;
+      }
+    }
+  }
+
   // 5. Compute updated application status
   const emailReceivedTime = email.receivedAt ? new Date(email.receivedAt).getTime() : Date.now();
   const appliedTime = existingApp?.applied_at ? new Date(existingApp.applied_at).getTime() : null;
@@ -1106,10 +1125,12 @@ export async function processEmailForEventsAndStatus(
     // Do NOT downgrade companies where the user never applied or has opted out / withdrawn.
     const currentStatus = existingApp?.status || 'not_applied';
     if (!['not_applied', 'registration_open', 'withdrawn', 'declined'].includes(currentStatus)) {
-      // Check if this is a post-test round announcement (interview, next round, selection list, results)
+      // Check if this is a post-test round announcement (interview, next round, selection list, results, game round / test r2)
       const isPostTestRound =
         emailClass === 'interview' ||
         emailClass === 'result' ||
+        announcedRound === 'test_r2' ||
+        /game\s+round|gamified|round\s*2|test\s*2|shortlist\s+for\s+game/i.test(subjLower + ' ' + fullText) ||
         /interview\s+(?:is\s+)?scheduled|technical\s+interview|hr\s+interview|final\s+interview|next\s+round\s+of\s+(?:the\s+)?(?:selection\s+process|selection|process|hiring)|selection\s+process\s+is\s+scheduled|physical\s+selection/i.test(subjLower) ||
         (/next\s+round/i.test(subjLower) && (
           /interview|in[\s-]*person|f2f|resumes?|formal\s+dress|blacklisted/i.test(fullText) ||
@@ -1169,7 +1190,11 @@ export async function processEmailForEventsAndStatus(
       hasExplicitTestScheduleInSubject;
     const hasPpt = extractedEvents.some((e) => /ppt/i.test(e.eventType));
 
-    if (hasTest && isNeoMatched && ['applied', 'ppt_scheduled'].includes(current)) {
+    const hasDirectTestLink = /tests?\.mettl\.com|hackerrank\.com\/test|codility\.com\/c\/|assessment\.shl\.com|hackerearth\.com\/challenges\/test|assessment\.glider\.ai|xobin\.com|hirepro\.in|testgorilla\.com|myamcat\.com/i.test(subjLower + ' ' + fullText);
+    const isAddressedToApplied = /applied\s+(?:students?|candidates?)|all\s+applied|registered\s+students/i.test(subjLower + ' ' + fullText);
+    const isOpenTestAnnouncement = !/shortlist|shortlisted/i.test(subjLower) && (hasDirectTestLink || (isAddressedToApplied && hasTest));
+
+    if (hasTest && (isNeoMatched || isOpenTestAnnouncement) && ['applied', 'ppt_scheduled'].includes(current)) {
       const hasPastTest = extractedEvents.some((e) => {
         if (!['online_test', 'coding_test'].includes(e.eventType) || !e.startTime) return false;
         const endTime = e.endTime || deriveEventEndTime(e.eventType, e.title, e.startTime);

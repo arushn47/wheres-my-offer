@@ -65,6 +65,20 @@ export function getPipelineStages({
       });
     }
 
+    // Guarantee: every pipeline must have at least one interview round.
+    // If the circular only announced PPT + Test so far (interview circular not yet
+    // sent), we still show Interview as a future node so the stepper never jumps
+    // straight from Test → Offer.
+    if (!hasInterviewOrGd) {
+      rounds.push({
+        id: 'interview',
+        label: 'Shortlisted for Interview',
+        shortLabel: 'Interview',
+        roundType: 'interview',
+        roundNumber: 1,
+      });
+    }
+
     const pipeline: Array<{ id: string; label: string; shortLabel: string }> = [
       { id: 'applied', label: 'Applied', shortLabel: 'Applied' },
     ];
@@ -202,24 +216,32 @@ export function StageStepper({
       if (effective.eliminatedStageId) {
         // Try to find exact match in announced rounds
         const exactMatch = announcedRoundsForMap.find(r => r.id === effective.eliminatedStageId);
-        if (exactMatch) return exactMatch.id;
+        if (exactMatch) {
+          return exactMatch.id;
+        }
         // Fall back to type-based match
         if (effective.eliminatedStageId.startsWith('interview')) {
           const r = announcedRoundsForMap.find(r => r.roundType === 'interview');
           if (r) return r.id;
         }
         if (effective.eliminatedStageId.startsWith('test')) {
-          const r = announcedRoundsForMap.find(r => r.roundType === 'test');
-          if (r) return r.id;
+          const testRounds = announcedRoundsForMap.filter(r => r.roundType === 'test');
+          if (testRounds.length > 0) return testRounds[0].id;
         }
       }
       if (effective.effectiveStatus === 'rejected_interview') {
         const r = announcedRoundsForMap.find(r => r.roundType === 'interview');
         if (r) return r.id;
       }
-      if (effective.effectiveStatus === 'rejected_test' || effective.effectiveStatus === 'not_shortlisted') {
-        const r = announcedRoundsForMap.find(r => r.roundType === 'test');
-        if (r) return r.id;
+      if (effective.effectiveStatus === 'rejected_test') {
+        // ✕ sits on the test round itself — that's where the elimination happened.
+        const firstTest = announcedRoundsForMap.find(r => r.roundType === 'test');
+        if (firstTest) return firstTest.id;
+      }
+      if (effective.effectiveStatus === 'not_shortlisted') {
+        // Not shortlisted before the first test — ✕ on the test/entry round itself.
+        const firstTest = announcedRoundsForMap.find(r => r.roundType === 'test');
+        if (firstTest) return firstTest.id;
       }
     }
     // Standard pipeline elimination mapping
@@ -493,10 +515,13 @@ export function StageStepper({
           const isInterviewStage = s.id.startsWith('interview') || announcedRound?.roundType === 'interview';
           const isTestStage = s.id.startsWith('test') || announcedRound?.roundType === 'test';
           const isGdStage = s.id.startsWith('gd') || announcedRound?.roundType === 'gd';
+          const isGameStage = /game/i.test(s.id || s.label || s.shortLabel);
           const isAppliedStage = s.id === 'applied';
 
           if (isInterviewStage) {
             displayLabel = compact ? 'Not Selected' : (effective.eliminationLabel || 'Interviewed · Not Selected');
+          } else if (isGameStage) {
+            displayLabel = compact ? 'Eliminated' : (effective.eliminationLabel && /game/i.test(effective.eliminationLabel) ? effective.eliminationLabel : 'Eliminated in Game Round');
           } else if (isTestStage) {
             if (effective.effectiveStatus === 'not_shortlisted') {
               displayLabel = compact ? 'Screened Out' : (effective.eliminationLabel || 'Not Shortlisted for Test');
@@ -550,7 +575,7 @@ export function StageStepper({
                 </div>
               </div>
               <span
-                title={s.label}
+                title={isEliminated ? (effective.eliminationLabel || displayLabel) : s.label}
                 className={cn(
                   'truncate max-w-full text-center transition-colors',
                   compact ? 'text-[8px] sm:text-[8.5px] tracking-tighter sm:tracking-normal mt-1' : 'text-[10px] mt-1.5 hidden sm:block',

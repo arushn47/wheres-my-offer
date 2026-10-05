@@ -89,7 +89,7 @@ const CLASSIFICATION_RULES: ClassificationRule[] = [
     classification: 'irrelevant',
     confidence: 'high',
     // "Updated Optional Form Available" / "Optional Form Available" — just a Google Form link, no structured data
-    match: (s) => /optional\s+form\s+(?:available|link|updated|now\s+open)/i.test(s),
+    match: (s) => /\boptional\s+form\b/i.test(s),
     reason: 'Optional form notification — no structured drive data, just a Google Form link',
   },
   {
@@ -115,7 +115,7 @@ const CLASSIFICATION_RULES: ClassificationRule[] = [
     classification: 'registration',
     confidence: 'high',
     match: (s) =>
-      /(?:eligible\s+for|eligibility\s+for|optional\s+form|drive\s+registration|drive\s+information|drive\s+update|register|registration|apply\s+(?:now|here|for)|application\s+(?:open|link|form|deadline)|notice\s+inviting\s+application|\bnia\b)/i.test(s) &&
+      /(?:eligible\s+for|eligibility\s+for|drive\s+registration|drive\s+information|drive\s+update|register|registration|apply\s+(?:now|here|for)|application\s+(?:open|link|form|deadline)|notice\s+inviting\s+application|\bnia\b)/i.test(s) &&
       !/(?:shortlist|course|assessment\s+course|mock\s+test|learning\s+contents|practice\s+assessment|nerd\s+season|codeathon)/i.test(s),
     reason: 'Subject announces placement drive eligibility, update, or registration',
   },
@@ -136,8 +136,10 @@ const CLASSIFICATION_RULES: ClassificationRule[] = [
           !/un-?shortlist/i.test(s)) ||
         /(?:find\s+(?:the\s+)?(?:below|attached|enclosed)\s+shortlist|below\s+is\s+the\s+shortlist|find\s+(?:the\s+)?shortlist|list\s+of\s+shortlisted\s+candidates|shortlisted\s+candidates\s+(?:list|sheet|roster)|shortlist\s+for\s+next\s+round|following\s+(?:are\s+the\s+)?(?:shortlisted|selected)\s+candidates|shortlist\s+(?:is\s+as\s+follows|and\s+dates\s+are\s+given\s+below|is\s+given\s+below|is\s+below|below|attached|released|published)|(?:following|below)\s+(?:is\s+)?(?:the\s+)?shortlist)/i.test(b) ||
         /shortlisted\s+candidates\s+will\s+have\s+(?:pre[\s-]*placement\s*talk|\bppt\b|interview|test|assessment|online\s+test)/i.test(b) ||
-        /(?:shortlist|shortlisted\s+candidates)\s+(?:for\s+)?(?:pre[\s-]*placement\s*talk|\bppt\b|interview|test|assessment)/i.test(b) ||
-        /(?:next\s+round\s+of\s+selection|next\s+round)/i.test(s)
+        /(?:shortlist|shortlisted\s+candidates)\s+(?:for\s+)?(?:pre[\s-]*placement\s*talk|\bppt\b|interview|test|assessment|online\s+test|game\s+round|gamified(?:\s+assessment)?|next\s+round|further\s+round)/i.test(b) ||
+        /\bshortlist\s+for\s+[a-z0-9\s_-]+round\b/i.test(b) ||
+        /(?:next\s+round\s+of\s+selection(?:\s+process)?)\b/i.test(s) ||
+        (/next\s+round/i.test(s) && /(?:shortlist|selected\s+candidates?|candidate\s+list|roster)/i.test(s + ' ' + b))
       );
     },
     reason: 'Email announces candidate shortlist or next round selection',
@@ -451,7 +453,7 @@ export const KEY_NOISE_WORDS = new Set([
   'pvt', 'ltd', 'limited', 'private', 'inc', 'corp', 'corporation', 'llc', 'llp', 'co', 'company',
   'services', 'service', 'financial', 'technologies', 'technology', 'tech', 'solutions', 'solution',
   'consulting', 'consultancy', 'holdings', 'holding', 'group', 'enterprises', 'enterprise',
-  'international', 'global', 'management', 'advisory', 'capital', 'systems', 'system', 'labs', 'lab', 'analytics',
+  'international', 'global', 'management', 'advisory', 'capital', 'systems', 'system', 'labs', 'lab', 'analytics', 'research',
 ]);
 
 /**
@@ -541,6 +543,8 @@ const SUBJECT_COMPANY_PATTERNS: RegExp[] = [
   /^((?:[A-Za-z0-9&\s\-\.]|\([^)]+\))+?)\s*(?:\([^)]+\))?\s*[-–—]?\s*(?:online\s+test|assessment|coding\s+test|physical\s+selection|selection\s+process|next\s+round|ppt|interview|selection\s+list|application\s+registration|test\s+link|registration\s+link)/i,
   // "Thanks for taking the Assessment Goldman Sachs UG Summer Internship 2027 - Pooled STEM"
   /(?:thanks\s+for\s+taking\s+(?:the\s+)?assessment|assessment\s+completed)\s+((?:[A-Za-z0-9&\s\-\.]|\([^)]+\))+?)\s+(?:ug|summer|internship|placement|drive|pooled)/i,
+  // "Axxela-Campus Communication - 2026 -2027" / "Company Name - Campus Communication"
+  /^((?:[A-Za-z0-9&\s\-\.]|\([^)]+\))+?)\s*[-–—]?\s*campus\s+communication/i,
   // "Company Name Super Dream Internship..." / "WTW Dream Offer..." / "RFPIO India Pvt Ltd (DBA Responsive)..."
   /^((?:[A-Za-z0-9&\s\-\.]|\([^)]+\))+?)\s*[-–—]?\s*(?:super\s+dream|dream|regular)\s*[-–—]?\s*(?:internship|placement|offer|drive|hiring)/i,
   // "Report Immediately : MUFG PPT"
@@ -831,10 +835,10 @@ export function extractCompanyAliases(rawName: string, canonicalName: string, dr
 
   // ROOT STEM EXTRACTION: Strip generic corporate suffixes to generate a shorter root alias.
   // e.g. "Unilever Industries" → also aliases "unilever"
-  const CORPORATE_SUFFIXES_REGEX = /\s+(?:financial\s+services|financial|industries|technologies|technology|services|service|solutions|solution|labs|lab|consulting|consultancy|holdings|holding|group|enterprises|enterprise|management|advisory|capital|systems|system|analytics|pvt|ltd|limited|inc|llc|global|international|private|corp|corporation)\b/gi;
+  const CORPORATE_SUFFIXES_REGEX = /\s+(?:financial\s+services|financial|industries|technologies|technology|services|service|solutions|solution|labs|lab|consulting|consultancy|holdings|holding|group|enterprises|enterprise|management|advisory|capital|systems|system|analytics|research|pvt|ltd|limited|inc|llc|global|international|private|corp|corporation)\b/gi;
   let currentStem = canonicalName;
   while (CORPORATE_SUFFIXES_REGEX.test(currentStem)) {
-    currentStem = currentStem.replace(CORPORATE_SUFFIXES_REGEX, '').trim();
+    currentStem = currentStem.replace(CORPORATE_SUFFIXES_REGEX, '').replace(/\s*(?:&|and)\s*$/i, '').trim();
     if (
       currentStem.length >= 3 &&
       currentStem.toLowerCase() !== canonicalName.toLowerCase() &&

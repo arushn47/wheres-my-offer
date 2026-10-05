@@ -992,7 +992,21 @@ export default function CompanyDetailClient({
                 company.application.status !== 'unknown'
               );
               const hasRosterAttachment = isShortlistRosterAttachment(email.attachmentName);
+
+              // A Google Sheet / Spreadsheet link embedded in the snippet/body is verifiable roster evidence.
+              const hasGsheetLink = /docs\.google\.com\/spreadsheets/i.test(email.snippet || '');
+
+              // An email can only produce a "Not listed in shortlist" badge if it contains
+              // a VERIFIABLE ROSTER — an Excel/CSV attachment, a Google Sheet link, or a
+              // selection-list announcement where the roster exists and was checked.
+              // Plain announcement emails ("Axxela game round tomorrow", "700+ qualified") that
+              // happen to be classified as shortlist but carry NO attachment and NO sheet link
+              // MUST NOT trigger a false-negative "not shortlisted" banner.
+              const hasVerifiableRoster = hasRosterAttachment || hasGsheetLink ||
+                /\.xlsx|\.xls|\.csv/i.test(email.attachmentName || '');
+
               const isExplicitShortlistEmail = !isRegCircular && !isAppliedOrOptInRoster(email) &&
+                hasVerifiableRoster &&
                 (
                   email.classification === 'shortlist' ||
                   email.classification === 'selected' ||

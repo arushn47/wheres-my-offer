@@ -753,6 +753,9 @@ async function processSingleMessage(
 
     // E2.1: Discard irrelevant personal LMS/marketing emails immediately without inserting into DB
     if (isPersonal && classification.classification === 'irrelevant') {
+      if (ctx.existingEmailId) {
+        await supabase.from('personal_emails').delete().eq('id', ctx.existingEmailId);
+      }
       ctx.liveTracker.processedMessages++;
       return result;
     }

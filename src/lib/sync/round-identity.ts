@@ -84,7 +84,7 @@ export function classifyShortlistEmail(
 
   // Test — detect round 2 BEFORE generic test
   if (
-    /(?:round\s*2|second\s+(?:round\s+of\s+)?(?:online\s+)?(?:test|assessment)|assessment\s*(?:round\s*)?(?:ii|2)|r2\s*[–\-]?\s*(?:test|assessment))/i.test(text)
+    /(?:round\s*2|second\s+(?:round\s+of\s+)?(?:online\s+)?(?:test|assessment)|assessment\s*(?:round\s*)?(?:ii|2)|r2\s*[–\-]?\s*(?:test|assessment)|game\s+round|gamified\s+assessment)/i.test(text)
   ) return 'test_r2';
 
   if (
@@ -465,7 +465,7 @@ export function parseRecruitmentProcess(text: string): AnnouncedRound[] | null {
 
     if (/\b(ppt|pre[\s-]*placement)\b/i.test(cleanLine)) {
       roundType = 'ppt';
-    } else if (/\b(game\s*round)\b/i.test(cleanLine)) {
+    } else if (/\b(game\s*round|gamified(?:\s+assessment|\s+round)?)\b/i.test(cleanLine)) {
       roundType = 'other';
       isGameRound = true;
     } else if (/\b(hackathon)\b/i.test(cleanLine)) {
@@ -614,28 +614,44 @@ export function sanitizeAnnouncedRounds(rounds: AnnouncedRound[]): AnnouncedRoun
   }
 
   // Canonical placement recruitment round order:
-  // PPT (1) -> Test (2) -> GD (3) -> Other/Game/Hackathon (4) -> Interview (5)
-  // An Interview MUST NEVER precede a Test unless explicitly dated strictly earlier.
-  const TYPE_ORDER: Record<AnnouncedRound['roundType'], number> = {
-    ppt: 1,
-    test: 2,
-    gd: 3,
-    other: 4,
-    interview: 5,
+  // 1. PPT / Pre-Placement Talk
+  // 2. Test 1 / Online Assessment
+  // 3. Game Round / Gamified Assessment (conducted after Test 1 and before in-campus Test 2)
+  // 4. Test 2+ / In-Campus Assessment
+  // 5. GD / Group Discussion
+  // 6. Other (Hackathon, etc.)
+  // 7. Interview (Interview MUST NEVER precede a Test)
+  const getRoundSortOrder = (r: AnnouncedRound): number => {
+    if (r.roundType === 'ppt') return 10;
+    if (r.roundType === 'test') {
+      const num = r.roundNumber ?? (
+        r.id.match(/_(\d+)$/)?.[1]
+          ? parseInt(r.id.match(/_(\d+)$/)![1], 10)
+          : (r.label.match(/\b([2-9]|10)\b/)?.[1] ? parseInt(r.label.match(/\b([2-9]|10)\b/)![1], 10) : 1)
+      );
+      return num === 1 ? 20 : 40;
+    }
+    if (/game/i.test(r.id || r.label || r.shortLabel)) {
+      return 30;
+    }
+    if (r.roundType === 'gd') return 50;
+    if (r.roundType === 'other') return 60;
+    if (r.roundType === 'interview') return 70 + (r.roundNumber ?? 1);
+    return 99;
   };
 
   normalized.sort((a, b) => {
+    const orderA = getRoundSortOrder(a);
+    const orderB = getRoundSortOrder(b);
+    if (orderA !== orderB) {
+      return orderA - orderB;
+    }
     if (a.dateStr && b.dateStr) {
       const timeA = parseScheduledDateInSubject(a.dateStr);
       const timeB = parseScheduledDateInSubject(b.dateStr);
       if (timeA && timeB && timeA !== timeB) {
         return timeA - timeB;
       }
-    }
-    const orderA = TYPE_ORDER[a.roundType] ?? 99;
-    const orderB = TYPE_ORDER[b.roundType] ?? 99;
-    if (orderA !== orderB) {
-      return orderA - orderB;
     }
     return (a.roundNumber ?? 1) - (b.roundNumber ?? 1);
   });
@@ -812,7 +828,8 @@ export function parseAnnouncedProcessToken(notes: string | null | undefined): An
 }
 
 function parseScheduledDateInSubject(sub: string): number | null {
-  const m1 = sub.match(/scheduled\s+on\s+[([]?(\d{1,2}(?:st|nd|rd|th)?)\s+([A-Za-z]+)(?:\s+(20\d{2}|\b2[4-7]\b))?/i);
+  if (!sub) return null;
+  const m1 = sub.match(/(?:scheduled\s+on\s+[([]?|^|\b)(\d{1,2}(?:st|nd|rd|th)?)\s+([A-Za-z]+)(?:\s+(20\d{2}|\b2[4-7]\b))?/i);
   if (m1) {
     const day = m1[1].replace(/\D/g, '');
     const month = m1[2];
@@ -820,7 +837,7 @@ function parseScheduledDateInSubject(sub: string): number | null {
     const p = Date.parse(`${day} ${month} ${year} UTC`);
     if (!isNaN(p)) return p;
   }
-  const m2 = sub.match(/scheduled\s+on\s+[([]?(\d{1,2})[-/.](\d{1,2})[-/.](20\d{2}|\b2[4-7]\b)/i);
+  const m2 = sub.match(/(?:scheduled\s+on\s+[([]?|^|\b)(\d{1,2})[-/.](\d{1,2})[-/.](20\d{2}|\b2[4-7]\b)/i);
   if (m2) {
     const day = parseInt(m2[1], 10);
     const month = parseInt(m2[2], 10) - 1;

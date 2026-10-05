@@ -347,7 +347,10 @@ export async function scanSharedCollegeCandidateMatches(
     if (number) driveByNumber.set(number, drive.id);
     const company = companyMap.get(drive.company_id);
     if (company) {
-      for (const name of [company.name, ...(company.aliases || [])]) {
+      const namesToIndex = [company.name, ...(company.aliases || [])];
+      const rootStem = company.name.replace(/\s+(?:research|analytics|technologies|technology|services|service|solutions|solution|consulting|group|capital|systems|system|labs|lab)\b/gi, '').replace(/\s*(?:&|and)\s*$/i, '').trim();
+      if (rootStem && rootStem.length >= 4 && !namesToIndex.includes(rootStem)) namesToIndex.push(rootStem);
+      for (const name of namesToIndex) {
         const key = name.toLowerCase().trim();
         const matches = driveByCompanyName.get(key) || [];
         matches.push(drive.id);
