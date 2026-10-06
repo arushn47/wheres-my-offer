@@ -20,6 +20,7 @@
 export type RoundType =
   | 'test'          // online/coding assessment — first or only round
   | 'test_r2'       // explicitly labeled Round 2 assessment
+  | 'game'          // gamified assessment, distinct from Test 2
   | 'gd'            // group discussion — distinct from PPT and interview
   | 'ppt'           // PPT shortlist (only when candidates are named — rare)
   | 'post_ppt'      // Screened out after PPT (attended PPT, not shortlisted for test)
@@ -82,15 +83,18 @@ export function classifyShortlistEmail(
     (/next\s+round/i.test(subj) && /interview|in[\s-]*person|f2f/i.test(body))
   ) return 'interview';
 
+  if (/game\s+round|gamified\s+assessment/i.test(text)) return 'game';
+
   // Test — detect round 2 BEFORE generic test
   if (
-    /(?:round\s*2|second\s+(?:round\s+of\s+)?(?:online\s+)?(?:test|assessment)|assessment\s*(?:round\s*)?(?:ii|2)|r2\s*[–\-]?\s*(?:test|assessment)|game\s+round|gamified\s+assessment)/i.test(text)
+    /(?:round\s*2|second\s+(?:round\s+of\s+)?(?:online\s+)?(?:test|assessment)|(?:test|assessment)\s*(?:round\s*)?(?:ii|2)\b|r2\s*[–\-]?\s*(?:test|assessment))/i.test(text)
   ) return 'test_r2';
 
   if (
     /online\s+test|coding\s+test|assessment|test\s+(?:shortlist|link|invitation|schedule)/i.test(subj) ||
     (/shortlist/i.test(subj) && /(?:online\s+)?tests?|assessment|coding/i.test(text)) ||
-    /shortlist\s+and\s+dates/i.test(subj)
+    /shortlist\s+and\s+dates/i.test(subj) ||
+    /\b(?:test|assessment)\s*(?:[1-9]\s*)?[:]|\b(?:test|assessment)\s+(?:is\s+)?scheduled|fresh\s+link\s+for\s+test/i.test(body)
   ) return 'test';
 
   // PPT shortlist (unusual — only when candidates are explicitly named)
@@ -169,6 +173,8 @@ export function getPredecessorRequirement(
 
     case 'test_r2':
       // "Round 2" inherently asserts Round 1 was a prerequisite.
+      return ['test'];
+    case 'game':
       return ['test'];
 
     case 'gd':
@@ -287,6 +293,7 @@ export function isRescheduleEmail(subject: string, body: string): boolean {
 export const ELIMINATION_LABELS: Partial<Record<RoundType, string>> = {
   test:         'Eliminated in Test Round',
   test_r2:      'Eliminated in Round 2 Assessment',
+  game:         'Eliminated in Game Round',
   gd:           'Eliminated in Group Discussion',
   ppt:          'Not Shortlisted for PPT',
   post_ppt:     'Not Shortlisted (Post PPT)',

@@ -3,6 +3,11 @@
  */
 
 export interface GSheetMatchResult {
+  extractedRows?: Array<{ sheetName: string; rows: string[][] }>;
+  sourceUrl?: string;
+  contentHash?: string;
+  fetchedAt?: string;
+  rowNumber?: number;
   matched: boolean;
   sheetName: string;
   details: string;
@@ -62,7 +67,8 @@ function parseDateFromText(text: string): Date | null {
   return new Date(year, month, day);
 }
 
-const gsheetCache = new Map<string, GSheetMatchResult | null>();
+const gsheetCache = new Map<string, { value: GSheetMatchResult; expiresAt: number }>();
+const CACHE_TTL_MS = 60_000;
 
 /**
  * Scans a Google Sheet pubhtml link for the candidate's identifiers.
@@ -72,6 +78,8 @@ import {
   matchesCandidateRow,
   type UserCandidateIdentity,
 } from '@/lib/sync/user-identity';
+import { isNonShortlistRoster, isPositiveRosterRow } from './roster-policy';
+import { createHash } from 'node:crypto';
 
 export async function scanGoogleSheetForCandidate(
   pubhtmlUrl: string,
@@ -87,9 +95,11 @@ export async function scanGoogleSheetForCandidate(
   });
 
   const cacheKey = `${pubhtmlUrl}::${identity.emails.join(',')}::${identity.neoId || ''}::${identity.regNo || ''}::${identity.fullName || ''}`;
-  if (gsheetCache.has(cacheKey)) {
-    return gsheetCache.get(cacheKey) || null;
-  }
+  const cached = gsheetCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
+  gsheetCache.delete(cacheKey);
+  if (gsheetCache.size > 200) gsheetCache.delete(gsheetCache.keys().next().value!);
+  const cacheResult = (value: GSheetMatchResult) => gsheetCache.set(cacheKey, { value, expiresAt: Date.now() + CACHE_TTL_MS });
 
   try {
     const controller = new AbortController();
@@ -98,7 +108,6 @@ export async function scanGoogleSheetForCandidate(
     const res = await fetch(pubhtmlUrl, { signal: controller.signal });
     clearTimeout(timeout);
     if (!res.ok) {
-      gsheetCache.set(cacheKey, null);
       return null;
     }
     const html = await res.text();
@@ -117,7 +126,11 @@ export async function scanGoogleSheetForCandidate(
 
     const sheetsToScan = sheets.length > 0 ? sheets : [{ name: 'Shortlist', pageUrl: pubhtmlUrl, gid: '0' }];
 
+    const extractedRows: Array<{ sheetName: string; rows: string[][] }> = [];
+    let incomplete = false;
+    let parsedTable = false;
     for (const s of sheetsToScan) {
+      if (isNonShortlistRoster(s.name)) continue;
       let sheetHtml = html;
       if (sheets.length > 0 && s.pageUrl !== pubhtmlUrl) {
         try {
@@ -127,35 +140,24 @@ export async function scanGoogleSheetForCandidate(
           try {
             tabUrl = new URL(s.pageUrl, pubhtmlUrl);
           } catch {
-            continue;
+            incomplete = true; continue;
           }
           if (tabUrl.protocol !== 'https:' || tabUrl.hostname !== 'docs.google.com') {
-            continue;
+            incomplete = true; continue;
           }
           const sRes = await fetch(tabUrl, { signal: tabCtrl.signal, redirect: 'error' });
           clearTimeout(tabTimeout);
-          if (!sRes.ok) continue;
+          if (!sRes.ok) { incomplete = true; continue; }
           sheetHtml = await sRes.text();
         } catch {
+          incomplete = true;
           continue;
         }
       }
+      if (!/<table\b/i.test(sheetHtml)) { incomplete = true; continue; }
+      parsedTable = true;
 
-      const sheetLower = sheetHtml.toLowerCase();
-      const hasEmail = identity.emails.some((e) => e && sheetLower.includes(e));
-      const hasNeoId = Boolean(identity.neoId && identity.neoId.length >= 4 && sheetHtml.toUpperCase().includes(identity.neoId));
-      const hasRegNo = Boolean(identity.regNo && identity.regNo.length >= 7 && sheetHtml.toUpperCase().includes(identity.regNo));
-      const hasFullName = Boolean(identity.fullName && identity.fullName.length >= 4 && sheetLower.includes(identity.fullName.toLowerCase()));
-      const hasSplitName = Boolean(
-        identity.firstName &&
-        identity.lastName &&
-        identity.firstName.length >= 3 &&
-        identity.lastName.length >= 3 &&
-        sheetLower.includes(identity.firstName.toLowerCase()) &&
-        sheetLower.includes(identity.lastName.toLowerCase())
-      );
-
-      if (hasEmail || hasNeoId || hasRegNo || hasFullName || hasSplitName) {
+      {
         // Parse actual table rows with cells to inspect allocation columns
         const trRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
         let trMatch;
@@ -171,6 +173,9 @@ export async function scanGoogleSheetForCandidate(
             rows.push(cells);
           }
         }
+
+        extractedRows.push({ sheetName: s.name, rows });
+        if (!rows.length) { incomplete = true; continue; }
 
         // Identify header row with allocation columns (Venue, Seat, Room, Lab, Slot)
         const headerRow = rows.find((r) =>
@@ -190,7 +195,7 @@ export async function scanGoogleSheetForCandidate(
         let matchedRowInfo: { row: string[]; matchedValue: string } | null = null;
         for (const row of rows) {
           const m = matchesCandidateRow(row, identity);
-          if (m.matched) {
+          if (m.matched && isPositiveRosterRow(row, headerRow)) {
             matchedRowInfo = { row, matchedValue: m.matchedValue };
             break;
           }
@@ -217,6 +222,11 @@ export async function scanGoogleSheetForCandidate(
           const eventDate = parseDateFromText(s.name) || parseDateFromText(userRow.join(' ')) || undefined;
 
           const resObj: GSheetMatchResult = {
+            extractedRows,
+            sourceUrl: pubhtmlUrl,
+            contentHash: createHash('sha256').update(sheetHtml).digest('hex'),
+            fetchedAt: new Date().toISOString(),
+            rowNumber: rows.indexOf(userRow) + 1,
             matched: true,
             sheetName: s.name,
             details: `Matched in Google Sheet (${s.name}): ${userRow.filter(Boolean).join(', ')}`,
@@ -224,18 +234,18 @@ export async function scanGoogleSheetForCandidate(
             slot,
             eventDate,
           };
-          gsheetCache.set(cacheKey, resObj);
+          cacheResult(resObj);
           return resObj;
         }
       }
     }
 
-    const noMatch: GSheetMatchResult = { matched: false, sheetName: '', details: '', matchedValue: '' };
-    gsheetCache.set(cacheKey, noMatch);
+    if (incomplete || !parsedTable) return null;
+    const noMatch: GSheetMatchResult = { extractedRows, matched: false, sheetName: '', details: '', matchedValue: '', sourceUrl: pubhtmlUrl, contentHash: createHash('sha256').update(html).digest('hex'), fetchedAt: new Date().toISOString() };
+    cacheResult(noMatch);
     return noMatch;
   } catch (err) {
     console.error('Error scanning Google Sheet:', err);
-    gsheetCache.set(cacheKey, null);
     return null;
   }
 }

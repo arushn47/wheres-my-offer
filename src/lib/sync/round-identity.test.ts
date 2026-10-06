@@ -48,8 +48,8 @@ describe('classifyShortlistEmail', () => {
     expect(classifyShortlistEmail('Round 2 Assessment - Shortlisted Candidates', '')).toBe('test_r2');
   });
 
-  it('D2: classifies game round / gamified assessment as test_r2', () => {
-    expect(classifyShortlistEmail('Fwd: Axxela-Campus Communication - 2026 -2027', 'Shortlist for game round.')).toBe('test_r2');
+  it('D2: classifies game round independently of test round 2', () => {
+    expect(classifyShortlistEmail('Fwd: Axxela-Campus Communication - 2026 -2027', 'Shortlist for game round.')).toBe('game');
   });
 
   // Scenario E: Round 2 interview

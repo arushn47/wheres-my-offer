@@ -1,4 +1,5 @@
 import type { createAdminClient } from '@/lib/supabase/admin';
+import { normalizeIdentityToken } from './roster-policy';
 
 export interface UserCandidateIdentity {
   userId: string;
@@ -19,6 +20,10 @@ export interface UserCandidateIdentity {
  * Normalizes an identity string: strips accents, non-breaking spaces, punctuation,
  * collapses whitespace, and converts to uppercase.
  */
+export function getStrongIdentityTokens(identity: UserCandidateIdentity): string[] {
+  return Array.from(new Set([identity.neoId, identity.regNo, ...identity.emails].filter((token): token is string => Boolean(token))));
+}
+
 export function normalizeToken(val: unknown): string {
   if (val === null || val === undefined) return '';
   return String(val)
@@ -196,7 +201,8 @@ export async function loadUserCandidateIdentity(
  */
 export function matchesCandidateRow(
   cells: (string | null | undefined)[],
-  identity: UserCandidateIdentity
+  identity: UserCandidateIdentity,
+  allowNameOnly = false
 ): { matched: boolean; matchedValue: string } {
   const cleanCells = cells.map((c) => (c ? String(c).trim() : ''));
   const fullRowText = cleanCells.filter(Boolean).join(' ');
@@ -206,7 +212,7 @@ export function matchesCandidateRow(
   // 1. Neo ID exact cell or word match
   if (identity.neoId && identity.neoId.length >= 4) {
     for (const cell of cleanCells) {
-      if (cell.toUpperCase() === identity.neoId) {
+      if (normalizeIdentityToken(cell) === normalizeIdentityToken(identity.neoId)) {
         return { matched: true, matchedValue: identity.neoId };
       }
     }
@@ -238,7 +244,9 @@ export function matchesCandidateRow(
     }
   }
 
-  // 4. Full Name in a single cell
+  if (!allowNameOnly) return { matched: false, matchedValue: '' };
+
+  // 4. Name-only matches are for review, never automatic shortlist evidence.
   if (identity.fullName && identity.fullName.length >= 4) {
     const fullNameUpper = identity.fullName.toUpperCase();
     const normalizedTarget = normalizeToken(fullNameUpper);
@@ -290,7 +298,8 @@ export function matchesCandidateRow(
  */
 export function matchesCandidateText(
   text: string,
-  identity: UserCandidateIdentity
+  identity: UserCandidateIdentity,
+  allowNameOnly = false
 ): { matched: boolean; matchedValue: string | null } {
   if (!text) return { matched: false, matchedValue: null };
 
@@ -309,10 +318,7 @@ export function matchesCandidateText(
   if (identity.neoId && identity.neoId.length >= 4) {
     const cleanNeoId = identity.neoId;
     const directRegex = new RegExp(`\\b${cleanNeoId}\\b`);
-    const flexibleRegex = new RegExp(
-      `\\b${cleanNeoId.replace(/[0O]/g, '[0O]').replace(/[1I]/g, '[1I]')}\\b`
-    );
-    if (directRegex.test(upperText) || flexibleRegex.test(upperText)) {
+    if (directRegex.test(upperText)) {
       return { matched: true, matchedValue: cleanNeoId };
     }
   }
@@ -325,7 +331,9 @@ export function matchesCandidateText(
     }
   }
 
-  // 3. Full name check in body text
+  if (!allowNameOnly) return { matched: false, matchedValue: null };
+
+  // 3. Full name check for review only
   // Requires at least 2 words (e.g. "Arush Nandakumar Menon" or "Arush Menon") with word boundaries
   if (
     identity.firstName &&

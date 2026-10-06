@@ -1,4 +1,5 @@
 import * as XLSX from 'xlsx';
+import { isNonShortlistRoster, isPositiveRosterRow, normalizeIdentityToken } from './roster-policy';
 
 export interface MatchResult {
   isMatched: boolean;
@@ -24,11 +25,7 @@ export interface WorkbookSheetRows {
  */
 export function normalizeStudentId(id: string | number | null | undefined): string {
   if (id === null || id === undefined) return '';
-  return id
-    .toString()
-    .replace(/[\u00A0\s\-_.]/g, '')
-    .toUpperCase()
-    .trim();
+  return normalizeIdentityToken(id);
 }
 
 /**
@@ -73,10 +70,12 @@ export function searchRollNumberInWorkbookRows(
   let totalRows = 0;
   const orderedSheets = [...sheets].sort((a, b) => getSheetPriority(a.sheetName) - getSheetPriority(b.sheetName));
   for (const sheet of orderedSheets) {
+    if (isNonShortlistRoster(sheet.sheetName)) continue;
     totalRows += sheet.rows.length;
     for (let rowIndex = 0; rowIndex < sheet.rows.length; rowIndex++) {
       const row = sheet.rows[rowIndex];
       if (!Array.isArray(row)) continue;
+      if (!isPositiveRosterRow(row, sheet.rows[0])) continue;
       for (let columnIndex = 0; columnIndex < row.length; columnIndex++) {
         if (normalizeStudentId(row[columnIndex] as string | number) !== normalizedTarget) continue;
         let headerRowIndex: number | null = null;
@@ -225,6 +224,7 @@ export function searchRollNumberInWorkbook(
   let totalRows = 0;
 
   for (const sheetName of sortedSheetNames) {
+    if (isNonShortlistRoster(sheetName)) continue;
     const worksheet = workbook.Sheets[sheetName];
     if (!worksheet || !worksheet['!ref']) continue;
 
@@ -329,7 +329,7 @@ export function searchRollNumberInWorkbook(
         if (r < startRow || row[idColumnIndex] === undefined) continue;
 
         const cellValue = normalizeStudentId(row[idColumnIndex]);
-        if (cellValue === normalizedTarget) {
+        if (cellValue === normalizedTarget && isPositiveRosterRow(row, headerRow)) {
           const colLetter = XLSX.utils.encode_col(idColumnIndex);
           const additional = extractRowData(headerRow, row);
           if (currentSectionBanner) {
@@ -370,7 +370,7 @@ export function searchRollNumberInWorkbook(
 
         for (let c = 0; c < row.length; c++) {
           const cellValue = normalizeStudentId(row[c]);
-          if (cellValue === normalizedTarget) {
+          if (cellValue === normalizedTarget && isPositiveRosterRow(row, headerRow)) {
             const colLetter = XLSX.utils.encode_col(c);
             const colName =
               headerRow && headerRow[c]

@@ -36,10 +36,9 @@ import { cleanLocationString } from '@/lib/sync/locations';
 import { cleanRoleTitle } from '@/lib/sync/events';
 import { useSync } from '@/context/sync-context';
 import {
-  getProvisionalStatusLabel,
   getVisibleApplicationStatus,
-  isShortlistVerificationPending,
 } from '@/lib/sync/status-display';
+import { type RoundStatusDecision } from '@/lib/sync/round-status';
 
 export interface CompanyWithDetails {
   id: string;
@@ -67,7 +66,7 @@ export interface CompanyWithDetails {
     registration_deadline?: string | null;
     status_source_email_at?: string | null;
   } | null;
-  shortlistVerificationState?: string | null;
+  roundDecisions?: RoundStatusDecision[];
   latestEvent: {
     id: string;
     event_type: string;
@@ -105,13 +104,7 @@ const FILTERS = [
  * Detects if a placement drive represents an eliminated / rejected application
  * at any stage (interview, test, post-PPT, or screening).
  */
-export const isCompanyEliminated = (comp: CompanyWithDetails, isSyncing = false, statusUpdatesPending = false): boolean => {
-  const rawStatus = (comp.application?.status || '').toLowerCase().trim();
-  const notes = (comp.application?.notes || '').toLowerCase();
-
-
-  if (isEliminatedStatus(rawStatus)) return true;
-  if (/eliminated|rejected|not\s*shortlisted|screened\s*out/i.test(notes)) return true;
+export const isCompanyEliminated = (comp: CompanyWithDetails, _isSyncing = false, _statusUpdatesPending = false): boolean => {
 
   const eff = getEffectiveStage(
     comp.application?.status || 'applied',
@@ -151,74 +144,12 @@ export const isCompanyRegistrationOpen = (comp: CompanyWithDetails): boolean => 
  * Priority scoring for eliminated drives in "Not Shortlisted":
  * Priority: Eliminated in Interview (4) -> In Test (3) -> Not Shortlisted for Test after PPT (2) -> Screening only / for PPT (1)
  */
-export const getEliminationPriority = (comp: CompanyWithDetails, isSyncing = false, statusUpdatesPending = false): number => {
-  const rawStatus = (comp.application?.status || '').toLowerCase().trim();
-  if (
-    (isSyncing || statusUpdatesPending || isShortlistVerificationPending(comp.shortlistVerificationState)) &&
-    !comp.application?.manual_override && rawStatus === 'not_shortlisted'
-  ) return 0;
-  const notes = (comp.application?.notes || '').toLowerCase();
-  const eff = getEffectiveStage(
-    comp.application?.status || 'applied',
-    comp.latestEvent,
-    comp.events,
-    comp.application?.notes,
-    comp.application?.manual_override
-  );
-  const s = eff.effectiveStatus.toLowerCase();
-  const subtitle = (eff.statusSubtitle || '').toLowerCase();
-
-  // Tier 4: Eliminated in Interview Round
-  if (
-    eff.eliminatedStage === 4 ||
-    s === 'rejected_interview' ||
-    s === 'interview_eliminated' ||
-    rawStatus === 'rejected_interview' ||
-    rawStatus === 'interview_eliminated' ||
-    subtitle.includes('interviewed') ||
-    /eliminated.*interview|interview.*eliminated|interviewed.*not\s*selected|rejected.*interview|interview.*rejected/i.test(notes) ||
-    (eff.hasInterview && eff.isInterviewCompleted && (isEliminatedStatus(s) || isEliminatedStatus(rawStatus)))
-  ) {
-    return 4;
-  }
-
-  // Tier 3: Eliminated in Test Round
-  if (
-    eff.eliminatedStage === 3 ||
-    s === 'rejected_test' ||
-    s === 'test_eliminated' ||
-    rawStatus === 'rejected_test' ||
-    rawStatus === 'test_eliminated' ||
-    subtitle.includes('test round') ||
-    /eliminated.*test|test.*eliminated|rejected.*test|test.*rejected/i.test(notes) ||
-    (eff.hasTest && eff.isTestCompleted && (isEliminatedStatus(s) || isEliminatedStatus(rawStatus)))
-  ) {
-    return 3;
-  }
-
-  // Tier 2: Not Shortlisted for Test after PPT
-  if (
-    subtitle.includes('post-ppt') ||
-    subtitle.includes('post ppt') ||
-    /after\s*ppt|post[- ]ppt|ppt.*not\s*shortlisted|not\s*shortlisted.*after\s*ppt/i.test(notes) ||
-    (eff.hasPpt && (eff.eliminatedStage === 2 || eff.furthestPassedStage >= 1 || isEliminatedStatus(s) || isEliminatedStatus(rawStatus)))
-  ) {
-    return 2;
-  }
-
-  // Tier 1: Not Shortlisted at screening only / for PPT
-  if (
-    isCompanyEliminated(comp, isSyncing, statusUpdatesPending) ||
-    isEliminatedStatus(s) ||
-    isEliminatedStatus(rawStatus) ||
-    subtitle.includes('eligibility') ||
-    subtitle.includes('screened out') ||
-    /not\s*shortlisted|screened\s*out|rejected/i.test(notes)
-  ) {
-    return 1;
-  }
-
-  return 0;
+export const getEliminationPriority = (comp: CompanyWithDetails, _isSyncing = false, _statusUpdatesPending = false): number => {
+  const effective = getEffectiveStage(comp.application?.status || 'not_applied', comp.latestEvent, comp.events, comp.application?.notes, comp.application?.manual_override);
+  if (effective.effectiveStatus === 'rejected_interview') return 4;
+  if (effective.effectiveStatus === 'rejected_test') return 3;
+  if (effective.effectiveStatus === 'not_shortlisted_post_ppt') return 2;
+  return isEliminatedStatus(effective.effectiveStatus) ? 1 : 0;
 };
 
 const getFutureRegistrationDeadline = (company: CompanyWithDetails): Date | null => {
@@ -381,7 +312,7 @@ export default function CompaniesClient({
   companies,
   userCampus = 'VIT Bhopal',
 }: CompaniesClientProps) {
-  const { isSyncing, statusUpdatesPending, statusUpdatePhase, syncProgress } = useSync();
+  const { isSyncing, statusUpdatesPending } = useSync();
   const searchParams = useSearchParams();
 
   // Pure local React state initialized from URL params
@@ -427,9 +358,8 @@ export default function CompaniesClient({
       .filter((c) => {
         const rawStatus = c.application?.status || 'applied';
         const { effectiveStatus } = getEffectiveStage(rawStatus, c.latestEvent, c.events, c.application?.notes, c.application?.manual_override);
-        const driveVerificationPending = isShortlistVerificationPending(c.shortlistVerificationState);
-        const visibleStatus = getVisibleApplicationStatus(effectiveStatus, isSyncing, Boolean(c.application?.manual_override), statusUpdatesPending || driveVerificationPending);
-        return matchFilter(visibleStatus, filter, c, isSyncing, statusUpdatesPending || driveVerificationPending);
+        const visibleStatus = getVisibleApplicationStatus(effectiveStatus, isSyncing, Boolean(c.application?.manual_override), statusUpdatesPending);
+        return matchFilter(visibleStatus, filter, c, isSyncing, statusUpdatesPending);
       })
       .filter((c) => {
         if (!q.trim()) return true;
@@ -559,8 +489,8 @@ export default function CompaniesClient({
       // Sort by elimination priority:
       // Priority: Eliminated in Interview (4) -> In Test (3) -> Not Shortlisted for Test after PPT (2) -> Screening only / for PPT (1)
       return [...list].sort((a, b) => {
-        const pA = getEliminationPriority(a, isSyncing, statusUpdatesPending || isShortlistVerificationPending(a.shortlistVerificationState));
-        const pB = getEliminationPriority(b, isSyncing, statusUpdatesPending || isShortlistVerificationPending(b.shortlistVerificationState));
+        const pA = getEliminationPriority(a, isSyncing, statusUpdatesPending);
+        const pB = getEliminationPriority(b, isSyncing, statusUpdatesPending);
         if (pB !== pA) return pB - pA;
 
         const numDiff = getDriveNum(b) - getDriveNum(a);
@@ -615,9 +545,8 @@ export default function CompaniesClient({
     for (const c of companies) {
       const rawStatus = c.application?.status || 'applied';
       const eff = getEffectiveStage(rawStatus, c.latestEvent, c.events, c.application?.notes, c.application?.manual_override);
-      const driveVerificationPending = isShortlistVerificationPending(c.shortlistVerificationState);
-      const st = getVisibleApplicationStatus(eff.effectiveStatus, isSyncing, Boolean(c.application?.manual_override), statusUpdatesPending || driveVerificationPending);
-      const pendingForDrive = statusUpdatesPending || isShortlistVerificationPending(c.shortlistVerificationState);
+      const st = getVisibleApplicationStatus(eff.effectiveStatus, isSyncing, Boolean(c.application?.manual_override), statusUpdatesPending);
+      const pendingForDrive = statusUpdatesPending;
       if (matchFilter(st, 'active', c, isSyncing, pendingForDrive)) counts.active++;
       if (matchFilter(st, 'not_shortlisted', c, isSyncing, pendingForDrive)) counts.not_shortlisted++;
       if (matchFilter(st, 'withdrawn', c, isSyncing, pendingForDrive)) counts.withdrawn++;
@@ -716,22 +645,7 @@ export default function CompaniesClient({
           );
           const rawStatus = c.application?.status || 'applied';
           const effectiveResult = getEffectiveStage(rawStatus, nextEv, c.events, c.application?.notes, c.application?.manual_override);
-          const provisionalStatus = getProvisionalStatusLabel({
-            status: effectiveResult.effectiveStatus,
-            isSyncing,
-            statusUpdatesPending,
-            updatePhase: statusUpdatePhase,
-            manualOverride: Boolean(c.application?.manual_override),
-            verificationPending: isShortlistVerificationPending(c.shortlistVerificationState),
-            syncSubject: syncProgress?.currentSubject,
-          });
-          const driveVerificationPending = isShortlistVerificationPending(c.shortlistVerificationState);
-          const status = getVisibleApplicationStatus(
-            effectiveResult.effectiveStatus,
-            isSyncing || driveVerificationPending,
-            Boolean(c.application?.manual_override),
-            statusUpdatesPending || driveVerificationPending
-          );
+          const status = getVisibleApplicationStatus(effectiveResult.effectiveStatus);
           const futureDeadline = getFutureRegistrationDeadline(c);
           const stageIndex = effectiveResult.stageIndex;
           const cleanedRole = cleanRoleTitle(c.application?.role);
@@ -876,13 +790,13 @@ export default function CompaniesClient({
                             <span className={cn(
                               'min-w-0 truncate text-right font-mono text-[10px]',
                               hasUpcomingEvent && 'hidden sm:inline',
-                              status === 'registration_open' || provisionalStatus || effectiveResult.eliminatedStage === -1
+                              status === 'registration_open' || effectiveResult.eliminatedStage === -1
                                 ? 'text-zinc-500'
                                 : 'font-semibold text-rose-400'
                             )}>
                               {status === 'registration_open'
                                 ? 'Awaiting Registration'
-                                : provisionalStatus || effectiveResult.statusSubtitle}
+                                : effectiveResult.statusSubtitle}
                             </span>
                             {hasUpcomingEvent && (
                               <span
@@ -902,6 +816,7 @@ export default function CompaniesClient({
                       );
                     })()}
                     <StageStepper
+                      roundDecisions={c.roundDecisions}
                       status={status}
                       latestEvent={nextEv}
                       events={c.events}

@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireAdmin } from '@/lib/auth/admin';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { normalizeDriveNumber } from '@/lib/drive-number';
-import { recalculateApplicationStatuses } from '@/app/api/sync/reprocess/route';
+import { recalculateApplicationStatuses } from '@/lib/sync/reprocess';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 300; // Allow sufficient compute time on Vercel Fluid

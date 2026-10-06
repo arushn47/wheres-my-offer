@@ -81,3 +81,20 @@ export function getCurrentMessageText(
 
   return plain || html || stripQuotedContent(email.bodySnippet?.trim() || '');
 }
+
+/** A forward carries the original circular; a reply only refers to historical evidence. */
+export function getEvidenceMessageText(
+  email: Pick<ParsedEmail, 'bodyPlain' | 'bodyHtml' | 'bodySnippet'> & { subject?: string }
+): string {
+  const full = getCanonicalBodyText(email);
+  if (/^\s*re\s*:/i.test(email.subject || '')) return getCurrentMessageText(email);
+  if (/^\s*(?:fwd?|fw)\s*:/i.test(email.subject || '') || /Forwarded message/i.test(full)) {
+    return full.replace(/^\s*(?:From|To|Cc|Date|Subject):[^\n]*(?:\n\s*<[^>]+>[^\n]*)?/gim, ' ');
+  }
+  // Some original circulars arrive entirely quote-prefixed via mailing lists.
+  return full.replace(/^>+\s?/gm, '').split(/\n\s*On .{0,180}wrote:\s*\n/i)[0];
+}
+
+export function isQuotedReply(subject: string): boolean {
+  return /^\s*re\s*:/i.test(subject);
+}

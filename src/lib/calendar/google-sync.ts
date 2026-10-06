@@ -1,3 +1,4 @@
+import { withUserMutationLease } from '@/lib/sync/mutation-lease';
 import { google } from 'googleapis';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { decrypt } from '@/lib/crypto/tokens';
@@ -302,7 +303,11 @@ const STATUS_MAX_STAGE: Record<string, number> = {
  * - Updates changed events in-place.
  * - Inserts missing eligible events and links their gcal_event_id.
  */
-export async function reconcileUserGoogleCalendar(userId: string): Promise<ReconcileCalendarResult> {
+export async function reconcileUserGoogleCalendar(...args: Parameters<typeof reconcileUserGoogleCalendarUnlocked>) {
+  return withUserMutationLease(args[0], () => reconcileUserGoogleCalendarUnlocked(...args));
+}
+
+async function reconcileUserGoogleCalendarUnlocked(userId: string): Promise<ReconcileCalendarResult> {
   const supabase = createAdminClient();
 
   // 1. Fetch user's eligible site events and pipeline status

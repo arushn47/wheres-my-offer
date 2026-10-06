@@ -1,3 +1,4 @@
+import { MutationBusyError } from './mutation-lease';
 import { createHash } from 'node:crypto';
 import type { gmail_v1 } from 'googleapis';
 import { createAdminClient } from '@/lib/supabase/admin';
@@ -473,13 +474,21 @@ export async function ingestSharedCollegeCircular(params: {
     }
   }
   const companyId = drive.company_id;
+  const applyToUser = async (...args: Parameters<typeof processEmailForEventsAndStatus>) => {
+    try { await processEmailForEventsAndStatus(...args); return true; }
+    catch (error) {
+      if (!(error instanceof MutationBusyError)) throw error;
+      const { error: queueError } = await supabase.from('pending_drive_recalculations').upsert({user_id:args[1],placement_drive_id:drive.id,source_received_at:new Date(parsedEmail.receivedAt).toISOString()}, {onConflict:'user_id,placement_drive_id'});
+      if (queueError) throw queueError;
+      skippedUsers++; return false;
+    }
+  };
   for (const targetUserId of eligibleUserIds) {
     const user = (users || []).find((candidate) => candidate.id === targetUserId);
     if (!user) {
       const { data: shortlistUser } = await supabase.from('users').select('id,neo_id,email').eq('id', targetUserId).maybeSingle();
       if (!shortlistUser) continue;
-      await processEmailForEventsAndStatus(supabase, targetUserId, companyId, parsedEmail, canonicalId, shortlistUser.neo_id, shortlistUser.email, drive.id, gmail, 'drive');
-      appliedUsers++;
+      if (await applyToUser(supabase, targetUserId, companyId, parsedEmail, canonicalId, shortlistUser.neo_id, shortlistUser.email, drive.id, gmail, 'drive')) appliedUsers++;
       continue;
     }
     const userEvidence = (userMatches || []).filter((match) => match.user_id === targetUserId)
@@ -496,8 +505,7 @@ export async function ingestSharedCollegeCircular(params: {
       skippedUsers++;
       continue;
     }
-    await processEmailForEventsAndStatus(supabase, targetUserId, companyId, parsedEmail, canonicalId, user.neo_id, user.email, drive.id, gmail, 'drive');
-    appliedUsers++;
+    if (await applyToUser(supabase, targetUserId, companyId, parsedEmail, canonicalId, user.neo_id, user.email, drive.id, gmail, 'drive')) appliedUsers++;
   }
 
   return { canonicalId, appliedUsers, skippedUsers, attachmentErrors };

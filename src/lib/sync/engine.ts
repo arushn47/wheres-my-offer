@@ -35,6 +35,7 @@ import { resolvePlacementDrive } from '@/lib/sync/drive-resolution';
 import { getLiveApplicationScope } from '@/lib/sync/application-scope';
 import { getMissingPersonalSyncSetup } from '@/lib/sync/participation-evidence';
 import { randomUUID } from 'node:crypto';
+import { currentMutationLease, withOwnedMutationLease } from '@/lib/sync/mutation-lease';
 import {
   APPROVED_COLLEGE_SENDER,
   CANONICAL_IDENTITY_VERSION,
@@ -1529,19 +1530,7 @@ export async function runSync(
 ): Promise<SyncResult> {
   const supabase = createAdminClient();
 
-  if (options?.force) {
-    resetActiveSyncLock(userId);
-    try {
-      await supabase
-        .from('sync_state')
-        .update({
-          is_syncing: false,
-          lease_expires_at: null,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('user_id', userId);
-    } catch { }
-  }
+  // acquire_sync_lease reclaims expired locks atomically. Force never clears a live owner.
 
   // 1. Get all connected Gmail accounts for this user
   const { data: accounts, error: accountsError } = await supabase
@@ -1567,7 +1556,7 @@ export async function runSync(
   const userNeoId = userData?.neo_id || null;
   const userEmail = userData?.email || '';
 
-  const missing = getMissingPersonalSyncSetup({ hasPersonal, userNeoId });
+  const missing = getMissingPersonalSyncSetup({ hasPersonal, userNeoId, hasCollege: connectedAccounts.some((account) => account.account_type === 'college') });
   if (missing.length > 0) {
     throw new Error(
       `Complete setup to sync: Please add ${missing.join(', ')} in Settings.`
@@ -1598,6 +1587,7 @@ export async function runSync(
     };
   }
 
+  return withOwnedMutationLease(userId, runId, async () => {
   activeSyncLocks.add(userId);
 
   // Global wall-clock deadline for this entire invocation
@@ -2674,8 +2664,10 @@ export async function runSync(
               currentSubject: 'Updating drive statuses…',
             };
             notifyProgress(statusProgress, true);
-            const { recalculateApplicationStatuses } = await import('@/app/api/sync/reprocess/route');
+            const { recalculateApplicationStatuses } = await import('@/lib/sync/reprocess');
             await recalculateApplicationStatuses(userId);
+            const { catchUpMissingNotifications } = await import('@/lib/sync/reprocess');
+            await catchUpMissingNotifications(supabase, userId);
             result.statusUpdatesPending = false;
             result.statusUpdatesCompleted = true;
             notifyProgress({
@@ -2699,9 +2691,18 @@ export async function runSync(
         console.log(`[Post-Sync] ${result.newEmails} new email(s) but no new placement drives — skipping full archive rescan (egress guard).`);
       }
 
+      const touchedDrives = [...(currentMutationLease()?.touchedDriveIds || [])];
+      if (touchedDrives.length && !result.statusUpdatesCompleted) {
+        const { recalculateApplicationStatuses, catchUpMissingNotifications } = await import('@/lib/sync/reprocess');
+        await recalculateApplicationStatuses(userId, undefined, { targetPlacementDriveIds: touchedDrives, skipBodyRecovery: true, skipGSheetScan: true });
+        await catchUpMissingNotifications(supabase, userId);
+        result.statusUpdatesCompleted = true;
+        result.statusUpdatesPending = false;
+      }
+
       // 6. Automatic Google Calendar reconciliation:
       // Run in background fire-and-forget so it NEVER blocks returning the sync response
-      import('@/lib/calendar/google-sync')
+      await import('@/lib/calendar/google-sync')
         .then(({ reconcileUserGoogleCalendar }) => reconcileUserGoogleCalendar(userId))
         .then((calResult) => console.log(`[Google Calendar Auto-Sync] User ${userId}: ${calResult.message}`))
         .catch((calErr) => console.warn('[Google Calendar Auto-Sync] Non-critical reconciliation error:', calErr));
@@ -2716,8 +2717,24 @@ export async function runSync(
       );
     }
 
-    // Reconcile elapsed event statuses in the background
-    import('@/lib/sync/event-reconciliation')
+    // Pub/Sub fan-out skipped under a live user lease is retried by the next sync/cron.
+    const { data: pendingDrives, error: pendingError } = await supabase.from('pending_drive_recalculations').select('placement_drive_id,source_received_at').eq('user_id',userId);
+    if (pendingError) throw pendingError;
+    if (pendingDrives?.length) {
+      const { recalculateApplicationStatuses, catchUpMissingNotifications } = await import('@/lib/sync/reprocess');
+      await recalculateApplicationStatuses(userId,undefined,{targetPlacementDriveIds:pendingDrives.map(row=>row.placement_drive_id),skipBodyRecovery:true,skipGSheetScan:true});
+      for (const row of pendingDrives) {
+        const { error } = await supabase.from('pending_drive_recalculations').delete().eq('user_id',userId).eq('placement_drive_id',row.placement_drive_id).eq('source_received_at',row.source_received_at);
+        if (error) throw error;
+      }
+      await catchUpMissingNotifications(supabase,userId);
+    }
+
+    const { dispatchRoundNotificationOutbox } = await import('@/lib/sync/round-verdict-service');
+    await dispatchRoundNotificationOutbox(supabase,userId);
+
+    // Reconcile elapsed event statuses under the same owned lease
+    await import('@/lib/sync/event-reconciliation')
       .then(({ reconcileElapsedEventStatuses }) => reconcileElapsedEventStatuses(supabase, userId))
       .then((reconResult) => {
         if (reconResult.updatedCount > 0) {
@@ -2761,11 +2778,13 @@ export async function runSync(
           lease_expires_at: null,
           updated_at: new Date().toISOString(),
         })
-        .eq('user_id', userId);
+        .eq('user_id', userId)
+        .eq('run_id', runId);
     } catch (cleanupErr) {
       console.error(`[Sync Engine] Error releasing sync lease for ${userId}:`, cleanupErr);
     }
   }
+  });
 }
 
 // ============================================

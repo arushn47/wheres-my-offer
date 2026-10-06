@@ -3,6 +3,8 @@ import { redirect } from 'next/navigation';
 import { requireSession } from '@/lib/auth';
 import { checkIsAdmin } from '@/lib/auth/admin';
 import { createAdminClient } from '@/lib/supabase/admin';
+import { loadRoundStatusSummaries } from '@/lib/sync/round-status-data';
+import { resolveRecruitmentStatus } from '@/lib/sync/round-status';
 import { detectCampus, detectBranch, getDriveMode } from '@/lib/utils';
 import { getEffectiveStage, isInactiveStatus, isEliminatedStatus } from '@/lib/stages';
 import DashboardClient from './dashboard-client';
@@ -29,11 +31,12 @@ export default async function DashboardPage() {
   const [
     { data: placementDrives },
     { data: companies },
-    { data: applications },
+    { data: rawApplications },
     { data: rawUpcomingEvents },
     { data: accounts },
     { data: user },
     { data: candidateMatches },
+    roundDecisionsByDrive,
   ] = await Promise.all([
     supabase
       .from('placement_drives')
@@ -65,7 +68,13 @@ export default async function DashboardPage() {
       .select('id, email_id, placement_drive_id, match_type')
       .eq('user_id', session.userId)
       .neq('match_type', 'xlsx_applied_list'),
+    loadRoundStatusSummaries(supabase, session.userId),
   ]);
+
+  const applications = (rawApplications || []).map(app => ({
+    ...app,
+    status: resolveRecruitmentStatus(app.status || 'not_applied', roundDecisionsByDrive.get(app.placement_drive_id), Boolean(app.manual_override), app.notes || ''),
+  }));
 
   const nowIso = new Date().toISOString();
 

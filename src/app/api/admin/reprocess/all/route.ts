@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { waitUntil } from '@vercel/functions';
 import { requireAdmin } from '@/lib/auth/admin';
 import { createAdminClient } from '@/lib/supabase/admin';
-import { performReprocess } from '@/app/api/sync/reprocess/route';
+import { performReprocess } from '@/lib/sync/reprocess';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 300;

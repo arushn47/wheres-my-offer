@@ -1,3 +1,5 @@
+import { isNonShortlistRoster, isPositiveRosterRow, normalizeIdentityToken } from './roster-policy';
+
 export type ShortlistVerificationState = 'pending' | 'verified_present' | 'verified_absent' | 'deferred' | 'not_published';
 
 export interface ShortlistRosterScan {
@@ -25,7 +27,7 @@ export interface CachedRosterEvaluation {
 }
 
 function normalizedIdentity(value: unknown): string {
-  return String(value ?? '').replace(/[\u00a0\s\-_.]/g, '').toUpperCase();
+  return normalizeIdentityToken(value);
 }
 
 function isAppliedRoster(filename: string): boolean {
@@ -39,13 +41,13 @@ export function evaluateCachedShortlistRosters(params: {
 }): CachedRosterEvaluation {
   const identityTokens = new Set(params.identityTokens.map(normalizedIdentity).filter(Boolean));
   const possibleRoster = params.rosters.some((roster) => {
-    if (isAppliedRoster(roster.filename)) return false;
+    if (isNonShortlistRoster(roster.filename)) return false;
     const named = /shortlist|selection[_\s-]*list|selected[_\s-]*student|shortlisted/i.test(roster.filename);
     const sheet = /\.(xlsx|xls|csv)$/i.test(roster.filename);
     return named || (sheet && params.shortlistContext);
   });
   const relevant = params.rosters.filter((roster) => {
-    if (!/\.(xlsx|xls|csv)$/i.test(roster.filename) || isAppliedRoster(roster.filename)) return false;
+    if (!/\.(xlsx|xls|csv)$/i.test(roster.filename) || isNonShortlistRoster(roster.filename)) return false;
     const namedShortlist = /shortlist|selection[_\s-]*list|selected[_\s-]*student|shortlisted/i.test(roster.filename);
     return namedShortlist || params.shortlistContext;
   });
@@ -64,11 +66,15 @@ export function evaluateCachedShortlistRosters(params: {
       incomplete = true;
       continue;
     }
+    const shortlistSheets = roster.extractedRows.filter((sheet) => !isNonShortlistRoster(sheet.sheetName) && sheet.rows.length > 0);
+    if (!shortlistSheets.length) { incomplete = true; continue; }
     checkedRosterCount++;
     let matchedSheetName: string | null = null;
     let matchedRowNumber: number | null = null;
-    for (const sheet of roster.extractedRows) {
-      const rowIdx = sheet.rows.findIndex((row) => row.some((cell) => identityTokens.has(normalizedIdentity(cell))));
+    for (const sheet of shortlistSheets) {
+      if (isNonShortlistRoster(sheet.sheetName)) continue;
+      const rowIdx = sheet.rows.findIndex((row) => Array.isArray(row) &&
+        isPositiveRosterRow(row, sheet.rows[0]) && row.some((cell) => identityTokens.has(normalizedIdentity(cell))));
       if (rowIdx !== -1) {
         matchedSheetName = sheet.sheetName || null;
         matchedRowNumber = rowIdx + 1;

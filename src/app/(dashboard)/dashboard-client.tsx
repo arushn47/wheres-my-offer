@@ -22,7 +22,7 @@ import { cleanLocationString } from '@/lib/sync/locations';
 import { cleanRoleTitle, cleanEventTitle } from '@/lib/sync/events';
 import { isInactiveStatus } from '@/lib/stages';
 import { useSync } from '@/context/sync-context';
-import { getProvisionalStatusLabel, getVisibleApplicationStatus } from '@/lib/sync/status-display';
+import { getVisibleApplicationStatus } from '@/lib/sync/status-display';
 import type { DashboardStats } from '@/types';
 
 export interface ActiveApplicationItem {
@@ -126,7 +126,7 @@ export default function DashboardClient({
   campus,
   branch,
 }: DashboardClientProps) {
-  const { isSyncing, statusUpdatesPending, statusUpdatePhase, syncProgress, syncResult } = useSync();
+  const { isSyncing, statusUpdatesPending, syncResult } = useSync();
   // Top 4 active drives: Scheduled rounds first, then Completed rounds, then Applied drives
   const spotlightDrives = useMemo(() => {
     const active = activeApplications.filter(
@@ -502,13 +502,6 @@ export default function DashboardClient({
       ) : (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 w-full min-w-0 max-w-full">
             {spotlightDrives.map((c) => {
-              const provisionalStatus = getProvisionalStatusLabel({
-                status: c.status,
-                isSyncing,
-                statusUpdatesPending,
-                updatePhase: statusUpdatePhase,
-                syncSubject: syncProgress?.currentSubject,
-              });
               const visibleStatus = getVisibleApplicationStatus(c.status, isSyncing, false, statusUpdatesPending);
               const rawCategory = c.category || (/1[0-9]\s*lpa|[2-9][0-9]\s*lpa/i.test(c.ctc || '') ? 'Super Dream' : 'Dream');
               const category = rawCategory.replace(/\b(internship|offer|placement|drive)\b/gi, '').replace(/\s*\/\s*/g, ' ').replace(/\s+/g, ' ').trim() || rawCategory.trim();
@@ -531,7 +524,7 @@ export default function DashboardClient({
                         <h3 className="truncate min-w-0 flex-1 font-display text-sm sm:text-base font-bold tracking-tight text-zinc-100 group-hover:text-emerald-300 transition-colors">
                           {c.companyName}
                         </h3>
-                        <StatusChip status={visibleStatus} label={provisionalStatus || undefined} className="shrink-0" />
+                        <StatusChip status={visibleStatus} className="shrink-0" />
                       </div>
                       <div className="mt-1 flex items-center gap-1.5 min-w-0 text-[11px] sm:text-xs text-zinc-400">
                         <span className="truncate">{cleanRoleTitle(c.role) || 'Campus Placement Drive'}</span>
@@ -581,7 +574,7 @@ export default function DashboardClient({
             {syncResult.statusUpdatesCompleted
               ? 'Cached shortlist evidence checked and drive statuses refreshed.'
               : syncResult.statusUpdatesPending
-                ? 'Some shortlist checks were deferred; negative statuses remain provisional.'
+                ? 'Some shortlists could not be checked. Existing recruitment statuses were kept.'
                 : `${syncResult.newEmails} updates · ${syncResult.newCompanies} drives indexed.`}
           </p>
         </div>

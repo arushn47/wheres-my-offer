@@ -171,8 +171,8 @@ export function getEffectiveStage(
 
   // Past event awareness: true only if scheduled events have completely elapsed
   const isPptCompleted = hasPpt && pptEvents.every(isEventPast);
-  const isTestCompleted = hasTest && testEvents.every(isEventPast);
-  const isInterviewCompleted = hasInterview && intEvents.every(isEventPast);
+  const isTestCompleted = ['test_completed','interview_scheduled','interview_ongoing','interview_completed','selected','offer','offer_received'].includes(s);
+  const isInterviewCompleted = ['interview_completed','selected','offer','offer_received'].includes(s);
 
   const notesText = notes || '';
   const isNotesInterview =
@@ -196,11 +196,9 @@ export function getEffectiveStage(
   const effectiveHasPpt = hasPpt || hasAnnouncedPpt || isExplicitPostPpt;
   const effectiveIsPptCompleted =
     !hasFuturePpt &&
-    (isPptCompleted ||
-      isExplicitPostPpt ||
-      (hasAnnouncedPpt &&
-        ['not_shortlisted', 'not_shortlisted_post_ppt', 'rejected', 'test_scheduled', 'test_completed', 'interview_scheduled', 'interview_completed', 'selected', 'offer', 'offer_received'].includes(s)));
+    (s === 'not_shortlisted_post_ppt' || (Boolean(manualOverride) && isExplicitPostPpt));
 
+  const notShortlistedStatus = s === 'not_shortlisted_post_ppt' ? s : 'not_shortlisted';
   const notShortlistedSubtitle = effectiveIsPptCompleted
     ? 'Not Shortlisted · Post-PPT'
     : 'Not Shortlisted · In Screening';
@@ -240,7 +238,7 @@ export function getEffectiveStage(
     if (s === 'not_shortlisted' || s === 'not_shortlisted_post_ppt') {
       return {
         stageIndex: 2,
-        effectiveStatus: 'not_shortlisted',
+        effectiveStatus: notShortlistedStatus,
         eliminatedStage: 2,
         furthestPassedStage: effectiveIsPptCompleted ? 1 : 0,
         statusSubtitle: notShortlistedSubtitle,
@@ -294,7 +292,7 @@ export function getEffectiveStage(
     if (s === 'rejected') {
       return {
         stageIndex: 2,
-        effectiveStatus: 'not_shortlisted',
+        effectiveStatus: notShortlistedStatus,
         eliminatedStage: 2,
         furthestPassedStage: isPptCompleted ? 1 : 0,
         statusSubtitle: notShortlistedSubtitle,
@@ -596,7 +594,7 @@ export function getEffectiveStage(
   if (s === 'not_shortlisted' || s === 'not_shortlisted_post_ppt') {
     return {
       stageIndex: 2,
-      effectiveStatus: 'not_shortlisted',
+      effectiveStatus: notShortlistedStatus,
       eliminatedStage: 2,
       furthestPassedStage: effectiveIsPptCompleted ? 1 : 0,
       statusSubtitle: notShortlistedSubtitle,
@@ -639,7 +637,8 @@ export function getEffectiveStage(
     (s === 'rejected' && isNotesTest)
   ) {
     const elStageId = computeEliminatedStageId();
-    const elLabel = eliminationCtx.label || 'Eliminated in Test Round';
+    const elLabel = !manualOverride && eliminationCtx.roundType === 'game'
+      ? 'Eliminated in Test Round' : eliminationCtx.label || 'Eliminated in Test Round';
     return {
       stageIndex: 3,
       effectiveStatus: 'rejected_test',
@@ -719,7 +718,7 @@ export function getEffectiveStage(
     }
     return {
       stageIndex: 2,
-      effectiveStatus: 'not_shortlisted',
+      effectiveStatus: notShortlistedStatus,
       eliminatedStage: 2,
       furthestPassedStage: effectiveIsPptCompleted ? 1 : 0,
       statusSubtitle: notShortlistedSubtitle,

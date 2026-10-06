@@ -1,4 +1,5 @@
-import { loadUserCandidateIdentity } from '@/lib/sync/user-identity';
+import { withUserMutationLease } from './mutation-lease';
+import { loadUserCandidateIdentity, getStrongIdentityTokens } from '@/lib/sync/user-identity';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { createGmailClient } from '@/lib/gmail/client';
 import type { GmailAccount } from '@/lib/gmail/client';
@@ -21,7 +22,11 @@ import { classifyShortlistEmail } from '@/lib/sync/round-identity';
  * This ensures that candidate matches from test shortlists are preserved in the DB
  * even if circulars arrived without explicit drive numbers during initial ingestion.
  */
-export async function scanAndPersistCandidateMatches(
+export async function scanAndPersistCandidateMatches(...args: Parameters<typeof scanAndPersistCandidateMatchesUnlocked>) {
+  return withUserMutationLease(args[1], () => scanAndPersistCandidateMatchesUnlocked(...args));
+}
+
+async function scanAndPersistCandidateMatchesUnlocked(
   supabase: ReturnType<typeof createAdminClient>,
   userId: string,
   targetDriveIds?: string[]
@@ -199,7 +204,11 @@ export async function scanAndPersistCandidateMatches(
  * Matches a user's identity against shared College shortlist workbooks without
  * downloading the same Gmail attachment for every student's inbox.
  */
-export async function scanSharedCollegeCandidateMatches(
+export async function scanSharedCollegeCandidateMatches(...args: Parameters<typeof scanSharedCollegeCandidateMatchesUnlocked>) {
+  return withUserMutationLease(args[1], () => scanSharedCollegeCandidateMatchesUnlocked(...args));
+}
+
+async function scanSharedCollegeCandidateMatchesUnlocked(
   supabase: ReturnType<typeof createAdminClient>,
   userId: string,
   targetDriveIds?: string[]
@@ -217,6 +226,7 @@ export async function scanSharedCollegeCandidateMatches(
   const personalAccount = accounts?.find((account) => account.account_type === 'personal');
   const userEmail = user?.email || personalAccount?.email || '';
   const userNeoId = user?.neo_id || null;
+  const candidateIdentity = await loadUserCandidateIdentity(supabase, userId);
   if (!userEmail && !userNeoId) return 0;
 
   const eligibleDriveIds = new Set<string>([
@@ -475,22 +485,10 @@ export async function scanSharedCollegeCandidateMatches(
 
   if (candidateEmailIds.length > 0) {
     const candidateAttachments = cachedAttachments.filter((att) => candidateEmailIds.includes(att.college_email_id));
-    const twinFilenames = candidateAttachments
-      .filter((att) => att.filename && att.parse_status !== 'complete')
-      .map((att) => att.filename as string);
-
-    let rowsQuery = supabase
-      .from('college_attachments')
+    const rowsQuery = supabase.from('college_attachments')
       .select('college_email_id, filename, size_bytes, parse_status, extracted_rows')
-      .eq('parse_status', 'complete')
-      .not('extracted_rows', 'is', null);
-
-    if (twinFilenames.length > 0) {
-      rowsQuery = rowsQuery.or(`college_email_id.in.(${candidateEmailIds.join(',')}),filename.in.(${twinFilenames.map((f) => `"${f}"`).join(',')})`);
-    } else {
-      rowsQuery = rowsQuery.in('college_email_id', candidateEmailIds);
-    }
-
+      .eq('parse_status', 'complete').not('extracted_rows', 'is', null)
+      .in('college_email_id', candidateEmailIds);
     const { data: rowsData, error: rowsError } = await rowsQuery;
     if (rowsError) throw rowsError;
 
@@ -514,12 +512,7 @@ export async function scanSharedCollegeCandidateMatches(
     if (attachment.parse_status === 'complete' && attachment.extracted_rows) {
       return { parseStatus: attachment.parse_status, extractedRows: attachment.extracted_rows };
     }
-    const parsedTwin = parsedRowsByFile.get(
-      `${(attachment.filename || '').toLowerCase().trim()}|${attachment.size_bytes || 0}`
-    );
-    return parsedTwin
-      ? { parseStatus: 'complete', extractedRows: parsedTwin }
-      : { parseStatus: attachment.parse_status, extractedRows: attachment.extracted_rows };
+    return { parseStatus: attachment.parse_status, extractedRows: attachment.extracted_rows };
   };
 
   let matchesCreated = 0;
@@ -550,11 +543,7 @@ export async function scanSharedCollegeCandidateMatches(
     const evaluation = evaluateCachedShortlistRosters({
       rosters: archiveAttachments,
       shortlistContext,
-      identityTokens: [
-        userNeoId || '',
-        userEmail.match(/([0-9]{2}[a-z]{3}[0-9]{4,5})/i)?.[1] || '',
-        userEmail,
-      ].filter(Boolean),
+      identityTokens: getStrongIdentityTokens(candidateIdentity),
     });
     const driveResult = verificationByDrive.get(driveId) || { rosterResults: [], matchDetails: null };
     if (evaluation.state === 'verified_present' || evaluation.state === 'verified_absent') {
@@ -573,7 +562,7 @@ export async function scanSharedCollegeCandidateMatches(
     driveResult.rosterResults.push({
       relevant: evaluation.state !== 'not_published',
       parsed: evaluation.state !== 'deferred',
-      candidatePresent: evaluation.state === 'verified_present' || Boolean(hasPositiveEvidence),
+      candidatePresent: evaluation.state === 'verified_present',
     });
     if (evaluation.state === 'verified_present' && evaluation.matchingRoster) {
       driveResult.matchDetails = evaluation.matchingRoster.details;
@@ -647,92 +636,6 @@ export async function scanSharedCollegeCandidateMatches(
     verificationByDrive.set(driveId, unresolved);
   }
 
-  const applicationsByDrive = new Map((applications || []).map((application) => [application.placement_drive_id, application]));
-  for (const driveId of eligibleDriveIds) {
-    const app = applicationsByDrive.get(driveId);
-    if (!app || app.manual_override) continue;
-    const result = verificationByDrive.get(driveId);
-    if (!result) {
-      // No relevant roster anywhere in the archive for this drive: nothing to judge.
-      continue;
-    }
-    const verification = resolveDriveVerification({ scans: result.rosterResults, archiveComplete: archiveReadyForNegative });
-    if (verification.state === 'not_published' && app.status === 'not_shortlisted') {
-      verification.state = 'verified_absent';
-    }
-    const hasPositiveMatch = (existingMatches || []).some((match) =>
-      match.placement_drive_id === driveId && isShortlistMatchEvidence({
-        matchType: match.match_type,
-        matchedValue: match.matched_value,
-        matchedRoundType: match.matched_round_type,
-      })
-    ) || verification.state === 'verified_present';
-    const nextStatus = getVerifiedShortlistStatus({
-      verificationState: verification.state,
-      hasPositiveMatch,
-      currentStatus: app.status || 'unknown',
-      manualOverride: Boolean(app.manual_override),
-    });
-
-    if (nextStatus && app.status !== nextStatus) {
-      const { error: appError } = await supabase
-        .from('applications')
-        .update({ status: nextStatus, status_source: 'sync_reprocess', status_confidence: 'high', last_updated: new Date().toISOString() })
-        .eq('user_id', userId)
-        .eq('placement_drive_id', driveId);
-      if (appError) throw appError;
-    }
-
-    const statusNow = nextStatus ?? app.status;
-
-    const isFresh =
-      (result.latestRosterAt ?? 0) >
-      Date.now() - 7 * 24 * 60 * 60 * 1000;
-
-    const companyName =
-      companyMap.get(driveById.get(driveId)?.company_id ?? '')?.name ||
-      'Placement drive';
-
-    try {
-      if (
-        verification.state === 'verified_absent' &&
-        !hasPositiveMatch &&
-        statusNow === 'not_shortlisted'
-      ) {
-        await removeDriveEvents(supabase, userId, driveId, {
-          excludeTypes: ['registration_deadline'],
-          onlyUnfinished: true,
-        });
-
-        if (isFresh) {
-          await notifyShortlistAbsent({
-            userId,
-            placementDriveId: driveId,
-            companyName,
-          });
-        }
-      } else if (
-        hasPositiveMatch &&
-        statusNow === 'shortlisted' &&
-        isFresh &&
-        result.matchEmailId
-      ) {
-        await notifyShortlistMatch({
-          userId,
-          placementDriveId: driveId,
-          companyName,
-          neoId: userNeoId || userEmail,
-          emailSubject: '',
-          sourceEmailId: result.matchEmailId,
-        });
-      }
-    } catch (sideEffectErr) {
-      console.warn(
-        '[scanSharedCollegeCandidateMatches] side effects failed:',
-        sideEffectErr
-      );
-    }
-  }
-
+  // Status and notifications are committed by the scoped round decision service.
   return matchesCreated;
 }

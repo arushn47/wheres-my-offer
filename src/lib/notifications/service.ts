@@ -28,6 +28,7 @@ export function buildDeadlineNotificationDedupeKey(params: {
 }
 
 export interface CreateNotificationParams {
+  decisionId?: string;
   userId: string;
   type: NotificationType;
   title: string;
@@ -51,7 +52,7 @@ export interface CreateNotificationParams {
  */
 export async function sendNotification(
   params: CreateNotificationParams
-): Promise<{ inAppCreated: boolean; pushSent: boolean }> {
+): Promise<{ inAppCreated: boolean; pushSent: boolean; complete: boolean }> {
   const {
     userId,
     type,
@@ -67,6 +68,12 @@ export async function sendNotification(
   } = params;
 
   const supabase = createAdminClient();
+
+  if (params.decisionId) {
+    const { data: decision, error } = await supabase.from('round_verdicts').select('is_current,verdict').eq('id', params.decisionId).eq('user_id', userId).maybeSingle();
+    if (error) throw error;
+    if (!decision?.is_current || !decision.verdict?.eligible) return { inAppCreated: false, pushSent: false, complete: true };
+  }
 
   // 1. Check user preferences
   const prefs = await getNotificationPreferences(userId);
@@ -100,7 +107,7 @@ export async function sendNotification(
   }
 
   if (!isCategoryEnabled) {
-    return { inAppCreated: false, pushSent: false };
+    return { inAppCreated: false, pushSent: false, complete: true };
   }
 
   let inAppCreated = false;
@@ -109,17 +116,17 @@ export async function sendNotification(
   // the race-safe backstop for concurrent callers.
   const { data: existingNotif } = await supabase
     .from('notifications')
-    .select('id')
+    .select('id, push_delivered_at')
     .eq('dedupe_key', dedupeKey)
     .maybeSingle();
 
-  if (existingNotif) {
-    return { inAppCreated: false, pushSent: false };
+  if (existingNotif?.push_delivered_at || (existingNotif && !prefs.browserPushEnabled)) {
+    return { inAppCreated: false, pushSent: false, complete: true };
   }
 
   // Always persist the dedupe row even if in-app notifications are disabled so
   // we never double-send notifications or re-trigger dedupe logic
-  const { data: inserted, error: insertError } = await supabase
+  const { data: inserted, error: insertError } = existingNotif ? { data: existingNotif, error: null } : await supabase
     .from('notifications')
     .insert({
       user_id: userId,
@@ -131,6 +138,7 @@ export async function sendNotification(
       body,
       link: link || (placementDriveId ? `/companies/${placementDriveId}` : '/'),
       dedupe_key: dedupeKey,
+      decision_id: params.decisionId || null,
       is_read: !prefs.inAppEnabled,
     })
     .select('id')
@@ -140,18 +148,22 @@ export async function sendNotification(
     if (insertError.code === '23505') {
       // Fallback catch if race condition occurred
       inAppCreated = false;
-      return { inAppCreated: false, pushSent: false };
+      return { inAppCreated: false, pushSent: false, complete: false };
     } else {
       console.error('[Notification Service] In-app insert error:', insertError);
     }
   } else if (inserted) {
-    inAppCreated = prefs.inAppEnabled;
+    inAppCreated = !existingNotif && prefs.inAppEnabled;
   }
 
   // 3. Dispatch Web Push only after provider success. A failed send must not
   // be reported as delivered; a future retry path can then attempt it again.
   let pushSent = false;
   if (prefs.browserPushEnabled) {
+    if (!inserted?.id) return { inAppCreated, pushSent: false, complete: false };
+    const { data: claimed, error: claimError } = await supabase.rpc('claim_notification_push', { p_notification_id: inserted.id });
+    if (claimError) throw claimError;
+    if (!claimed) return { inAppCreated, pushSent: false, complete: false };
     const targetLink = link || (placementDriveId ? `/companies/${placementDriveId}` : '/');
     const pushResult = await sendPushToUser(userId, {
       ...pushPayload,
@@ -166,9 +178,10 @@ export async function sendNotification(
       },
     });
     pushSent = pushResult.sent > 0;
+    await supabase.from('notifications').update({ push_delivered_at: pushSent ? new Date().toISOString() : null, push_claimed_at: null }).eq('id', inserted.id);
   }
 
-  return { inAppCreated, pushSent };
+  return { inAppCreated, pushSent, complete: Boolean(inserted?.id) && (!prefs.browserPushEnabled || pushSent) };
 }
 
 // ============================================
@@ -248,8 +261,12 @@ export async function notifyShortlistMatch(params: {
   sourceEmailId?: string;
 }) {
   const { userId, placementDriveId, companyName, neoId, emailSubject, sourceEmailId } = params;
+  const { data: decision, error } = await createAdminClient().from('round_verdicts').select('id,verdict')
+    .eq('user_id', userId).eq('placement_drive_id', placementDriveId).eq('is_current', true).maybeSingle();
+  if (error) throw error;
+  if (!decision?.verdict?.eligible || (sourceEmailId && !decision.verdict.evaluations?.some((scan: { emailId: string; state: string }) => scan.emailId === sourceEmailId && scan.state === 'verified_present'))) return;
   const identity = placementDriveId;
-  const dedupeKey = `shortlist:${userId}:${identity}:${neoId}:${sourceEmailId || 'match'}`;
+  const dedupeKey = `round:${userId}:${identity}:${decision.verdict.roundKey}:${decision.verdict.rosterKey}:present`;
 
   return sendNotification({
     userId,
@@ -257,6 +274,7 @@ export async function notifyShortlistMatch(params: {
     title: `🎉 Shortlisted: ${companyName}!`,
     body: `Found your ID on the shortlist. Check next round details.`,
     placementDriveId,
+    decisionId: decision.id,
     link: `/companies/${placementDriveId}`,
     dedupeKey,
   });
@@ -376,7 +394,7 @@ export async function notifyEventScheduled(params: {
   const supabase = createAdminClient();
   const { data: app } = await supabase
     .from('applications')
-    .select('status')
+    .select('status,manual_override')
     .eq('user_id', userId)
     .eq('placement_drive_id', placementDriveId)
     .maybeSingle();
@@ -386,6 +404,14 @@ export async function notifyEventScheduled(params: {
   // event notifications the same way as other eliminated statuses.
   const isEliminated = ['not_shortlisted', 'rejected', 'rejected_test', 'rejected_interview', 'withdrawn', 'declined'].includes(appStatus);
   const isTestOrInterview = ['online_test', 'coding_test', 'technical_interview', 'hr_interview', 'final_interview'].includes(eventType);
+  if (isTestOrInterview && !app?.manual_override) {
+    const { data: decision, error } = await supabase.from('round_verdicts').select('verdict').eq('user_id', userId).eq('placement_drive_id', placementDriveId).eq('is_current', true).maybeSingle();
+    if (error) throw error;
+    if (!decision?.verdict?.eligible || !eventId) return;
+    const { data: event, error: eventError } = await supabase.from('events').select('round_key,college_email_id').eq('id', eventId).eq('user_id', userId).maybeSingle();
+    if (eventError) throw eventError;
+    if (!event || (event.round_key !== decision.verdict.roundKey && !decision.verdict.evaluations?.some((scan: { emailId: string; state: string }) => scan.emailId === event.college_email_id && scan.state === 'verified_present'))) return;
+  }
   const hasEligibleStage = eventType === 'ppt'
     ? ['applied', 'ppt_scheduled', 'shortlisted', 'test_scheduled', 'interview_scheduled'].includes(appStatus)
     : ['shortlisted', 'test_scheduled', 'test_ongoing', 'test_completed', 'interview_scheduled', 'interview_completed', 'selected', 'offer_received'].includes(appStatus);
@@ -405,9 +431,9 @@ export async function notifyEventScheduled(params: {
       })
     : '';
 
-  const dateKey = startTime ? startTime.toISOString().slice(0, 10) : 'unknown';
+  const dateKey = startTime ? startTime.toISOString() : 'unknown';
   const identity = placementDriveId || `legacy-company:unscoped`;
-  const dedupeKey = `event:${userId}:${identity}:${eventType}:${dateKey}`;
+  const dedupeKey = `event:${userId}:${identity}:${eventId || eventType}:${dateKey}:${(venue || '').trim().toLowerCase()}`;
 
   const cleanVenue = venue && !/^(?:unknown|not\s+specified|tbd|na|n\/a)$/i.test(venue.trim()) ? venue.trim() : null;
   const details = [dateStr, cleanVenue].filter(Boolean).join(' • ');

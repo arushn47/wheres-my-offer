@@ -20,8 +20,8 @@ import {
 } from 'lucide-react';
 import { usePushNotifications } from '@/hooks/use-push-notifications';
 import { cn } from '@/lib/utils';
-import type { NotificationPreferences } from '@/lib/notifications/preferences';
-import { DEFAULT_PREFERENCES } from '@/lib/notifications/preferences';
+import type { NotificationPreferences } from '@/lib/notifications/preferences-model';
+import { DEFAULT_PREFERENCES } from '@/lib/notifications/preferences-model';
 import { appToast } from '@/components/ui/toast';
 import { Switch } from '@/components/ui/switch';
 

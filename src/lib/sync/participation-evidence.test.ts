@@ -2,9 +2,10 @@ import { describe, expect, it } from 'vitest';
 import { getMissingPersonalSyncSetup, hasSharedDriveFanOutEvidence, hasUserPlacementEvidence, isConfirmedShortlistEvidence, isShortlistMatchEvidence } from './participation-evidence';
 
 describe('user placement evidence', () => {
-  it('requires Personal Gmail and NeoPAT ID, not an individual College inbox', () => {
-    expect(getMissingPersonalSyncSetup({ hasPersonal: true, userNeoId: '23BCE10472' })).toEqual([]);
-    expect(getMissingPersonalSyncSetup({ hasPersonal: false, userNeoId: '23BCE10472' })).toEqual(['Personal Gmail (for NeoPAT drives)']);
+  it('requires Personal Gmail, College Gmail, and NeoPAT ID', () => {
+    expect(getMissingPersonalSyncSetup({ hasCollege: true, hasPersonal: true, userNeoId: '23BCE10472' })).toEqual([]);
+    expect(getMissingPersonalSyncSetup({ hasCollege: false, hasPersonal: true, userNeoId: '23BCE10472' })).toEqual(['College Gmail']);
+    expect(getMissingPersonalSyncSetup({ hasCollege: true, hasPersonal: false, userNeoId: '23BCE10472' })).toEqual(['Personal Gmail (for NeoPAT drives)']);
   });
 
   it('does not treat a shared College circular alone as user evidence', () => {

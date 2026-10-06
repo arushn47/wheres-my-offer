@@ -24,12 +24,10 @@ import { CategoryBadge, STATUS_META } from '@/components/ui/status-chip';
 import { StageStepper, getStageIndex, getEffectiveStage, isEliminatedStatus } from '@/components/companies/stage-stepper';
 import { cleanLocationString } from '@/lib/sync/locations';
 import { cleanRoleTitle } from '@/lib/sync/events';
-import { useSync } from '@/context/sync-context';
 import {
-  getProvisionalStatusLabel,
   getVisibleApplicationStatus,
-  isShortlistVerificationPending,
 } from '@/lib/sync/status-display';
+import { getCurrentRoundDecision, usesAutomaticRoundStatus, type RoundStatusDecision } from '@/lib/sync/round-status';
 
 export interface CompanyDetail {
   id: string;
@@ -39,7 +37,7 @@ export interface CompanyDetail {
   driveNumber?: string | null;
   driveName?: string | null;
   placementDriveId?: string | null;
-  shortlistVerificationState?: string | null;
+  roundDecisions?: RoundStatusDecision[];
   candidateName?: string | null;
   candidateRegId?: string | null;
   application: {
@@ -73,6 +71,7 @@ export interface CompanyDetail {
   emails: {
     id: string;
     collegeEmailId?: string | null;
+    verificationState?: string | null;
     subject: string;
     sender: string;
     receivedAt: string;
@@ -203,7 +202,7 @@ function getCleanEmailSummary(
 
   // If candidate was verified as absent from an official shortlist/selection list, state it clearly
   if (isMatched === false) {
-    return `Your ID was not found in the ${companyName} ${isSelectionNotice ? 'selection list' : 'shortlist roster'}.`;
+    return `Your identifiers were not found in the ${companyName} ${isSelectionNotice ? 'selection list' : 'shortlist roster'}.`;
   }
 
   if (!rawSnippet || rawSnippet.trim().length === 0) {
@@ -328,7 +327,6 @@ export default function CompanyDetailClient({
   userRegNo,
 }: CompanyDetailClientProps) {
   const router = useRouter();
-  const { isSyncing, statusUpdatesPending, statusUpdatePhase, syncProgress } = useSync();
   const rawStatus = company.application?.status || 'applied';
   const notesStr = company.application?.notes || '';
   const isManual = company.application?.manualOverride ?? false;
@@ -371,18 +369,10 @@ export default function CompanyDetailClient({
 
   // The canonical status string to display in the chip — always use the effective
   // status so the detail page matches exactly what the company card shows.
-  const provisionalStatus = getProvisionalStatusLabel({
-    status: effective.effectiveStatus,
-    isSyncing,
-    statusUpdatesPending,
-    verificationPending: isShortlistVerificationPending(company.shortlistVerificationState),
-    updatePhase: statusUpdatePhase,
-    manualOverride: isManual,
-    syncSubject: syncProgress?.currentSubject,
-  });
-  const isVerificationPending = isShortlistVerificationPending(company.shortlistVerificationState);
-  const displayStatus = getVisibleApplicationStatus(effective.effectiveStatus, isSyncing, isManual, statusUpdatesPending || isVerificationPending);
-  const statusDropdownStatus = getVisibleApplicationStatus(status, isSyncing, isManual, statusUpdatesPending || isVerificationPending);
+  const currentRoundDecision = usesAutomaticRoundStatus(status, isManual) ? getCurrentRoundDecision(company.roundDecisions) : undefined;
+  const partialListAbsence = currentRoundDecision?.state === 'verified_absent' && !currentRoundDecision.finalNegative;
+  const displayStatus = getVisibleApplicationStatus(effective.effectiveStatus);
+  const statusDropdownStatus = getVisibleApplicationStatus(status);
 
   const stage = effective.stageIndex;
   const isWithdrawn =
@@ -393,11 +383,8 @@ export default function CompanyDetailClient({
   const isEliminated =
     isEliminatedStatus(displayStatus) ||
     isEliminatedStatus(statusDropdownStatus) ||
-    (effective.eliminatedStage !== -1 && !provisionalStatus);
+    (effective.eliminatedStage !== -1);
   const terminal = isWithdrawn || isEliminated;
-  const shortlistVerificationPending = Boolean(
-    (isSyncing || statusUpdatesPending || isVerificationPending) && !isManual
-  );
   const hue = useMemo(() => getHue(company.name), [company.name]);
   const initials = company.name.slice(0, 2).toUpperCase();
 
@@ -754,7 +741,7 @@ export default function CompanyDetailClient({
                     title="Click to manually update hiring status"
                   >
                     <span className={cn('h-2 w-2 rounded-full shrink-0', m.dot, m.isPulse ? 'pulse-dot' : '')} />
-                    <span>{provisionalStatus || m.label}</span>
+                    <span>{m.label}</span>
                     <ChevronDown className="h-3.5 w-3.5 opacity-60 transition-transform" />
                   </button>
                 );
@@ -916,7 +903,7 @@ export default function CompanyDetailClient({
         )}
 
         {/* Terminal state banner */}
-        {terminal && (
+        {terminal && !partialListAbsence && (
           <div
             data-testid="terminal-banner"
             className="mt-4 rounded-lg border border-zinc-700 bg-zinc-900 px-4 py-3 text-xs text-zinc-400"
@@ -927,20 +914,18 @@ export default function CompanyDetailClient({
               ? 'Eliminated in the test round. This drive is archived — the radar stays on the next ones.'
               : displayStatus === 'rejected_interview' || status === 'rejected_interview' || effective.eliminatedStage === 4
               ? 'Interview completed · Not selected. This drive is archived — the radar stays on the next ones.'
-              : !provisionalStatus && (displayStatus === 'not_shortlisted' || statusDropdownStatus === 'not_shortlisted' || effective.eliminatedStage === 2)
+              : (displayStatus === 'not_shortlisted' || statusDropdownStatus === 'not_shortlisted' || effective.eliminatedStage === 2)
               ? "Your ID wasn't in the shortlist. This drive is archived — the radar stays on the next ones."
               : "Your ID wasn't in the final selection sheet. This drive is archived — the radar stays on the next ones."}
           </div>
         )}
 
-        {/* Multi-role / Intertwined Drive Advisory */}
-        <div className="mt-4 flex items-start gap-2.5 rounded-xl border border-zinc-800/80 bg-zinc-900/40 p-3.5 text-xs text-zinc-400">
+        {partialListAbsence && <div className="mt-4 flex items-start gap-2.5 rounded-xl border border-zinc-800/80 bg-zinc-900/40 p-3.5 text-xs text-zinc-400">
           <Info className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400/80" />
           <div className="leading-relaxed">
-            <span className="font-semibold text-zinc-200">Notice on Multi-Role &amp; Intertwined Drives:</span>{' '}
-            Companies with multiple roles (such as Deloitte, Whirlpool, etc.) frequently release shortlists for different profiles across separate circulars. If a released shortlist roster corresponds to a different profile, an automated &quot;Not Shortlisted&quot; indication may be provisional. You can freely adjust your status via the dropdown above to reflect your actual progress.
+            Your identifiers were not found in the published list for this round. The circular covers a partial list or batch; a later list may update this result.
           </div>
-        </div>
+        </div>}
       </motion.div>
 
       {/* Recruitment Stage Stepper */}
@@ -961,11 +946,11 @@ export default function CompanyDetailClient({
                 effective.eliminatedStage !== -1 ? 'text-rose-400 font-semibold' : 'text-zinc-500'
               )}
             >
-              {provisionalStatus || effective.statusSubtitle}
+              {effective.statusSubtitle}
             </span>
           )}
         </div>
-        <StageStepper status={displayStatus} events={company.events} notes={notesStr} manualOverride={isManual} />
+        <StageStepper status={displayStatus} events={company.events} notes={notesStr} manualOverride={isManual} roundDecisions={company.roundDecisions} />
       </motion.div>
 
       {/* Circular & Email Timeline */}
@@ -1046,10 +1031,10 @@ export default function CompanyDetailClient({
               const isNotInterviewOrOfferNotice = !/(?:interview|selection\s*list|final\s*selection|selected\s*candidates|offer)/i.test(email.subject);
               const isSupersededByAdvancedStage = isCandidateAdvancedPastTest && isNotInterviewOrOfferNotice;
 
-              const isNotShortlisted = !shortlistVerificationPending && isUserAppliedOrRegistered && !matchedCandidate && (isExplicitShortlistEmail || hasRosterAttachment) && !isSupersededByAdvancedStage;
+              const isNotShortlisted = isUserAppliedOrRegistered && email.verificationState === 'verified_absent';
 
               // isOffer is ONLY positive if candidate matched, or if not marked as not shortlisted in an explicit selection notice
-              const isOffer = !isNotShortlisted && (
+              const isOffer = !isNotShortlisted && email.verificationState === 'verified_present' && (
                 email.classification === 'selected' ||
                 subLower.includes('offer') ||
                 subLower.includes('congratulations')

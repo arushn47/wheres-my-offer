@@ -1,6 +1,8 @@
 import type { Metadata } from 'next';
 import { requireSession } from '@/lib/auth';
 import { createAdminClient } from '@/lib/supabase/admin';
+import { loadRoundStatusSummaries } from '@/lib/sync/round-status-data';
+import { resolveRecruitmentStatus } from '@/lib/sync/round-status';
 import { detectCampus, detectBranch } from '@/lib/utils';
 import AnalyticsClient from './analytics-client';
 
@@ -19,13 +21,14 @@ export default async function AnalyticsPage() {
   // Fetch placement_drives, applications, events, companies, emails, candidate matches, accounts
   const [
     { data: placementDrives, count: totalPlacementDrivesCount },
-    { data: applications },
+    { data: rawApplications },
     { data: events },
     { data: companies },
     { count: emailsCount },
     { data: candidateMatches },
     { data: userProfile },
     { data: accounts },
+    roundDecisionsByDrive,
   ] = await Promise.all([
     supabase
       .from('placement_drives')
@@ -60,7 +63,13 @@ export default async function AnalyticsPage() {
       .from('gmail_accounts')
       .select('email, account_type')
       .eq('user_id', session.userId),
+    loadRoundStatusSummaries(supabase, session.userId),
   ]);
+
+  const applications = (rawApplications || []).map(app => ({
+    ...app,
+    status: resolveRecruitmentStatus(app.status || 'not_applied', roundDecisionsByDrive.get(app.placement_drive_id), Boolean(app.manual_override), app.notes || ''),
+  }));
 
   const compMap = new Map((companies || []).map((c) => [c.id, c.name]));
   const appMap = new Map((applications || []).map((a) => [a.placement_drive_id, a]));

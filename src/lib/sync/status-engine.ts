@@ -1,3 +1,4 @@
+import { extractScopedEvents } from './scoped-events';
 import {
   buildCandidateIdentity,
   matchesCandidateText,
@@ -16,8 +17,15 @@ import {
   isShortlistMatchEvidence,
 } from '@/lib/sync/participation-evidence';
 import { evaluateCachedShortlistRosters } from '@/lib/sync/shortlist-verification';
+import { getStrongIdentityTokens } from './user-identity';
+import { getEvidenceMessageText, isQuotedReply } from './body';
+import { isOpenPptInvitation } from './placement-evidence';
+import { withUserMutationLease, currentMutationLease } from './mutation-lease';
+import { resolveRoundVerdicts, statusForRoundVerdict, type RoundVerdict } from './round-verdict';
+import { commitDriveRoundVerdicts } from './round-verdict-service';
 import { removeDriveEvents } from '@/lib/sync/drive-events';
 import { shouldReplaceRegistrationDeadline } from '@/lib/sync/events';
+import { inlineShortlistRoster } from './placement-evidence';
 import { mergePdfJobDetails } from '@/lib/sync/pdf-parser';
 import {
   type RoundType,
@@ -96,7 +104,22 @@ export function checkNeoIdMatch(
  * @param userNeoId User's configured Neo ID
  * @param userEmail User's email
  */
-export async function processEmailForEventsAndStatus(
+export async function processEmailForEventsAndStatus(...args: Parameters<typeof processEmailForEventsAndStatusUnlocked>) {
+  const outerLease = currentMutationLease();
+  return withUserMutationLease(args[1], async () => {
+    await processEmailForEventsAndStatusUnlocked(...args);
+    if (!outerLease) {
+      const targets = [...(currentMutationLease()?.touchedDriveIds || [])];
+      if (targets.length) {
+        const { recalculateApplicationStatuses, catchUpMissingNotifications } = await import('./reprocess');
+        await recalculateApplicationStatuses(args[1], undefined, { targetPlacementDriveIds: targets, skipBodyRecovery: true, skipGSheetScan: true });
+        await catchUpMissingNotifications(args[0], args[1]);
+      }
+    }
+  });
+}
+
+async function processEmailForEventsAndStatusUnlocked(
   supabase: ReturnType<typeof createAdminClient>,
   userId: string,
   companyId: string,
@@ -120,11 +143,11 @@ export async function processEmailForEventsAndStatus(
     targetDriveId = drive?.id || null;
   }
   if (!targetDriveId) return;
+  currentMutationLease()?.touchedDriveIds.add(targetDriveId);
   let hasNotifiedEvent = false;
 
   const subjLower = email.subject.toLowerCase();
-  const htmlText = htmlToPlainText(email.bodyHtml);
-  const fullText = `${email.subject}\n${email.bodyPlain || ''}\n${htmlText}\n${email.bodySnippet || ''}`;
+  const fullText = `${email.subject}\n${getEvidenceMessageText(email)}`;
 
   const { classifyEmail } = await import('@/lib/sync/classifier');
   const emailClass = classifyEmail(email).classification;
@@ -166,6 +189,7 @@ export async function processEmailForEventsAndStatus(
     ? `Found ${bodyMatch.matchedValue} in email body selection list`
     : null;
   let matchType = 'email_body';
+  let sheetEvidence: Record<string, unknown> | null = null;
 
   // Compute isShortlistEmail early — needed both for attachment scanning context (below)
   // and for status computation logic further down.
@@ -216,14 +240,10 @@ export async function processEmailForEventsAndStatus(
   const isShortlistEmail =
     (hasShortlistAttachment || isExplicitShortlistNotice || hasCachedRelevantAttachment) &&
     !isAppliedOrOptInRoster;
-  const identityTokens = [
-    userNeoId || '',
-    userEmail.match(/([0-9]{2}[a-z]{3}[0-9]{4,5})/i)?.[1] || '',
-    userEmail,
-  ].filter(Boolean);
+  const identityTokens = getStrongIdentityTokens(candidateIdentity);
   const cachedRosterEvaluation = isCollegeBroadcast
     ? evaluateCachedShortlistRosters({
-      rosters: email.attachments.map((attachment) => ({
+      rosters: email.attachments.filter((attachment) => /\.(xlsx|xls|csv)$/i.test(attachment.filename)).map((attachment) => ({
         filename: attachment.filename,
         collegeEmailId: email.canonicalEmailId || emailDbId,
         parseStatus: attachment.parseStatus,
@@ -286,6 +306,7 @@ export async function processEmailForEventsAndStatus(
       userNeoId,
       userEmail,
       isShortlistEmail  // Pass shortlist context so unnamed Excel files get correct classification
+      , candidateIdentity
     );
 
     if (excelMatch && excelMatch.matched) {
@@ -306,15 +327,20 @@ export async function processEmailForEventsAndStatus(
 
   // 2b. Check Google Sheets pubhtml shortlists in email text
   let gsheetEventToAdd: ExtractedEvent | null = null;
-  if (!isNeoMatched) {
+  if (!isNeoMatched && !isQuotedReply(email.subject)) {
     const { extractGoogleSheetUrls, scanGoogleSheetForCandidate } = await import('@/lib/sync/gsheet-parser');
     const gUrls = extractGoogleSheetUrls(fullText);
     for (const gUrl of gUrls) {
       const gMatch = await scanGoogleSheetForCandidate(gUrl, userEmail, userNeoId, candidateIdentity.name, candidateIdentity);
+      if (isCollegeBroadcast) {
+        const { persistSheetSnapshot } = await import('./sheet-snapshots');
+        await persistSheetSnapshot(supabase, email.canonicalEmailId || emailDbId, gUrl, gMatch);
+      }
       if (gMatch && gMatch.matched) {
         isNeoMatched = true;
         matchType = 'xlsx_cell';
         matchDetail = gMatch.details;
+        sheetEvidence = { matchedIdentity: gMatch.matchedValue, sourceUrl: gMatch.sourceUrl, contentHash: gMatch.contentHash, fetchedAt: gMatch.fetchedAt, sheetName: gMatch.sheetName, rowNumber: gMatch.rowNumber };
         if (gMatch.eventDate) {
           const isPpt = /ppt|pre[\s-]*placement/i.test(subjLower);
           const isInterview = /interview/i.test(subjLower);
@@ -326,7 +352,6 @@ export async function processEmailForEventsAndStatus(
               : `Online Assessment${gMatch.slot ? ` (${gMatch.slot})` : ''}`;
 
           const startTime = new Date(gMatch.eventDate);
-          startTime.setHours(gMatch.slot && /slot\s*2/i.test(gMatch.slot) ? 14 : 9, 0, 0, 0);
           gsheetEventToAdd = {
             eventType,
             title,
@@ -335,7 +360,7 @@ export async function processEmailForEventsAndStatus(
             venue: 'Campus / Offline',
             mode: 'online',
             confidence: 'high',
-            hasExplicitTime: true,
+            hasExplicitTime: false,
           };
         }
         break;
@@ -387,7 +412,8 @@ export async function processEmailForEventsAndStatus(
         email.canonicalEmailId || emailDbId,
         userNeoId,
         userEmail,
-        isShortlistEmail
+        isShortlistEmail,
+        candidateIdentity
       );
       rosterMatchLocation = precise?.details && precise.details !== `Matched in ${filename}` ? precise.details : null;
     } catch {
@@ -403,7 +429,8 @@ export async function processEmailForEventsAndStatus(
       email.canonicalEmailId || emailDbId,
       userNeoId,
       userEmail,
-      isShortlistEmail
+      isShortlistEmail,
+      candidateIdentity
     );
     if (cachedResult?.matched) {
       if (cachedResult.isActualShortlist) {
@@ -418,6 +445,11 @@ export async function processEmailForEventsAndStatus(
     }
   }
 
+  const inlineRoster = inlineShortlistRoster(email.subject, getEvidenceMessageText(email));
+  if (inlineRoster && matchType === 'email_body') {
+    isNeoMatched = evaluateCachedShortlistRosters({rosters:[inlineRoster],shortlistContext:true,identityTokens}).state === 'verified_present';
+    if (!isNeoMatched) matchDetail = null;
+  }
   const hasConfirmedCollegeShortlistMatch = isConfirmedShortlistEvidence({
     isCollegeBroadcast,
     isNeoMatched,
@@ -425,6 +457,23 @@ export async function processEmailForEventsAndStatus(
     isInAppliedList,
     isEliminationEmail,
   });
+
+  const localVerdicts = resolveRoundVerdicts([{
+    emailId: email.canonicalEmailId || emailDbId, subject: email.subject, body: getEvidenceMessageText(email),
+    receivedAt: new Date(email.receivedAt).toISOString(),
+    rosters: email.attachments.map((attachment) => ({ filename: attachment.filename, collegeEmailId: email.canonicalEmailId || emailDbId, parseStatus: attachment.parseStatus, extractedRows: attachment.extractedRows })),
+    directMatch: isNeoMatched && !inlineRoster && !isInAppliedList && !isEliminationEmail,
+    directInvitation: hasPersonalTestCredentials || isOpenPptInvitation(email.subject, getEvidenceMessageText(email)),
+    roundTypeOverride: /ppt|pre[\s-]*placement/i.test(email.subject) && !/test|assessment|interview|game|\bgd\b/i.test(email.subject) ? 'ppt' : undefined,
+    snapshotHashes: sheetEvidence?.contentHash ? [String(sheetEvidence.contentHash)] : [],
+  }], identityTokens);
+  const localVerdict = localVerdicts.at(-1);
+  const { data: persistedRound, error: roundReadError } = await supabase.from('round_verdicts')
+    .select('verdict').eq('user_id', userId).eq('placement_drive_id', targetDriveId).eq('is_current', true).maybeSingle();
+  if (roundReadError) throw roundReadError;
+  const priorVerdict = persistedRound?.verdict as RoundVerdict | undefined;
+  const isHistoricalRound = Boolean(priorVerdict && new Date(priorVerdict.sourceReceivedAt).getTime() > new Date(email.receivedAt).getTime());
+  const candidateEligibleForThisRound = !isHistoricalRound && Boolean(localVerdict?.eligible || (!isShortlistEmail && hasPersonalTestCredentials));
 
   if (isCollegeBroadcast) {
     const [
@@ -493,6 +542,7 @@ export async function processEmailForEventsAndStatus(
       matched_round_type: (isShortlistEmail || hasPersonalTestCredentials) ? announcedRound : null,
       matched_value: matchDetail || email.subject.slice(0, 100),
       confidence: 'high',
+      evidence: sheetEvidence,
     };
     if (rosterMatchLocation) matchPayload.match_location = rosterMatchLocation;
     if (isCollegeBroadcast) {
@@ -525,8 +575,11 @@ export async function processEmailForEventsAndStatus(
 
   // 3. Extract Events (PPT, Test, Interview) with Deduplication
   // Hoist extractedEvents so the status computation block can reference it
-  const extractedEvents = extractEvents(email);
-  if (gsheetEventToAdd) {
+  const { data: scopeCompanies, error: scopeError } = await supabase.from('companies').select('id,name');
+  if (scopeError) throw scopeError;
+  const scopedCompany = scopeCompanies?.find((company) => company.id === companyId);
+  const extractedEvents = extractScopedEvents(email, scopedCompany?.name || '', (scopeCompanies || []).map((company) => company.name));
+  if (gsheetEventToAdd?.hasExplicitTime) {
     extractedEvents.push(gsheetEventToAdd);
   }
   const regDeadlineEvt = extractedEvents.find(
@@ -552,341 +605,7 @@ export async function processEmailForEventsAndStatus(
     );
 
 
-  if (isWithdrawn) {
-    // Delete any previously inserted events for this drive if user has withdrawn
-    const { data: toDelete } = await supabase
-      .from('events')
-      .select('id, gcal_event_id')
-      .eq('user_id', userId)
-      .eq('placement_drive_id', targetDriveId);
-
-    if (toDelete && toDelete.length > 0) {
-      const { deleteEventFromGoogleCalendar } = await import('@/lib/calendar/google-sync');
-      for (const ev of toDelete) {
-        if (ev.gcal_event_id) {
-          const deleted = await deleteEventFromGoogleCalendar({ userId, companyName: '', eventId: ev.gcal_event_id });
-          if (!deleted) return;
-        }
-      }
-    }
-
-    await supabase.from('events').delete().eq('user_id', userId).eq('placement_drive_id', targetDriveId);
-  } else {
-    const isVerifiedAbsent =
-      !existingApp?.manual_override &&
-      !isNeoMatched &&
-      (
-        existingApp?.status === 'not_shortlisted' ||
-        (isCollegeBroadcast && cachedRosterEvaluation?.state === 'verified_absent')
-      );
-
-    for (const event of extractedEvents) {
-      const isDeadlineEvent = event.eventType === 'registration_deadline';
-
-      if (isVerifiedAbsent && !isDeadlineEvent) continue;
-
-      // RULE: For tests, interviews, and PPTs: ONLY add to user's schedule if candidate is shortlisted or actively participating!
-      const currentAppStatus = existingApp?.status || 'not_applied';
-      const isEliminated = isInactiveStatus(currentAppStatus);
-      const isTestOrInterview = ['online_test', 'coding_test', 'technical_interview', 'hr_interview', 'final_interview'].includes(event.eventType);
-
-      if (isEliminated && !isNeoMatched && !isDeadlineEvent) {
-        continue;
-      }
-
-      if ((isTestOrInterview || isShortlistEmail) && !isNeoMatched) {
-        // User was not found in the shortlist/test email.
-        // If they are 'applied' or 'ppt_scheduled', we still schedule the event so they can
-        // see the round is happening (it will show as not_shortlisted after reprocess).
-        // Only hard-skip if user is already in a terminal elimination state.
-        const currentStatus = existingApp?.status || 'not_applied';
-        const isAppliedOrPpt = ['applied', 'ppt_scheduled', 'shortlisted'].includes(currentStatus);
-        if (!isAppliedOrPpt) {
-          continue;
-        }
-      }
-
-      // ── Round identity: extract explicit ordinal + reschedule detection ──────
-      const emailReceivedAt = email.receivedAt
-        ? (typeof email.receivedAt === 'string' ? email.receivedAt : new Date(email.receivedAt).toISOString())
-        : null;
-      const emailSubjectForOrdinal = email.subject || '';
-      const emailBodyForOrdinal   = fullText.slice(0, 800);
-      const isReschedule = !isDeadlineEvent && isRescheduleEmail(emailSubjectForOrdinal, emailBodyForOrdinal);
-      const explicitOrdinal = isDeadlineEvent
-        ? null
-        : extractExplicitOrdinal(emailSubjectForOrdinal, emailBodyForOrdinal);
-      const explicitRoundNumber = explicitOrdinal?.roundNumber ?? null;
-      const explicitRoundLabel  = explicitOrdinal?.roundLabel  ?? null;
-
-      // ── Fetch all sibling events for round number reconciliation ─────────────
-      // Siblings = all events for the same (drive, event_type) regardless of round.
-      // We only re-rank unlabeled siblings (round_label IS NULL).
-      // Labeled siblings (round_label IS NOT NULL) have authoritative explicit ordinals.
-      type SiblingEvent = { id: string; round_number: number; round_label: string | null; source_email_received_at: string | null; is_rescheduled: boolean };
-      let siblings: SiblingEvent[] = [];
-      if (!isDeadlineEvent) {
-        const { data: siblingData } = await supabase
-          .from('events')
-          .select('id, round_number, round_label, source_email_received_at, is_rescheduled')
-          .eq('user_id', userId)
-          .eq('placement_drive_id', targetDriveId)
-          .eq('event_type', event.eventType);
-        siblings = (siblingData || []) as SiblingEvent[];
-      }
-
-      // ── AssignRoundNumber algorithm ──────────────────────────────────────────
-      // Determines round_number for the new/updated event and reconciles siblings.
-      // Step 1: Explicit ordinal wins absolutely.
-      // Step 2-4: Unlabeled events are ranked by source_email_received_at ASC.
-      let assignedRoundNumber = 1;
-      if (!isDeadlineEvent) {
-        if (explicitRoundNumber !== null) {
-          // Explicit ordinal: trust it directly.
-          assignedRoundNumber = explicitRoundNumber;
-        } else {
-          // Unlabeled: rank by source_email_received_at ASC among unlabeled siblings.
-          const unlabeledSiblings = siblings.filter((s) => s.round_label === null);
-          // Build augmented set: existing unlabeled siblings + the new email's received_at.
-          const augmented: { receivedAt: string | null; existingId?: string }[] = [
-            ...unlabeledSiblings.map((s) => ({
-              receivedAt: s.source_email_received_at,
-              existingId: s.id,
-            })),
-            { receivedAt: emailReceivedAt },  // the incoming event (no existingId)
-          ];
-          // Sort by receivedAt ASC (null → treated as very large = last).
-          augmented.sort((a, b) => {
-            if (!a.receivedAt && !b.receivedAt) return 0;
-            if (!a.receivedAt) return 1;
-            if (!b.receivedAt) return -1;
-            return a.receivedAt < b.receivedAt ? -1 : a.receivedAt > b.receivedAt ? 1 : 0;
-          });
-          // Explicit-labeled siblings occupy certain slot numbers; skip those.
-          const labeledSlots = new Set(siblings.filter((s) => s.round_label !== null).map((s) => s.round_number));
-          let nextSlot = 1;
-          const availableSlots: number[] = [];
-          while (availableSlots.length < augmented.length) {
-            if (!labeledSlots.has(nextSlot)) availableSlots.push(nextSlot);
-            nextSlot++;
-          }
-          // Find the rank of the new event (no existingId) in the sorted list.
-          const newEventIdx = augmented.findIndex((a) => a.existingId === undefined);
-          assignedRoundNumber = availableSlots[newEventIdx] ?? 1;
-
-          // Step 5: Reconcile existing unlabeled siblings whose stored round_number changed.
-          const siblingsToReconcile: { id: string; newRound: number }[] = [];
-          for (let i = 0; i < augmented.length; i++) {
-            const entry = augmented[i];
-            if (!entry.existingId) continue;  // this is the new event; skip
-            const siblingStoredRound = siblings.find((s) => s.id === entry.existingId)?.round_number;
-            if (siblingStoredRound !== availableSlots[i]) {
-              siblingsToReconcile.push({ id: entry.existingId, newRound: availableSlots[i] });
-            }
-          }
-          // Reconcile in two passes to avoid UNIQUE constraint conflicts:
-          // Pass 1: move conflicting siblings to a temporary negative round (–round_number).
-          // Pass 2: assign the correct round numbers.
-          // Actually: use large temp numbers (1000+) to avoid conflicts during swap.
-          for (const rec of siblingsToReconcile) {
-            await supabase
-              .from('events')
-              .update({ round_number: 1000 + siblingsToReconcile.indexOf(rec) })
-              .eq('id', rec.id);
-          }
-          for (const rec of siblingsToReconcile) {
-            await supabase
-              .from('events')
-              .update({ round_number: rec.newRound })
-              .eq('id', rec.id);
-          }
-        }
-      }
-
-      // Check if duplicate event exists for this company + event_type on the same calendar day.
-      // For reschedule emails: match by round_number (not calendar day) since the date is changing.
-      const startTimeIso = event.startTime ? event.startTime.toISOString() : null;
-      const startOfDay = event.startTime
-        ? new Date(
-          event.startTime.getFullYear(),
-          event.startTime.getMonth(),
-          event.startTime.getDate()
-        ).toISOString()
-        : null;
-      const endOfDay = event.startTime
-        ? new Date(
-          event.startTime.getFullYear(),
-          event.startTime.getMonth(),
-          event.startTime.getDate(),
-          23,
-          59,
-          59,
-          999
-        ).toISOString()
-        : null;
-
-      // For reschedule emails, match by round_number. For normal emails, match by date-window.
-      let existingEvents: { id: string; start_time: string | null; venue: string | null; mode: string | null; college_email_id: string | null }[] | null = null;
-      if (isReschedule && siblings.length > 0) {
-        // Identify the event row this reschedule is targeting (by round_number).
-        const targetSibling = siblings.find((s) => s.round_number === assignedRoundNumber) ?? siblings[0];
-        existingEvents = [{
-          id: targetSibling.id,
-          start_time: null,
-          venue: null,
-          mode: null,
-          college_email_id: null,
-        }];
-      } else if (!isDeadlineEvent) {
-        let eventQuery = supabase
-          .from('events')
-          .select('id, start_time, venue, mode, college_email_id')
-          .eq('user_id', userId)
-          .eq('placement_drive_id', targetDriveId)
-          .eq('event_type', event.eventType);
-
-        if (startOfDay && endOfDay) {
-          eventQuery = eventQuery
-            .gte('start_time', startOfDay)
-            .lte('start_time', endOfDay);
-        } else if (startTimeIso) {
-          eventQuery = eventQuery.eq('start_time', startTimeIso);
-        } else if (!event.startTime) {
-          eventQuery = eventQuery.is('start_time', null);
-        }
-        const { data } = await eventQuery.limit(1);
-        existingEvents = data as typeof existingEvents;
-      } else {
-        // Deadline events: use old logic
-        let eventQuery = supabase
-          .from('events')
-          .select('id, start_time, venue, mode, college_email_id')
-          .eq('user_id', userId)
-          .eq('placement_drive_id', targetDriveId)
-          .eq('event_type', event.eventType);
-        const { data } = await eventQuery.limit(1);
-        existingEvents = data as typeof existingEvents;
-      }
-
-      const { data: compRec } = await supabase.from('companies').select('name').eq('id', companyId).single();
-      const displayComp = compRec?.name || email.subject.replace(/^(?:fwd|re|fw)\s*:\s*/i, '').slice(0, 40);
-      const finalTitle = `${displayComp} - ${event.title}`;
-
-      const eventInsertPayload: any = {
-        user_id: userId,
-        placement_drive_id: targetDriveId,
-        event_type: event.eventType,
-        title: finalTitle,
-        start_time: startTimeIso,
-        end_time: event.endTime ? event.endTime.toISOString() : null,
-        venue: event.venue,
-        mode: event.mode,
-        confidence: event.confidence,
-        college_email_id: isCollegeBroadcast ? emailDbId : null,
-        // Round identity columns
-        round_number: isDeadlineEvent ? 1 : assignedRoundNumber,
-        round_label: isDeadlineEvent ? null : explicitRoundLabel,
-        source_email_received_at: isDeadlineEvent ? null : emailReceivedAt,
-        is_rescheduled: isReschedule,
-      };
-
-      if (existingEvents && existingEvents.length > 0) {
-        const updatePayload: Record<string, unknown> = {};
-
-        if (isDeadlineEvent) {
-          if (shouldReplaceRegistrationDeadline(existingEvents[0], event, isCollegeBroadcast)) {
-            updatePayload.start_time = startTimeIso;
-            updatePayload.end_time = event.endTime
-              ? event.endTime.toISOString()
-              : null;
-
-            if (isCollegeBroadcast) {
-              updatePayload.college_email_id = emailDbId;
-            }
-          }
-        } else if (isReschedule) {
-          // Reschedule: update start_time (and end_time if provided) but NEVER touch
-          // source_email_received_at or round_number — the round identity was established
-          // by the original announcement email.
-          if (startTimeIso) {
-            updatePayload.start_time = startTimeIso;
-          }
-          if (event.endTime) {
-            updatePayload.end_time = event.endTime.toISOString();
-          }
-          if (event.venue && event.venue !== 'Campus / Offline') {
-            updatePayload.venue = event.venue;
-          }
-          updatePayload.is_rescheduled = true;
-        } else {
-          if (startTimeIso && event.hasExplicitTime) {
-            updatePayload.start_time = startTimeIso;
-          }
-
-          if (event.endTime && event.hasExplicitTime) {
-            updatePayload.end_time = event.endTime.toISOString();
-          }
-
-          if (event.venue && event.venue !== 'Campus / Offline') {
-            updatePayload.venue = event.venue;
-          }
-
-          if (event.mode && event.mode !== 'unknown') {
-            updatePayload.mode = event.mode;
-          }
-        }
-
-        if (Object.keys(updatePayload).length > 0) {
-          await supabase
-            .from('events')
-            .update(updatePayload)
-            .eq('id', existingEvents[0].id);
-        }
-      } else {
-        const { data: insertedEvt } = await supabase
-          .from('events')
-          .insert(eventInsertPayload)
-          .select('id')
-          .single();
-
-        // Trigger Event Scheduled Notification (Web Push + In-App)
-        // Note: Google Calendar reconciliation runs holistically after sync to guarantee
-        // only confirmed, eligible events are pushed and any cancelled/withdrawn events are purged.
-        if (insertedEvt) {
-          const { notifyEventScheduled } = await import('@/lib/notifications/service');
-
-          const { data: comp } = await supabase
-            .from('companies')
-            .select('name')
-            .eq('id', companyId)
-            .single();
-
-          const compName = comp?.name || 'Drive';
-
-          const holdNotification =
-            isCollegeBroadcast &&
-            isShortlistEmail &&
-            !isNeoMatched &&
-            !isDeadlineEvent;
-
-          if (!holdNotification) {
-            await notifyEventScheduled({
-              userId,
-              placementDriveId: targetDriveId,
-              companyName: compName,
-              eventType: event.eventType,
-              startTime: event.startTime || null,
-              venue: event.venue,
-              eventId: insertedEvt.id,
-              candidateConfirmed: isNeoMatched,
-            });
-
-            hasNotifiedEvent = true;
-          }
-        }
-      }
-    }
-  }
+  // Persist the event diff only after all evidence for the drive has been resolved.
 
   // 4. Extract Job Details (Role, CTC, Stipend, Location)
   // PDF JD attachments already parsed into the shared archive fill any field the
@@ -1167,11 +886,7 @@ export async function processEmailForEventsAndStatus(
         // It is a test or screening shortlist email (e.g. initial test shortlist or updated test shortlist)
         // If the candidate was not found in this shortlist, they did NOT qualify for the test!
         newStatus = 'not_shortlisted';
-        const hasPptEvidence =
-          isExplicitPostPptEmail ||
-          extractedEvents.some((e) => /ppt/i.test(e.eventType)) ||
-          /not\s*shortlisted\s*\(post\s*ppt\)|post[\s-]*ppt|after\s*ppt/i.test(subjLower + ' ' + fullText) ||
-          Boolean(existingApp?.notes && /announced_process:.*"roundType":"ppt"/i.test(existingApp.notes));
+        const hasPptEvidence = currentStatus === 'ppt_completed' || Boolean(priorVerdict?.eligible && (priorVerdict.roundType === 'ppt' || priorVerdict.pptIncluded));
         if (hasPptEvidence) {
           isPostPptElimination = true;
         }
@@ -1201,7 +916,7 @@ export async function processEmailForEventsAndStatus(
         return Boolean(endTime) && endTime!.getTime() <= Date.now();
       });
       newStatus = hasPastTest ? 'test_completed' : 'test_scheduled';
-    } else if (hasPpt && current === 'applied') {
+    } else if (hasPpt && current === 'applied' && isOpenPptInvitation(email.subject, fullText)) {
       newStatus = 'ppt_scheduled';
     }
   }
@@ -1299,13 +1014,7 @@ export async function processEmailForEventsAndStatus(
     // If manual_override was cleared by a neoMatch, refresh last_updated
     last_updated: (existingApp?.manual_override && !isNeoMatched && existingApp?.last_updated) ? existingApp.last_updated : new Date().toISOString(),
   };
-  if (existingApp?.manual_override && !isNeoMatched) {
-    // Preserve manual override only when neoMatch did NOT compute a new status
-    appUpdate.manual_override = true;
-  } else if (existingApp?.manual_override && isNeoMatched && newStatus) {
-    // neoMatch found concrete evidence — clear the manual override so future syncs work normally
-    appUpdate.manual_override = false;
-  }
+  if (existingApp?.manual_override) { appUpdate.manual_override = true; newStatus = null; }
 
   const { extractTravelRequirement } = await import('@/lib/sync/events');
   const travelReq = extractTravelRequirement(fullText);
@@ -1384,6 +1093,11 @@ export async function processEmailForEventsAndStatus(
     if (noteParts.length > 0) appUpdate.notes = noteParts.join('\n');
   }
 
+  if (localVerdict && !existingApp?.manual_override) {
+    if (isHistoricalRound) newStatus = null;
+    else if (!localVerdict.eligible) newStatus = statusForRoundVerdict(localVerdict, currentStatus);
+  }
+  if ((localVerdict || priorVerdict) && existingApp && !existingApp.manual_override) newStatus = null;
   if (newStatus) {
     appUpdate.status = newStatus;
     appUpdate.status_source_email_at = email.receivedAt ? new Date(email.receivedAt).toISOString() : new Date().toISOString();
@@ -1393,82 +1107,6 @@ export async function processEmailForEventsAndStatus(
     appUpdate.status_confidence = isAiFlaggedForReview ? 'low' : 'high';
     // AI review notes are already included in appUpdate.notes above (with travelReq), skip double-append
 
-    // If candidate withdrew, declined, or was not shortlisted/rejected, purge scheduled events from DB and Google Calendar
-    if (newStatus === 'not_shortlisted') {
-      await removeDriveEvents(
-        supabase,
-        userId,
-        targetDriveId,
-        {
-          excludeTypes: ['registration_deadline'],
-          onlyUnfinished: true,
-        }
-      );
-    } else if (['withdrawn', 'declined', 'rejected'].includes(newStatus)) {
-      const isTestEliminatedWithMatch = newStatus === 'rejected' && hasConfirmedShortlistMatch;
-      let deleteQuery = supabase
-        .from('events')
-        .select('id, gcal_event_id')
-        .eq('user_id', userId)
-        .eq('placement_drive_id', targetDriveId);
-
-      if (isTestEliminatedWithMatch) {
-        // Preserve historical test and ppt events so stages can display "Eliminated in Test Round"
-        deleteQuery = deleteQuery.not('event_type', 'in', '("online_test","coding_test","ppt")');
-      }
-
-      const { data: toDelete } = await deleteQuery;
-
-      if (toDelete && toDelete.length > 0) {
-        const { deleteEventFromGoogleCalendar } = await import('@/lib/calendar/google-sync');
-        for (const ev of toDelete) {
-          if (ev.gcal_event_id) {
-            const deleted = await deleteEventFromGoogleCalendar({ userId, companyName: '', eventId: ev.gcal_event_id });
-            if (!deleted) return;
-          }
-        }
-      }
-
-      if (isTestEliminatedWithMatch) {
-        await supabase
-          .from('events')
-          .delete()
-          .eq('user_id', userId)
-          .eq('placement_drive_id', targetDriveId)
-          .not('event_type', 'in', '("online_test","coding_test","ppt")');
-      } else {
-        await supabase.from('events').delete().eq('user_id', userId).eq('placement_drive_id', targetDriveId);
-      }
-    }
-
-    // Only notify if canonical status actually changed!
-    if (newStatus !== existingApp?.status) {
-      const { notifyStatusChange, notifyShortlistMatch } = await import('@/lib/notifications/service');
-      const { data: comp } = await supabase.from('companies').select('name').eq('id', companyId).single();
-      const companyName = comp?.name || 'Company';
-
-      if (isNeoMatched && (matchType === 'excel_attachment' || newStatus === 'shortlisted')) {
-        await notifyShortlistMatch({
-          userId,
-          placementDriveId: targetDriveId,
-          companyName,
-          neoId: userNeoId || userEmail,
-          emailSubject: email.subject,
-          sourceEmailId: emailDbId,
-        });
-      } else if (hasNotifiedEvent && ['test_scheduled', 'interview_scheduled', 'ppt_scheduled'].includes(newStatus)) {
-        // Event was already notified with exact schedule & venue; avoid duplicate status ping
-      } else {
-        await notifyStatusChange({
-          userId,
-          placementDriveId: targetDriveId,
-          companyName,
-          oldStatus: existingApp?.status || null,
-          newStatus,
-          sourceEmailId: emailDbId,
-        });
-      }
-    }
   }
 
   // Extract and populate registration deadline on application
@@ -1508,6 +1146,8 @@ export async function processEmailForEventsAndStatus(
       throw applicationError;
     }
   }
+
+  // Positive status and shortlist alerts come from the shared holistic decision commit.
 
   if (isRecentEmail && isDriveDiscoveryEmail && isInitialApplication && isCollegeBroadcast) {
     const { notifyNewDrive } = await import('@/lib/notifications/service');

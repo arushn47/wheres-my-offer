@@ -1,5 +1,5 @@
 import type { ParsedEmail } from '@/lib/gmail/client';
-import { stripQuotedContent } from '@/lib/sync/body';
+import { stripQuotedContent, getEvidenceMessageText } from '@/lib/sync/body';
 import { deriveEventEndTime } from '@/lib/event-duration';
 
 export interface ExtractedEvent {
@@ -145,13 +145,14 @@ export interface ParsedDateTimeResult {
  */
 export function parseDateTimeWithConfidence(
   text: string,
-  fallbackDate?: Date | null
+  fallbackDate?: Date | null,
+  establishedRoundDate?: Date | null
 ): ParsedDateTimeResult {
   if (!text) return { date: null, hasExplicitTime: false };
 
   let day: number | null = null;
   let month: number | null = null;
-  let year = fallbackDate ? fallbackDate.getFullYear() : new Date().getFullYear();
+  let year = new Date((fallbackDate?.getTime() || Date.now()) + 330 * 60_000).getUTCFullYear();
 
   // 1. Check DD-MM-YYYY, DD/MM/YYYY, or DD.MM.YYYY numeric format (e.g. "02.09.2026", "11-08-2026")
   const numMatch = text.match(/(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{4}|\d{2})/);
@@ -214,6 +215,7 @@ export function parseDateTimeWithConfidence(
     timeText = text.slice(0, matchedDateToken.index) + text.slice(matchedDateToken.index + matchedDateToken[0].length);
   }
 
+  timeText = timeText.replace(/\b(?:test|round|assessment|interview)\s+[1-9]\s*:\s*/gi, ' ');
   const timeMatch =
     timeText.match(/(?:by|at|@|from|is\s+at)?\s*\(?\s*(\d{1,2})\s*(?::|\.)?\s*(\d{2})?\s*(am|pm|a\.m\.|p\.m\.|noon|p\b|a\b)/i) ||
     timeText.match(/(?:by|at|@|from|is\s+at)\s*\(?\s*(\d{1,2})\s*(?::|\.)\s*(\d{2})\s*(?:hours|hrs|sharp)?/i);
@@ -234,25 +236,21 @@ export function parseDateTimeWithConfidence(
     const hasTomorrow = /tomm|tomorrow|tmrw|next\s+day/i.test(text);
     const hasToday = /\btoday\b/i.test(text);
     if (fallbackDate && hasTomorrow) {
-      const ref = new Date(fallbackDate);
-      ref.setDate(ref.getDate() + 1);
-      day = ref.getDate();
-      month = ref.getMonth();
-      year = ref.getFullYear();
+      const ref = new Date(fallbackDate.getTime() + 330 * 60_000 + 86_400_000);
+      day = ref.getUTCDate();
+      month = ref.getUTCMonth();
+      year = ref.getUTCFullYear();
     } else if (fallbackDate && hasToday) {
       // "fresh link for test today" — use the email's received date
-      const ref = new Date(fallbackDate);
-      day = ref.getDate();
-      month = ref.getMonth();
-      year = ref.getFullYear();
-    } else if (fallbackDate && hasExplicitTime) {
-      // If we found an explicit time (e.g. "7:00 PM") but no date, default to the received date.
-      const ref = new Date(fallbackDate);
-      day = ref.getDate();
-      month = ref.getMonth();
-      year = ref.getFullYear();
+      const ref = new Date(fallbackDate.getTime() + 330 * 60_000);
+      day = ref.getUTCDate();
+      month = ref.getUTCMonth();
+      year = ref.getUTCFullYear();
+    } else if (hasExplicitTime && establishedRoundDate) {
+      const ref = new Date(establishedRoundDate.getTime() + 330 * 60_000);
+      day = ref.getUTCDate(); month = ref.getUTCMonth(); year = ref.getUTCFullYear();
     } else {
-      return { date: null, hasExplicitTime: false };
+      return { date: null, hasExplicitTime };
     }
   }
 
@@ -265,6 +263,8 @@ export function parseDateTimeWithConfidence(
   const isoWithIstOffset = `${year}-${monthStr}-${dayStr}T${hourStr}:${minStr}:00+05:30`;
 
   const date = new Date(isoWithIstOffset);
+  const calendarDate = new Date(date.getTime() + 330 * 60_000);
+  if (hours > 23 || minutes > 59 || calendarDate.getUTCDate() !== day || calendarDate.getUTCMonth() !== month) return { date: null, hasExplicitTime };
   return {
     date: isNaN(date.getTime()) ? null : date,
     hasExplicitTime,
@@ -297,7 +297,7 @@ export function parseExplicitEndTime(text: string, startDate: Date): Date | null
   if (!text || !startDate) return null;
 
   // Range separator: "to", "until", or a dash/hyphen preceded by a digit, whitespace, am/pm, or line start
-  const rangeSep = /(?:\b(?:to|until)\b|(?<=\d|\s|am|pm|noon)[-–—]\s*(?=\d|\()|^\s*[-–—]\s*(?=\d|\())/i;
+  const rangeSep = /(?:\b(?:to|until)\b\s*(?=\(?\s*\d|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)|\b\d{1,2}(?::|\.)\d{2}\s*(?:am|pm|hours?|hrs?)?\s*[-–—]\s*(?=\d|\())/i;
 
   // --- 1. Try AM/PM range first ---
   const amPmRegex = new RegExp(
@@ -330,7 +330,7 @@ export function parseExplicitEndTime(text: string, startDate: Date): Date | null
 
   // --- 2. Try 24-hour range (e.g. "23:59 Hours", "18:00", "to October 4, 2026, 23:59 Hours") ---
   const h24Regex = new RegExp(
-    rangeSep.source + '\\s*(?:[^:\\r\\n]{0,60}?)(\\d{1,2}):(\\d{2})\\s*(?:hours?|hrs?)?\\s*(?:[^\\d]|$)',
+    rangeSep.source + '\\s*(?:[^:\\r\\n]{0,60}?)(\\d{1,2}):(\\d{2})\\s*(?:hours?|hrs?)?\\s*(?!am\\b|pm\\b|a\\.m|p\\.m)(?:[^\\d]|$)',
     'i'
   );
   const h24Match = text.match(h24Regex);
@@ -483,7 +483,7 @@ export function extractEvents(email: ParsedEmail): ExtractedEvent[] {
     (email as any).body_plain ||
     (email as any).body_snippet ||
     '';
-  const unquotedBody = stripQuotedContent(rawBody)
+  const unquotedBody = getEvidenceMessageText({ subject: email.subject, bodyPlain: rawBody, bodyHtml: email.bodyHtml || '', bodySnippet: '' })
     .replace(/\*?Disclaimer:\*?[\s\S]*$/i, ' ');
 
   const fullText = `${email.subject}\n${unquotedBody}`;
@@ -640,6 +640,9 @@ export function extractEvents(email: ParsedEmail): ExtractedEvent[] {
     snippetForTest = cleanNormalizedText;
   }
 
+  // This relative date explicitly describes the same test link, rather than its receipt time.
+  if (/fresh\s+link\s+for\s+test\s+today|\btest\s+(?:is\s+)?today\b/i.test(cleanNormalizedText) && !parseDateTimeWithConfidence(snippetForTest, refDate).date) snippetForTest += ' today';
+
   const hasTestKeyword =
     /(?:online|coding|aptitude|assessment|written)\s*test|test\s+link|fresh\s+link|hackerrank|hackerearth|mettl|amcat/i.test(cleanNormalizedText) ||
     Boolean(testMatch);
@@ -650,7 +653,7 @@ export function extractEvents(email: ParsedEmail): ExtractedEvent[] {
     !hasAssessmentAlreadyCompleted &&
     !isFormOrPreferenceOnly
   ) {
-    const parsed = parseDateTimeWithConfidence(snippetForTest, refDate);
+    const parsed = parseDateTimeWithConfidence(snippetForTest, refDate, email.establishedRoundDate);
     const venue = extractVenue(cleanNormalizedText);
 
     const hasExplicitDate =
@@ -700,7 +703,7 @@ export function extractEvents(email: ParsedEmail): ExtractedEvent[] {
       /(?:interview|personal\s+discussion|next\s+round\s+of\s+(?:the\s+)?(?:selection\s+process|selection|process)|physical\s+selection\s+process|selection\s+process)\s*(?:is\s+scheduled)?\s*[:\-–—]?\s*(?:from|on)?\s*\(?(.{1,120})/i
     );
     const snippetForInterview = interviewMatch ? interviewMatch[0] : cleanNormalizedText;
-    const parsed = parseDateTimeWithConfidence(snippetForInterview, refDate);
+    const parsed = parseDateTimeWithConfidence(snippetForInterview, refDate, email.establishedRoundDate);
 
     const hasExplicitDateInText =
       parsed.hasExplicitTime ||
@@ -750,6 +753,11 @@ export function extractEvents(email: ParsedEmail): ExtractedEvent[] {
  * Handles patterns like "@ Respective campus venues", "LC 202", "VIT Vellore campus".
  */
 export function extractVenue(text: string): string | null {
+  const ownLocationDenied = /(?:not|no|cannot|can't)\s+(?:at\s+|from\s+)?(?:your\s+)?own\s+location|own\s+location[^.\n]{0,45}(?:not\s+(?:there|available|allowed|permitted)|is\s+no|not\s+an?\s+option)/i.test(text);
+  if (ownLocationDenied) {
+    const lab = text.match(/\bLC\s*\d+\b/i)?.[0];
+    return lab || 'Respective CDC Labs';
+  }
   if (!text) return null;
 
   // Strip email addresses so domains like @vitbhopal.ac.in are never parsed as venues
@@ -834,6 +842,7 @@ function determineMode(
   text: string,
   venue: string | null
 ): 'online' | 'offline' | 'hybrid' | 'unknown' {
+  if (/own\s+location[^.\n]{0,45}(?:not\s+(?:there|available|allowed|permitted)|not\s+an?\s+option)/i.test(text)) return /online\s+(?:test|assessment)/i.test(text) ? 'online' : 'unknown';
   if (venue && /own\s*location/i.test(venue)) return 'online';
   if (/own\s*location/i.test(text) && !/not\s+own\s+location/i.test(text)) return 'online';
   if (/not\s+online|physical|offline|in[\s-]person/i.test(text)) return 'offline';
@@ -861,6 +870,8 @@ export function extractTravelRequirement(text: string): TravelRequirement {
   const cleanBody = clean
     .replace(/(?:warm\s+regards|best\s+regards|thanks\s+&?\s*regards|director\s*\(\s*career\s+development\s+centre\s*\))[\s\S]*$/i, '')
     .replace(/disclaimer\s*:[\s\S]*$/i, '');
+
+  if (/own\s+location[^.\n]{0,60}(?:not\s+(?:there|allowed|available|permitted)|no\s+longer)/i.test(cleanBody)) return 'bhopal';
 
   // 1. Isolate the "Date of Visit" / Process Schedule section if present
   const scheduleMatch = cleanBody.match(/(?:Date\s+of\s+Visit|Process\s+details|Process\s+schedule|Hiring\s+process)[\s\S]{1,600}?(?=(?:Eligible|Eligibility|CTC|Stipend|Selection|Website|Last\s+date)|$)/i);

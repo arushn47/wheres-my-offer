@@ -1,12 +1,20 @@
+import { resolveRecruitmentStatus, type RoundStatusDecision } from './round-status';
+
 export type StatusUpdatePhase = 'personal_scan' | 'college_matching' | 'status_recalculation' | 'complete' | null;
 
 /**
- * Shortlist verdicts are stored directly on applications.status. There is no
- * separate verification-tracking state and no provisional masking: whatever the
- * scanner wrote is what the user sees.
+ * Verification state describes parsing and identity checks. Partial-list
+ * completeness describes scope, and never changes a checked absence to pending.
  */
-export function isShortlistVerificationPending(_state?: string | null): boolean {
-  return false;
+export function isShortlistVerificationPending(state?: string | null): boolean {
+  return state === 'pending' || state === 'deferred';
+}
+
+/** Shared by list and detail loaders so both surfaces use the same current evidence. */
+export function getRoundStatusDisplay(status: string, decisions: RoundStatusDecision[] = [], manualOverride = false, notes = '') {
+  return {
+    status: resolveRecruitmentStatus(status, decisions, manualOverride, notes),
+  };
 }
 
 export function getVisibleApplicationStatus(
@@ -24,17 +32,5 @@ export function getStatusUpdatePhase(subject?: string | null): StatusUpdatePhase
   if (/updating drive statuses|recalculating application statuses/.test(value)) return 'status_recalculation';
   if (/matching shared college shortlist archive|matching cached college shortlist/.test(value)) return 'college_matching';
   if (/^(connecting|scanning|processing|checking)/.test(value)) return 'personal_scan';
-  return null;
-}
-
-export function getProvisionalStatusLabel(_params: {
-  status?: string | null;
-  isSyncing?: boolean;
-  statusUpdatesPending?: boolean;
-  verificationPending?: boolean;
-  updatePhase?: 'personal' | 'personal_scan' | 'college' | 'college_matching' | 'recalculate' | 'status_recalculation' | 'complete' | null;
-  manualOverride?: boolean;
-  syncSubject?: string | null;
-}): string | null {
   return null;
 }

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   CANONICAL_IDENTITY_VERSION,
+  CANONICAL_PARSER_VERSION,
   canReuseCanonicalBody,
   computeCanonicalContentKey,
   isApprovedCanonicalSender,
@@ -33,14 +34,14 @@ describe('Phase D canonical email identity', () => {
       subject: 'Subject', body_text: 'body', classification: null,
       classification_confidence: null, parsed_company_name: null, parsed_drive_numbers: null,
       parsed_job_details: null, parsed_events: null, processing_status: 'complete',
-      identity_version: CANONICAL_IDENTITY_VERSION, parser_version: 2, has_attachments: false,
+      identity_version: CANONICAL_IDENTITY_VERSION, parser_version: CANONICAL_PARSER_VERSION, has_attachments: false,
     })).toBe(true);
     expect(canReuseCanonicalBody({
       id: '2', content_key: 'k', message_id: null, sender_email: 'vitlions2027@vitbhopal.ac.in',
       subject: 'Subject', body_text: 'body', classification: null,
       classification_confidence: null, parsed_company_name: null, parsed_drive_numbers: null,
       parsed_job_details: null, parsed_events: null, processing_status: 'complete',
-      identity_version: CANONICAL_IDENTITY_VERSION, parser_version: 2, has_attachments: true,
+      identity_version: CANONICAL_IDENTITY_VERSION, parser_version: CANONICAL_PARSER_VERSION, has_attachments: true,
     })).toBe(true);
   });
 
@@ -71,7 +72,7 @@ describe('Phase D canonical email identity', () => {
       subject: 'Subject', body_text: 'body', classification: null,
       classification_confidence: null, parsed_company_name: null, parsed_drive_numbers: null,
       parsed_job_details: null, parsed_events: null, identity_version: CANONICAL_IDENTITY_VERSION,
-      has_attachments: false, parser_version: 2,
+      has_attachments: false, parser_version: CANONICAL_PARSER_VERSION,
     };
     expect(canReuseCanonicalBody({ ...base, processing_status: 'processing' })).toBe(false);
     expect(canReuseCanonicalBody({ ...base, processing_status: 'complete', body_text: null })).toBe(false);
@@ -82,7 +83,7 @@ describe('Phase D canonical email identity', () => {
       id: '1', content_key: 'k', message_id: 'm', sender_email: 'vitlions2027@vitbhopal.ac.in',
       subject: 'Shortlist', body_text: 'body', classification: 'shortlist',
       classification_confidence: 1, parsed_company_name: 'Example', parsed_drive_numbers: null,
-      parsed_job_details: null, parsed_events: null, processing_status: 'complete', parser_version: 2,
+      parsed_job_details: null, parsed_events: null, processing_status: 'complete', parser_version: CANONICAL_PARSER_VERSION,
       identity_version: CANONICAL_IDENTITY_VERSION,
     };
     expect(canReuseCanonicalBody({ ...base, has_attachments: true })).toBe(true);

@@ -3,6 +3,7 @@ import * as XLSX from 'xlsx';
 import type { ParsedAttachment } from '@/lib/gmail/client';
 import { searchRollNumberInWorkbook, searchRollNumberInWorkbookRows, type WorkbookSheetRows } from '@/lib/sync/xlsx-matcher';
 import type { createAdminClient } from '@/lib/supabase/admin';
+import { isNonShortlistRoster, isPositiveRosterRow } from './roster-policy';
 
 export interface ExcelMatchResult {
   matched: boolean;
@@ -62,6 +63,7 @@ export function classifyExcelFile(filename: string): 'shortlist' | 'applied_list
  */
 import {
   buildCandidateIdentity,
+  getStrongIdentityTokens,
   matchesCandidateRow,
   type UserCandidateIdentity,
 } from '@/lib/sync/user-identity';
@@ -93,7 +95,7 @@ export async function scanExcelAttachmentsForNeoId(
     emails: [userEmail],
   });
 
-  const searchTokens = identity.searchTokens;
+  const searchTokens = getStrongIdentityTokens(identity);
 
   if (searchTokens.length === 0) {
     return null;
@@ -225,7 +227,7 @@ export async function scanSharedCollegeAttachmentsForNeoId(
     emails: [userEmail],
   });
 
-  const searchTokens = identity.searchTokens;
+  const searchTokens = getStrongIdentityTokens(identity);
   if (searchTokens.length === 0) return null;
 
   const { data: attachmentRows, error } = await supabase
@@ -279,9 +281,11 @@ export async function scanSharedCollegeAttachmentsForNeoId(
 
     if (!appliedListMatch) {
       for (const sheet of sheets) {
+        if (isNonShortlistRoster(sheet.sheetName)) continue;
         for (let rowIndex = 0; rowIndex < sheet.rows.length; rowIndex++) {
           const row = sheet.rows[rowIndex];
           if (!Array.isArray(row)) continue;
+          if (!isPositiveRosterRow(row, sheet.rows[0])) continue;
           const rowMatch = matchesCandidateRow(row as (string | null | undefined)[], identity);
           if (rowMatch.matched) {
             const fileType = classifyExcelFile(attachment.filename || '');

@@ -44,6 +44,8 @@ export interface ParsedEmail {
    * only when Gmail does not report an internal date.
    */
   receivedAt: Date;
+  /** An already confirmed date for this same round, used only by time-only revisions. */
+  establishedRoundDate?: Date | null;
   /** RFC `Date` header: when the *sender* claims the message was sent. */
   dateHeader?: Date | null;
   /** Gmail `internalDate`: authoritative mailbox receipt time. */

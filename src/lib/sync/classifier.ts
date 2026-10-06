@@ -1,6 +1,6 @@
 import type { ParsedEmail } from '@/lib/gmail/client';
 import { extractDriveNumber } from '@/lib/sync/events';
-import { getCanonicalBodyText, getCurrentMessageText } from '@/lib/sync/body';
+import { getCanonicalBodyText, getCurrentMessageText, getEvidenceMessageText } from '@/lib/sync/body';
 
 // ============================================
 // Email Classification Types
@@ -371,7 +371,7 @@ export function classifyEmail(
 ): ClassificationResult {
   const subject = email.subject.toLowerCase();
   const canonicalBody = getCanonicalBodyText(email);
-  const body = canonicalBody.toLowerCase();
+  const body = getEvidenceMessageText(email).toLowerCase();
   const sender = email.senderEmail.toLowerCase();
   const fullClassificationText = `${subject}\n${getCurrentMessageText(email).toLowerCase()}`;
   const buildClassification = (
@@ -392,6 +392,9 @@ export function classifyEmail(
   });
 
   // Resolve only explicit conflicts that the ordered rules cannot represent safely.
+  if (sender === 'noreply.cdcinfo@vitstudent.ac.in' && /(?:you're\s+)?eligible\s+for\b/i.test(subject)) {
+    return buildClassification('registration', 'high', 'Personal NeoPAT eligibility invitation');
+  }
   if (
     /registration.*(?:has\s+been\s+)?withdrawn|drive.*has\s+been\s+withdrawn|status:\s*withdrawn|your\s+registration\s+for\s+the\s+following\s+placement\s+drive\s+has\s+been\s+withdrawn/i.test(fullClassificationText)
   ) {
@@ -639,6 +642,8 @@ const NON_COMPANY_WORDS = [
   'date change', 'date change for sabre', 'date change for squadstack', 'schedule change', 'venue change',
   // Generic placement terminology
   'dream', 'super dream', 'placement', 'drive', 'finance', 'hiring', 'recruitment', 'offer', 'ppo', 'selection', 'shortlist',
+  'additional', 'venue', 'scheduled', 'rescheduled', 'postponed', 'slot', 'slots', 'timing', 'timings',
+  'centre', 'center', 'hall', 'auditorium', 'lab', 'labs', 'round', 'rounds', 'list', 'lists', 'selected', 'rejected',
   // Role titles / profiles that are never company names
   'ps associate software engineer', 'associate software engineer', 'ps associate engineer',
   'associate engineer', 'software engineer', 'software development engineer',
@@ -674,6 +679,9 @@ export const ENGLISH_STOPWORDS = new Set([
   'morning', 'afternoon', 'evening', 'today', 'tomorrow', 'yesterday', 'passout', 'prelims', 'portal', 'day', 'slots',
   'week', 'month', 'year', 'thanks', 'thank', 'regards', 'team', 'attend', 'attended', 'attending', 'report', 'reported',
   'test', 'tests', 'interview', 'interviews', 'assessment', 'assessments', 're', 'fwd', 'fw', 'email', 'emails',
+  'additional', 'scheduled', 'rescheduled', 'postponed', 'timings', 'slot', 'centre', 'center', 'hall', 'auditorium',
+  'lab', 'labs', 'round', 'rounds', 'list', 'lists', 'result', 'results', 'selected', 'rejected', 'verified', 'pending',
+  'online', 'offline',
 ]);
 
 /**
@@ -689,16 +697,16 @@ export function isInvalidCompanyName(name: string): boolean {
   // Exact match in NON_COMPANY_WORDS
   if (NON_COMPANY_WORDS.includes(clean)) return true;
 
-  // Single word is a stopword
+  // Single word is a stopword or non-company word
   const words = clean.split(/\s+/).filter(Boolean);
-  if (words.length === 1 && ENGLISH_STOPWORDS.has(words[0])) {
+  if (words.length === 1 && (ENGLISH_STOPWORDS.has(words[0]) || NON_COMPANY_WORDS.includes(words[0]))) {
     return true;
   }
 
   // If every word in the phrase is a stopword or noise word, reject it
-  // e.g. "Students Who Got The Link But Not In", "Batch 2 Of"
+  // e.g. "Students Who Got The Link But Not In", "Batch 2 Of", "Venue & Additional"
   const substantiveWords = words.filter(
-    (w) => !ENGLISH_STOPWORDS.has(w) && !COMPANY_NOISE_WORDS.includes(w) && w.length >= 2
+    (w) => !ENGLISH_STOPWORDS.has(w) && !COMPANY_NOISE_WORDS.includes(w) && !NON_COMPANY_WORDS.includes(w) && w.length >= 2
   );
   if (substantiveWords.length === 0) {
     return true;

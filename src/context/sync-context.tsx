@@ -179,7 +179,7 @@ export function SyncProvider({
             appToast.sync(
               resultData.message,
               resultData.statusUpdatesPending
-                ? 'Shortlist checks were deferred; provisional statuses are still being held back.'
+                ? 'Some shortlists could not be checked. Existing recruitment statuses were kept.'
                 : `${resultData.newEmails} new updates · ${resultData.newCompanies} companies indexed`
             );
             if (typeof window !== 'undefined') {
@@ -546,7 +546,7 @@ export function SyncProvider({
                 appToast.sync(
                   resultData.message,
                   resultData.statusUpdatesPending
-                    ? 'Shortlist checks were deferred; provisional statuses are still being held back.'
+                    ? 'Some shortlists could not be checked. Existing recruitment statuses were kept.'
                     : `${resultData.newEmails} new updates · ${resultData.newCompanies} companies indexed`
                 );
                 router.refresh();

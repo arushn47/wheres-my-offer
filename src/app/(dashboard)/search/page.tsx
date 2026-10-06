@@ -2,6 +2,8 @@ import type { Metadata } from 'next';
 import { Suspense } from 'react';
 import { requireSession } from '@/lib/auth';
 import { createAdminClient } from '@/lib/supabase/admin';
+import { loadRoundStatusSummaries } from '@/lib/sync/round-status-data';
+import { resolveRecruitmentStatus } from '@/lib/sync/round-status';
 import SearchClient, { type SearchData, type SearchCompanyItem } from './search-client';
 import { detectCampus, getDriveMode } from '@/lib/utils';
 import { getEffectiveStage } from '@/lib/stages';
@@ -19,11 +21,12 @@ export default async function SearchPage() {
   const [
     { data: companies },
     { data: placementDrives },
-    { data: applications },
+    { data: rawApplications },
     { data: personalEmails },
     { data: collegeEmails },
     { data: events },
     { data: accounts },
+    roundDecisionsByDrive,
   ] = await Promise.all([
     supabase
       .from('companies')
@@ -63,7 +66,13 @@ export default async function SearchPage() {
       .from('gmail_accounts')
       .select('email, account_type')
       .eq('user_id', session.userId),
+    loadRoundStatusSummaries(supabase, session.userId),
   ]);
+
+  const applications = (rawApplications || []).map(app => ({
+    ...app,
+    status: resolveRecruitmentStatus(app.status || 'not_applied', roundDecisionsByDrive.get(app.placement_drive_id), Boolean(app.manual_override), app.notes || ''),
+  }));
 
   const collegeAccount = accounts?.find((a) => a.account_type === 'college');
   const userCampus = detectCampus(collegeAccount?.email);

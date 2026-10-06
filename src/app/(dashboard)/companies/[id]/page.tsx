@@ -7,6 +7,8 @@ import { detectCampus, detectBranch, detectRegNo } from '@/lib/utils';
 import { extractAnnouncedRoundsFromEmails, buildAnnouncedProcessToken } from '@/lib/sync/round-identity';
 
 import { parseScheduledDate } from '@/lib/sync/drive-temporal-boundary';
+import { summarizeRoundDecisions } from '@/lib/sync/round-status';
+import { getRoundStatusDisplay } from '@/lib/sync/status-display';
 
 export async function generateMetadata({
   params,
@@ -215,7 +217,7 @@ export default async function CompanyDetailPage(props: {
 
     supabase
       .from('candidate_matches')
-      .select('id, match_type, matched_value, match_location, created_at, email_id, college_email_id, neo_id')
+      .select('id, match_type, matched_value, match_location, created_at, email_id, college_email_id, neo_id, matched_round_type')
       .in('placement_drive_id', driveFilterIds)
       .eq('user_id', session.userId)
       .neq('match_type', 'xlsx_applied_list'),
@@ -627,10 +629,19 @@ export default async function CompanyDetailPage(props: {
     return emailRef ? companyEmailIds.has(emailRef) : true;
   });
 
+  const { data: roundDecisions, error: roundDecisionError } = await supabase.from('round_verdicts')
+    .select('verdict,is_current').eq('user_id', session.userId).in('placement_drive_id', driveFilterIds);
+  if (roundDecisionError) throw roundDecisionError;
+  const displayDecisions = summarizeRoundDecisions(roundDecisions || []);
+  const roundDisplay = getRoundStatusDisplay(application?.status || 'not_applied', displayDecisions, Boolean(application?.manual_override), application?.notes || '');
+  const rosterStates = new Map<string, string>();
+  for (const decision of roundDecisions || []) {
+    for (const scan of decision.verdict.evaluations || []) rosterStates.set(scan.emailId, scan.state);
+  }
   const detail: CompanyDetail = {
     id: company.id,
     placementDriveId,
-    shortlistVerificationState: null,
+    roundDecisions: displayDecisions,
     name: company.name,
     legalName: null,
     aliases: company.aliases,
@@ -641,7 +652,7 @@ export default async function CompanyDetailPage(props: {
     application: application
       ? {
           id: application.id,
-          status: application.status,
+          status: roundDisplay.status,
           statusSource: application.status_source,
           statusConfidence: application.status_confidence,
           role: application.role || targetDrive?.role || sharedDriveMeta?.role || null,
@@ -713,6 +724,7 @@ export default async function CompanyDetailPage(props: {
       return {
         id: em.id,
         collegeEmailId: colId || null,
+        verificationState: rosterStates.get(colId || em.id) || null,
         subject: em.subject || 'Campus Placement Notice',
         sender: em.sender || '',
         receivedAt: em.received_at || new Date().toISOString(),

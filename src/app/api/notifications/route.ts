@@ -25,6 +25,7 @@ export async function GET() {
     .select('id, type, title, message, body, link, is_read, created_at')
     .eq('user_id', session.userId)
     .is('dismissed_at', null)
+    .is('superseded_at', null)
     .gte('created_at', sevenDaysAgo)
     .order('created_at', { ascending: false })
     .limit(30);
@@ -40,6 +41,7 @@ export async function GET() {
     .select('id', { count: 'exact', head: true })
     .eq('user_id', session.userId)
     .is('dismissed_at', null)
+    .is('superseded_at', null)
     .gte('created_at', sevenDaysAgo)
     .or('is_read.eq.false,is_read.is.null');
 

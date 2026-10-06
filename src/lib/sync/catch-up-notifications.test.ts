@@ -1,5 +1,7 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { catchUpMissingNotifications } from '@/app/api/sync/reprocess/route';
+import { catchUpMissingNotifications } from '@/lib/sync/reprocess';
+
+vi.mock('@/lib/sync/round-verdict-service', () => ({ dispatchRoundNotificationOutbox: vi.fn().mockResolvedValue(undefined) }));
 
 // Mock notification services
 vi.mock('@/lib/notifications/service', () => ({

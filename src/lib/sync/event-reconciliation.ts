@@ -1,3 +1,4 @@
+import { withUserMutationLease } from './mutation-lease';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { getEffectiveStage } from '@/lib/stages';
 
@@ -14,7 +15,11 @@ import { getEffectiveStage } from '@/lib/stages';
  * @param userId User UUID
  * @param targetPlacementDriveId Optional drive ID to limit reconciliation to a single drive
  */
-export async function reconcileElapsedEventStatuses(
+export async function reconcileElapsedEventStatuses(...args: Parameters<typeof reconcileElapsedEventStatusesUnlocked>) {
+  return withUserMutationLease(args[1], () => reconcileElapsedEventStatusesUnlocked(...args));
+}
+
+async function reconcileElapsedEventStatusesUnlocked(
   supabase: ReturnType<typeof createAdminClient>,
   userId: string,
   targetPlacementDriveId?: string | null
@@ -83,7 +88,7 @@ export async function reconcileElapsedEventStatuses(
         ['test_scheduled', 'test_ongoing'].includes(app.status) &&
         effStatus === 'test_completed'
       ) {
-        targetStatus = 'test_completed';
+        targetStatus = 'shortlisted';
       } else if (
         ['ppt_scheduled', 'ppt_ongoing'].includes(app.status) &&
         effStatus === 'ppt_completed'
@@ -93,7 +98,7 @@ export async function reconcileElapsedEventStatuses(
         ['interview_scheduled', 'interview_ongoing'].includes(app.status) &&
         effStatus === 'interview_completed'
       ) {
-        targetStatus = 'interview_completed';
+        targetStatus = 'shortlisted';
       }
 
       if (targetStatus && targetStatus !== app.status) {

@@ -1,4 +1,5 @@
 import { createClient as createSupabaseClient } from '@supabase/supabase-js';
+import { currentMutationLease } from '@/lib/sync/lease-context';
 
 /**
  * Creates a Supabase admin client using the service role key.
@@ -12,6 +13,14 @@ export function createAdminClient() {
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.SUPABASE_SERVICE_ROLE_KEY!,
     {
+      global: {
+        fetch: (input, init) => {
+          const lease = currentMutationLease();
+          const headers = new Headers(init?.headers);
+          if (lease) headers.set('x-sync-run-id', lease.runId);
+          return fetch(input, { ...init, headers });
+        },
+      },
       auth: {
         autoRefreshToken: false,
         persistSession: false,

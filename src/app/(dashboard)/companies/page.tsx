@@ -5,6 +5,8 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import CompaniesClient, { type CompanyWithDetails } from './companies-client';
 
 import { detectCampus } from '@/lib/utils';
+import { summarizeRoundDecisions } from '@/lib/sync/round-status';
+import { getRoundStatusDisplay } from '@/lib/sync/status-display';
 
 export const metadata: Metadata = {
   title: 'NeoPAT Recruitment Drives & Companies',
@@ -28,6 +30,7 @@ export default async function CompaniesPage() {
     { data: accounts },
     { data: personalEmails },
     { data: emailDriveLinks },
+    { data: roundDecisions, error: roundDecisionError },
   ] = await Promise.all([
     supabase
       .from('companies')
@@ -70,9 +73,20 @@ export default async function CompaniesPage() {
       .from('email_drive_links')
       .select('placement_drive_id, college_emails(received_at)')
       .eq('user_id', session.userId),
+
+    supabase
+      .from('round_verdicts')
+      .select('placement_drive_id,verdict,is_current')
+      .eq('user_id', session.userId),
   ]);
 
-  // Shortlist verdicts are read straight from applications.status; no verification table.
+  if (roundDecisionError) throw roundDecisionError;
+  const decisionsByDrive = new Map<string, typeof roundDecisions>();
+  for (const decision of roundDecisions || []) {
+    const rows = decisionsByDrive.get(decision.placement_drive_id) || [];
+    rows.push(decision);
+    decisionsByDrive.set(decision.placement_drive_id, rows);
+  }
 
   const collegeAccount = accounts?.find((a) => a.account_type === 'college');
   const userCampus = detectCampus(collegeAccount?.email);
@@ -283,6 +297,8 @@ export default async function CompaniesPage() {
     //    - applied_at (registration mail)
     //    - drive creation date
     const targetDriveId = drive?.id || app?.placement_drive_id;
+    const displayDecisions = summarizeRoundDecisions(decisionsByDrive.get(targetDriveId) || []);
+    const roundDisplay = getRoundStatusDisplay(app?.status || 'not_applied', displayDecisions, Boolean(app?.manual_override), app?.notes || '');
     const latestEmail = targetDriveId ? driveEmailMap.get(targetDriveId) : undefined;
     const isManual = Boolean(app?.manual_override && app?.last_updated);
 
@@ -311,7 +327,7 @@ export default async function CompaniesPage() {
       latestEmailDate: latestEmail || (app as any)?.status_source_email_at || app?.applied_at || undefined,
       application: app ? {
         id: app.id,
-        status: app.status,
+        status: roundDisplay.status,
         role: app.role || drive?.role || shared?.role || null,
         category: app.category || drive?.category || shared?.category || null,
         ctc: app.ctc || drive?.ctc || shared?.ctc || null,
@@ -340,7 +356,7 @@ export default async function CompaniesPage() {
       },
       latestEvent: eventMap.get(entityId) || null,
       events: allEventsByEntity.get(entityId) || [],
-      shortlistVerificationState: null,
+      roundDecisions: displayDecisions,
       neoIdMatched: drive ? matchedDriveIds.has(drive.id) : (app?.placement_drive_id ? matchedDriveIds.has(app.placement_drive_id) : false),
       emailCount: 0,
     };

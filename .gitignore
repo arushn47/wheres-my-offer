@@ -43,3 +43,4 @@ next-env.d.ts
 supabase/.temp/
 .tempmediaStorage/
 .kilo/
+!supabase/migrations/migration_v40_round_decisions.sql

@@ -7,9 +7,11 @@ export interface UserPlacementEvidence {
 export function getMissingPersonalSyncSetup(params: {
   hasPersonal: boolean;
   userNeoId: string | null;
+  hasCollege: boolean;
 }): string[] {
   const missing: string[] = [];
   if (!params.hasPersonal) missing.push('Personal Gmail (for NeoPAT drives)');
+  if (params.hasCollege === false) missing.push('College Gmail');
   if (!params.userNeoId) missing.push('NeoPAT Registration ID');
   return missing;
 }
@@ -33,7 +35,7 @@ export function isShortlistMatchEvidence(match: {
 }): boolean {
   if (!match.matchType || match.matchType === 'xlsx_applied_list') return false;
   // All known competitive round types (original + new)
-  const competitiveRoundTypes = ['test', 'test_r2', 'gd', 'ppt', 'interview', 'interview_r2', 'selected'];
+  const competitiveRoundTypes = ['test', 'test_r2', 'game', 'gd', 'ppt', 'interview', 'interview_r2', 'selected'];
   if (match.matchedRoundType && competitiveRoundTypes.includes(match.matchedRoundType)) return true;
   if (!['xlsx_cell', 'pdf_text', 'docx_text'].includes(match.matchType)) return false;
   return !/applied[\s_-]*list|opt[\s_-]*in[\s_-]*list|opt_in|registration[\s_-]*list|applied[\s_-]*(?:student|candidate)/i.test(

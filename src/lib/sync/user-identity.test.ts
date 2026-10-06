@@ -101,7 +101,7 @@ describe('user-identity', () => {
     expect(match.matched).toBe(false);
   });
 
-  it('matches email body text by name, regNo, or Neo ID, while ignoring broadcast To headers', () => {
+  it('requires strong identity for automatic matching and permits name matching only in review', () => {
     const identity = buildCandidateIdentity({
       name: 'Arush Nandakumar Menon',
       neoId: 'I4W0P0K8',
@@ -117,7 +117,8 @@ The following students are selected:
 2. Jane Doe - Dream Offer
     `;
 
-    expect(matchesCandidateText(textWithName, identity).matched).toBe(true);
+    expect(matchesCandidateText(textWithName, identity).matched).toBe(false);
+    expect(matchesCandidateText(textWithName, identity, true).matched).toBe(true);
 
     const broadcastOnly = `
 To: arushn.2005@gmail.com

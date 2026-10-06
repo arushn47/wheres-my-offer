@@ -14,6 +14,8 @@ import {
   deriveStagesFromEvents,
 } from '@/lib/stages';
 import { parseAnnouncedProcessToken } from '@/lib/sync/round-identity';
+import { getVerifiedPipelineState } from '@/lib/sync/round-pipeline';
+import type { RoundStatusDecision } from '@/lib/sync/round-status';
 
 
 
@@ -24,6 +26,7 @@ export interface StageStepperProps {
   events?: EventLike[] | null;
   notes?: string | null;
   manualOverride?: boolean;
+  roundDecisions?: RoundStatusDecision[];
   compact?: boolean;
   className?: string;
 }
@@ -72,7 +75,7 @@ export function getPipelineStages({
     if (!hasInterviewOrGd) {
       rounds.push({
         id: 'interview',
-        label: 'Shortlisted for Interview',
+        label: 'Interview',
         shortLabel: 'Interview',
         roundType: 'interview',
         roundNumber: 1,
@@ -124,12 +127,12 @@ export function getPipelineStages({
   ];
 
   if (includePpt) {
-    stageList.push({ id: 'ppt', label: 'PPT Scheduled', shortLabel: 'PPT' });
+    stageList.push({ id: 'ppt', label: 'PPT', shortLabel: 'PPT' });
   }
 
   // Always keep future rounds so candidates see their recruitment roadmap
-  stageList.push({ id: 'test', label: 'Shortlisted for Test', shortLabel: 'Test' });
-  stageList.push({ id: 'interview', label: 'Shortlisted for Interview', shortLabel: 'Interview' });
+  stageList.push({ id: 'test', label: 'Test', shortLabel: 'Test' });
+  stageList.push({ id: 'interview', label: 'Interview', shortLabel: 'Interview' });
   stageList.push({ id: 'offer', label: 'Selected / Offer', shortLabel: 'Offer' });
 
   return stageList;
@@ -143,6 +146,7 @@ export function StageStepper({
   events,
   notes,
   manualOverride,
+  roundDecisions,
   compact = false,
   className,
 }: StageStepperProps) {
@@ -167,6 +171,11 @@ export function StageStepper({
     eliminatedStage,
     allEvents,
     notes,
+  });
+  const verifiedPipeline = getVerifiedPipelineState({
+    stages: stageList, decisions: roundDecisions, status, manualOverride,
+    // Announcing a PPT in a circular does not establish attendance or completion.
+    pptCompleted: effective.isPptCompleted,
   });
 
   // Pre-parse announced rounds once for use in both mapIndexToStageId and
@@ -211,6 +220,10 @@ export function StageStepper({
 
   const eliminatedStageId = (() => {
     if (eliminatedStage === -1) return null;
+    if (effective.effectiveStatus === 'not_shortlisted' && !effective.isPptCompleted) {
+      const entryStage = stageList.find(s => s.id.startsWith('ppt') || s.id.startsWith('test'));
+      if (entryStage) return entryStage.id;
+    }
     // Announced pipeline: resolve by round type
     if (isAnnouncedPipeline && announcedRoundsForMap) {
       if (effective.eliminatedStageId) {
@@ -275,8 +288,12 @@ export function StageStepper({
 
   // Predecessor milestone guarantee: When eliminated at stage k > 0 (e.g. Test),
   // all earlier milestones in the recruitment pipeline (e.g. Applied, PPT) were completed/passed.
-  if (activeEliminatedStage > 0 && activeFurthestPassed < activeEliminatedStage - 1) {
+  if (!verifiedPipeline && activeEliminatedStage > 0 && activeFurthestPassed < activeEliminatedStage - 1) {
     activeFurthestPassed = activeEliminatedStage - 1;
+  }
+  if (verifiedPipeline && verifiedPipeline.currentIndex >= 0) {
+    activeCurrentStage = verifiedPipeline.currentIndex;
+    activeEliminatedStage = verifiedPipeline.current.state === 'verified_absent' ? verifiedPipeline.currentIndex : -1;
   }
 
   // Dedicated UI Banner for Registration Open
@@ -457,18 +474,18 @@ export function StageStepper({
           i <= activeFurthestPassed ||
           (activeEliminatedStage !== -1 && i < activeEliminatedStage)
         );
-        const isPassed = rawIsPassed && !(isInterviewRound && isEliminatedBeforeInterview);
+        const isPassed = verifiedPipeline ? verifiedPipeline.verified.has(i) : rawIsPassed && !(isInterviewRound && isEliminatedBeforeInterview);
 
         // Historical passed stage (completed before current stage)
         const rawIsHistoricalPassed = !isEliminated && !isCurrent && (
           isPassed ||
           (i < activeCurrentStage && i <= activeFurthestPassed)
         );
-        const isHistoricalPassed = rawIsHistoricalPassed && !(isInterviewRound && isEliminatedBeforeInterview);
+        const isHistoricalPassed = verifiedPipeline ? isPassed && !isCurrent : rawIsHistoricalPassed && !(isInterviewRound && isEliminatedBeforeInterview);
 
         // Has this stage been completed (either in past or as current completed milestone)?
         const rawIsCompleted = !isEliminated && (isPassed || i <= activeFurthestPassed);
-        const isCompleted = rawIsCompleted && !(isInterviewRound && isEliminatedBeforeInterview);
+        const isCompleted = verifiedPipeline ? isPassed : rawIsCompleted && !(isInterviewRound && isEliminatedBeforeInterview);
 
         // ── Display label for this stage ───────────────────────────────────────
         let displayLabel = compact ? s.shortLabel : s.label;
@@ -538,6 +555,37 @@ export function StageStepper({
         }
 
 
+        if (verifiedPipeline) {
+          // A match establishes inclusion, not test/interview attendance.
+          displayLabel = compact ? s.shortLabel : s.label;
+          if (isEliminated) {
+            if (s.id === 'offer') {
+              displayLabel = 'Not Selected';
+            } else if (s.id.startsWith('interview')) {
+              displayLabel = compact ? 'Eliminated' : (effective.eliminationLabel || 'Eliminated in Test Round');
+            } else if (s.id.startsWith('test')) {
+              const wroteTest = verifiedPipeline.verified.has(i) || effective.isTestCompleted || effective.effectiveStatus === 'rejected_test';
+              displayLabel = compact
+                ? (wroteTest ? 'Eliminated' : 'Screened Out')
+                : (effective.eliminationLabel || (wroteTest ? 'Eliminated in Test Round' : 'Not Shortlisted for Test'));
+            } else if (s.id.startsWith('gd')) {
+              displayLabel = compact ? 'Eliminated' : (effective.eliminationLabel || 'Not Shortlisted for Group Discussion');
+            } else if (s.id.startsWith('game')) {
+              displayLabel = 'Eliminated';
+            } else {
+              displayLabel = compact ? 'Screened Out' : (effective.eliminationLabel || 'Not Shortlisted');
+            }
+          } else if (isPassed && !['applied', 'offer'].includes(s.id)) {
+            const completedCurrentRound = isCurrent && (
+              (s.id.startsWith('test') && effective.isTestCompleted) ||
+              (s.id.startsWith('interview') && effective.isInterviewCompleted)
+            );
+            displayLabel = s.id.startsWith('ppt') ? (isCurrent && !effective.isPptCompleted ? 'PPT Scheduled' : (compact ? 'PPT Done' : 'PPT Completed'))
+              : completedCurrentRound ? `${s.shortLabel} ${compact ? 'Done' : 'Completed'}`
+              : `${s.shortLabel} Shortlisted`;
+          }
+        }
+
         // Map stage index to STAGE_ACTIVE_STYLES (clamp to avoid out-of-bounds).
         const stageStyleKeys = Object.keys(STAGE_ACTIVE_STYLES).length;
         const styleIdx = Math.min(i, stageStyleKeys - 1);
@@ -557,6 +605,8 @@ export function StageStepper({
                   />
                 )}
                 <div
+                  data-stage-id={s.id}
+                  data-stage-state={isEliminated ? 'absent' : isPassed ? 'verified' : 'unverified'}
                   className={cn(
                     'relative z-10 flex items-center justify-center rounded-full border font-mono font-bold transition-all shrink-0',
                     compact ? 'h-6 w-6 text-[9px]' : 'h-7 w-7 text-[10px]',
@@ -575,7 +625,7 @@ export function StageStepper({
                 </div>
               </div>
               <span
-                title={isEliminated ? (effective.eliminationLabel || displayLabel) : s.label}
+                title={isEliminated ? (verifiedPipeline ? displayLabel : effective.eliminationLabel || displayLabel) : s.label}
                 className={cn(
                   'truncate max-w-full text-center transition-colors',
                   compact ? 'text-[8px] sm:text-[8.5px] tracking-tighter sm:tracking-normal mt-1' : 'text-[10px] mt-1.5 hidden sm:block',
