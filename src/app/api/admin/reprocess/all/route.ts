@@ -1,11 +1,22 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { waitUntil } from '@vercel/functions';
 import { requireAdmin } from '@/lib/auth/admin';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { performReprocess } from '@/app/api/sync/reprocess/route';
 
 export const dynamic = 'force-dynamic';
-export const maxDuration = 300; // Allow sufficient time for multi-user reprocess
+export const maxDuration = 300;
 
+/**
+ * POST /api/admin/reprocess/all
+ *
+ * Vercel-timeout-safe global reprocess using waitUntil():
+ *  1. Creates a reprocess_jobs row with type='all' (status = 'pending')
+ *  2. Returns 202 immediately with the jobId
+ *  3. waitUntil() processes all students sequentially in the background
+ *
+ * Client polls GET /api/admin/reprocess/all/status?jobId=<id> every 2s.
+ */
 export async function POST(req: NextRequest) {
   try {
     await requireAdmin();
@@ -17,232 +28,160 @@ export async function POST(req: NextRequest) {
   }
 
   const supabase = createAdminClient();
-  const isStream =
-    req.headers.get('accept')?.includes('text/event-stream') ||
-    req.nextUrl.searchParams.get('stream') === 'true';
 
-  try {
-    const [{ data: users, error: usersErr }, { data: connectedAccounts }] = await Promise.all([
-      supabase
-        .from('users')
-        .select('id, email, name, role')
-        .order('created_at', { ascending: false }),
-      supabase
-        .from('gmail_accounts')
-        .select('user_id')
-        .eq('is_connected', true),
-    ]);
+  // Check for an in-flight global job — avoid duplicate runs
+  const { data: existing } = await supabase
+    .from('reprocess_jobs')
+    .select('id, status, created_at')
+    .eq('type', 'all')
+    .in('status', ['pending', 'running'])
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
 
-    if (usersErr || !users) {
-      return NextResponse.json({ error: usersErr?.message || 'Failed to fetch users' }, { status: 500 });
-    }
+  if (existing) {
+    return NextResponse.json({ jobId: existing.id, status: existing.status, queued: true });
+  }
 
-    // Strictly reprocess student accounts only (exclude admin accounts)
-    const usersToProcess = users.filter((u) => u.role !== 'admin');
+  // Fetch all student users up front (fast query, < 200ms)
+  const [{ data: users, error: usersErr }, { data: connectedAccounts }] = await Promise.all([
+    supabase
+      .from('users')
+      .select('id, email, name, role')
+      .order('created_at', { ascending: false }),
+    supabase
+      .from('gmail_accounts')
+      .select('user_id')
+      .eq('is_connected', true),
+  ]);
 
-    if (isStream) {
-      const encoder = new TextEncoder();
-      const stream = new ReadableStream({
-        async start(controller) {
-          const sendEvent = (event: string, data: any) => {
-            try {
-              controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
-            } catch {
-              // Client disconnected
-            }
-          };
+  if (usersErr || !users) {
+    return NextResponse.json({ error: usersErr?.message || 'Failed to fetch users' }, { status: 500 });
+  }
 
-          const interval = setInterval(() => {
-            try {
-              controller.enqueue(encoder.encode(`: keep-alive\n\n`));
-            } catch {
-              clearInterval(interval);
-            }
-          }, 2000);
+  const usersToProcess = users.filter((u) => u.role !== 'admin');
 
-          try {
-            sendEvent('start', {
-              message: `Starting global placement reprocess across ${usersToProcess.length} student accounts…`,
-              totalUsers: usersToProcess.length,
-            });
+  // Create a single job record representing the whole batch
+  const { data: job, error: insertErr } = await supabase
+    .from('reprocess_jobs')
+    .insert({
+      user_id: null, // global job — no single user
+      type: 'all',
+      status: 'pending',
+      step: 0,
+      total_steps: usersToProcess.length,
+      message: `Queued — ${usersToProcess.length} student accounts to process…`,
+    })
+    .select('id')
+    .single();
 
-            const summary: Array<{
-              userId: string;
-              email: string;
-              userName: string;
-              updatedApplications: number;
-              neoPatDrivesCount: number;
-              collegeCircularsLinked: number;
-              error?: string;
-            }> = [];
+  if (insertErr || !job) {
+    console.error('[Admin Reprocess All] Failed to create job record:', insertErr);
+    return NextResponse.json({ error: 'Failed to create reprocess job' }, { status: 500 });
+  }
 
-            let totalUpdated = 0;
+  const jobId = job.id;
 
-            const CONCURRENCY = 5;
-            for (let i = 0; i < usersToProcess.length; i += CONCURRENCY) {
-              const chunk = usersToProcess.slice(i, i + CONCURRENCY);
-              
-              await Promise.all(chunk.map(async (u, chunkIdx) => {
-                const globalIndex = i + chunkIdx;
-                const displayName = u.name || u.email.split('@')[0];
+  waitUntil(
+    (async () => {
+      let processed = 0;
+      let totalUpdated = 0;
+      const summary: Array<{
+        userId: string;
+        email: string;
+        userName: string;
+        updatedApplications: number;
+        error?: string;
+      }> = [];
 
-                sendEvent('user_start', {
-                  userIndex: globalIndex + 1,
-                  totalUsers: usersToProcess.length,
+      try {
+        await supabase
+          .from('reprocess_jobs')
+          .update({
+            status: 'running',
+            message: `Processing 0 / ${usersToProcess.length} students…`,
+          })
+          .eq('id', jobId);
+
+        // Process students in batches of 3 to avoid overwhelming Supabase
+        const CONCURRENCY = 3;
+        for (let i = 0; i < usersToProcess.length; i += CONCURRENCY) {
+          const chunk = usersToProcess.slice(i, i + CONCURRENCY);
+
+          await Promise.all(
+            chunk.map(async (u) => {
+              const displayName = u.name || u.email.split('@')[0];
+              try {
+                const result = await performReprocess(u.id);
+                const appsUpdated = result?.updatedApplications ?? 0;
+                totalUpdated += appsUpdated;
+                summary.push({
                   userId: u.id,
+                  email: u.email,
                   userName: displayName,
-                  userEmail: u.email,
-                  message: `Reprocessing ${displayName} (${globalIndex + 1} of ${usersToProcess.length})…`,
+                  updatedApplications: appsUpdated,
                 });
+              } catch (err: any) {
+                console.error(`[Admin Reprocess All] Error for ${u.email}:`, err);
+                summary.push({
+                  userId: u.id,
+                  email: u.email,
+                  userName: displayName,
+                  updatedApplications: 0,
+                  error: err.message,
+                });
+              }
+            })
+          );
 
-                try {
-                  const result = await performReprocess(u.id, (p) => {
-                    sendEvent('stage', {
-                      userIndex: globalIndex + 1,
-                      totalUsers: usersToProcess.length,
-                      userId: u.id,
-                      userName: displayName,
-                      step: p.step,
-                      totalSteps: p.totalSteps,
-                      message: p.message,
-                    });
-                  });
+          processed += chunk.length;
 
-                  const appsUpdated = result?.updatedApplications ?? 0;
-                  totalUpdated += appsUpdated;
-                  summary.push({
-                    userId: u.id,
-                    email: u.email,
-                    userName: displayName,
-                    updatedApplications: appsUpdated,
-                    neoPatDrivesCount: result?.neoPatDrivesCount ?? 0,
-                    collegeCircularsLinked: result?.collegeCircularsLinked ?? 0,
-                  });
+          // Update progress after each batch
+          await supabase
+            .from('reprocess_jobs')
+            .update({
+              step: processed,
+              message: `Processing ${processed} / ${usersToProcess.length} students…`,
+            })
+            .eq('id', jobId);
+        }
 
-                  sendEvent('user_complete', {
-                    userIndex: globalIndex + 1,
-                    totalUsers: usersToProcess.length,
-                    userId: u.id,
-                    userName: displayName,
-                    userEmail: u.email,
-                    updatedApplications: appsUpdated,
-                    neoPatDrivesCount: result?.neoPatDrivesCount ?? 0,
-                    collegeCircularsLinked: result?.collegeCircularsLinked ?? 0,
-                    message: `${displayName}: updated ${appsUpdated} applications (${result?.neoPatDrivesCount ?? 0} drives).`,
-                  });
-                } catch (err: any) {
-                  console.error(`[Admin Reprocess All Stream] Error for ${u.email}:`, err);
-                  summary.push({
-                    userId: u.id,
-                    email: u.email,
-                    userName: displayName,
-                    updatedApplications: 0,
-                    neoPatDrivesCount: 0,
-                    collegeCircularsLinked: 0,
-                    error: err.message,
-                  });
-
-                  sendEvent('user_error', {
-                    userIndex: globalIndex + 1,
-                    totalUsers: usersToProcess.length,
-                    userId: u.id,
-                    userName: displayName,
-                    error: err.message,
-                    message: `Error reprocessing ${displayName}: ${err.message}`,
-                  });
-                }
-              }));
-            }
-
-            sendEvent('complete', {
-              success: true,
+        await supabase
+          .from('reprocess_jobs')
+          .update({
+            status: 'done',
+            step: usersToProcess.length,
+            message: `Complete — ${usersToProcess.length} students evaluated, ${totalUpdated} applications updated.`,
+            result: {
               totalUsersProcessed: summary.length,
               totalApplicationsUpdated: totalUpdated,
-              usersProcessed: summary.length,
-              applicationsUpdated: totalUpdated,
               summary,
-              message: `Global reprocess completed for ${summary.length} students! ${totalUpdated} application stage(s) re-evaluated.`,
-            });
-          } catch (err: any) {
-            sendEvent('error', { message: err.message || 'Global reprocess failed' });
-          } finally {
-            clearInterval(interval);
-            try {
-              controller.close();
-            } catch {
-              // already closed
-            }
-          }
-        },
-      });
-
-      return new Response(stream, {
-        headers: {
-          'Content-Type': 'text/event-stream; charset=utf-8',
-          'Cache-Control': 'no-cache, no-transform',
-          Connection: 'keep-alive',
-          'Content-Encoding': 'none',
-          'X-Accel-Buffering': 'no',
-        },
-      });
-    }
-
-    // Fallback standard JSON response
-    const summary: Array<{
-      userId: string;
-      email: string;
-      updatedApplications: number;
-      neoPatDrivesCount: number;
-      collegeCircularsLinked: number;
-      error?: string;
-    }> = [];
-
-    let totalUpdated = 0;
-
-    for (let i = 0; i < usersToProcess.length; i += 5) {
-      const chunk = usersToProcess.slice(i, i + 5);
-      await Promise.all(chunk.map(async (u) => {
+            },
+          })
+          .eq('id', jobId);
+      } catch (err: any) {
+        console.error(`[Admin Reprocess All] Global job ${jobId} failed:`, err);
         try {
-          const result = await performReprocess(u.id);
-          const appsUpdated = result?.updatedApplications ?? 0;
-          totalUpdated += appsUpdated;
-          summary.push({
-            userId: u.id,
-            email: u.email,
-            updatedApplications: appsUpdated,
-            neoPatDrivesCount: result?.neoPatDrivesCount ?? 0,
-            collegeCircularsLinked: result?.collegeCircularsLinked ?? 0,
-          });
-        } catch (err: any) {
-          console.error(`[Admin Reprocess All] Error for user ${u.email}:`, err);
-          summary.push({
-            userId: u.id,
-            email: u.email,
-            updatedApplications: 0,
-            neoPatDrivesCount: 0,
-            collegeCircularsLinked: 0,
-            error: err.message,
-          });
-        }
-      }));
-    }
+          await supabase
+            .from('reprocess_jobs')
+            .update({
+              status: 'error',
+              message: err?.message || 'Global reprocess failed',
+              result: { totalUsersProcessed: processed, totalApplicationsUpdated: totalUpdated, summary },
+            })
+            .eq('id', jobId);
+        } catch (_) {}
+      }
+    })()
+  );
 
-    return NextResponse.json({
-      success: true,
-      totalUsersProcessed: summary.length,
-      totalApplicationsUpdated: totalUpdated,
-      usersProcessed: summary.length,
-      applicationsUpdated: totalUpdated,
-      result: {
-        usersProcessed: summary.length,
-        applicationsUpdated: totalUpdated,
-        summary,
-      },
-      summary,
-      message: `Global reprocess completed for ${summary.length} users. ${totalUpdated} application stage(s) re-evaluated.`,
-    });
-  } catch (err: any) {
-    console.error('[Admin Reprocess All API] Unexpected error:', err);
-    return NextResponse.json({ error: err.message || 'Internal server error' }, { status: 500 });
-  }
+  return NextResponse.json(
+    {
+      jobId,
+      status: 'pending',
+      totalUsers: usersToProcess.length,
+      message: `Reprocess queued for ${usersToProcess.length} student accounts.`,
+    },
+    { status: 202 }
+  );
 }

@@ -115,129 +115,75 @@ export default function DashboardClient() {
       currentUser: 'Initializing…',
       currentUserIndex: 1,
       totalUsers: studentUsers.length,
-      step: 1,
-      totalSteps: 5,
-      stageMessage: 'Starting global placement reprocess across students…',
+      step: 0,
+      totalSteps: studentUsers.length,
+      stageMessage: 'Queuing global reprocess job…',
       totalApplicationsUpdated: 0,
       recentLogs: [],
     });
 
     try {
-      const res = await fetch('/api/admin/reprocess/all?stream=true', {
-        method: 'POST',
-        headers: { Accept: 'text/event-stream' },
+      // POST returns 202 immediately — background job processes all students via waitUntil()
+      const res = await fetch('/api/admin/reprocess/all', { method: 'POST' });
+      if (!res.ok) throw new Error('Failed to queue reprocess job');
+      const { jobId, totalUsers: total } = await res.json();
+      if (!jobId) throw new Error('No jobId returned');
+
+      setReprocessProgress((prev) =>
+        prev ? { ...prev, totalUsers: total ?? prev.totalUsers, stageMessage: 'Processing in background…' } : null
+      );
+
+      // Poll /all/status every 2s until done or error
+      await new Promise<void>((resolve, reject) => {
+        const poll = async () => {
+          try {
+            const statusRes = await fetch(`/api/admin/reprocess/all/status?jobId=${jobId}`);
+            if (!statusRes.ok) { reject(new Error('Status check failed')); return; }
+            const job = await statusRes.json();
+
+            setReprocessProgress((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    step: job.step ?? prev.step,
+                    totalSteps: job.total_steps ?? prev.totalSteps,
+                    stageMessage: job.message ?? prev.stageMessage,
+                    currentUserIndex: job.step ?? prev.currentUserIndex,
+                  }
+                : null
+            );
+
+            if (job.status === 'done') {
+              const r = job.result ?? {};
+              const totalStudents = r.totalUsersProcessed ?? job.step ?? 0;
+              const totalApps = r.totalApplicationsUpdated ?? 0;
+              setReprocessProgress((prev) =>
+                prev
+                  ? {
+                      ...prev,
+                      completed: true,
+                      isActive: false,
+                      stageMessage: `Global reprocess complete! ${totalStudents} students evaluated, ${totalApps} applications updated.`,
+                      totalApplicationsUpdated: totalApps,
+                    }
+                  : null
+              );
+              const successText = `Global reprocess complete: ${totalStudents} students evaluated, ${totalApps} application(s) re-evaluated.`;
+              appToast.success('Global reprocess complete', successText, undefined, 5000);
+              setFeedbackMessage({ type: 'success', text: successText });
+              resolve();
+            } else if (job.status === 'error') {
+              reject(new Error(job.message || 'Global reprocess failed'));
+            } else {
+              setTimeout(poll, 2000);
+            }
+          } catch (pollErr: any) {
+            reject(pollErr);
+          }
+        };
+        setTimeout(poll, 2000);
       });
 
-      if (!res.ok) throw new Error('Reprocess all failed');
-
-      const reader = res.body?.getReader();
-      if (!reader) throw new Error('No response stream');
-
-      const decoder = new TextDecoder();
-      let buffer = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const messages = buffer.split('\n\n');
-        buffer = messages.pop() || '';
-
-        for (const message of messages) {
-          const lines = message.split('\n');
-          let event = '';
-          let dataStr = '';
-          for (const line of lines) {
-            if (line.startsWith('event: ')) event = line.slice(7).trim();
-            else if (line.startsWith('data: ')) dataStr = line.slice(6).trim();
-          }
-
-          if (event && dataStr) {
-            try {
-              const data = JSON.parse(dataStr);
-              if (event === 'start') {
-                setReprocessProgress((prev) =>
-                  prev
-                    ? {
-                        ...prev,
-                        totalUsers: data.totalUsers,
-                        stageMessage: data.message,
-                      }
-                    : null
-                );
-              } else if (event === 'user_start') {
-                setReprocessProgress((prev) =>
-                  prev
-                    ? {
-                        ...prev,
-                        currentUser: data.userName,
-                        currentUserIndex: data.userIndex,
-                        totalUsers: data.totalUsers,
-                        step: 1,
-                        stageMessage: `Analyzing circulars for ${data.userName}…`,
-                      }
-                    : null
-                );
-              } else if (event === 'stage') {
-                setReprocessProgress((prev) =>
-                  prev
-                    ? {
-                        ...prev,
-                        currentUser: data.userName,
-                        currentUserIndex: data.userIndex,
-                        totalUsers: data.totalUsers,
-                        step: data.step,
-                        totalSteps: data.totalSteps,
-                        stageMessage: data.message,
-                      }
-                    : null
-                );
-              } else if (event === 'user_complete') {
-                setReprocessProgress((prev) =>
-                  prev
-                    ? {
-                        ...prev,
-                        totalApplicationsUpdated:
-                          (prev.totalApplicationsUpdated || 0) + (data.updatedApplications || 0),
-                        recentLogs: [
-                          ...(prev.recentLogs || []),
-                          `${data.userName}: ${data.updatedApplications} applications updated`,
-                        ],
-                      }
-                    : null
-                );
-              } else if (event === 'complete') {
-                const totalStudents = data.totalUsersProcessed || data.usersProcessed || 0;
-                const totalApps = data.totalApplicationsUpdated || data.applicationsUpdated || 0;
-
-                setReprocessProgress((prev) =>
-                  prev
-                    ? {
-                        ...prev,
-                        completed: true,
-                        isActive: false,
-                        stageMessage: `Global reprocess complete! ${totalStudents} students evaluated, ${totalApps} applications updated.`,
-                        totalApplicationsUpdated: totalApps,
-                      }
-                    : null
-                );
-
-                const successText = `Global reprocess complete: ${totalStudents} students evaluated, ${totalApps} application stage(s) re-evaluated.`;
-                appToast.success('Global reprocess complete', successText, undefined, 5000);
-                setFeedbackMessage({
-                  type: 'success',
-                  text: successText,
-                });
-              } else if (event === 'error') {
-                throw new Error(data.message || 'Global reprocess failed');
-              }
-            } catch {
-              // Ignore parse error
-            }
-          }
-        }
-      }
       fetchDashboardData();
     } catch (err: any) {
       appToast.error('Global reprocess failed', err.message || 'Reprocess all failed', undefined, 6000);
@@ -247,6 +193,7 @@ export default function DashboardClient() {
       setReprocessingAll(false);
     }
   };
+
 
   return (
     <div className="space-y-8 max-w-7xl mx-auto pb-16">

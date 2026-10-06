@@ -736,73 +736,84 @@ export function SyncProvider({
     reprocessAbortRef.current?.abort();
     const controller = new AbortController();
     reprocessAbortRef.current = controller;
-    setReprocessState({ active: true, step: 1, totalSteps: 5, message: 'Preparing saved placement data…', result: null });
+    setReprocessState({ active: true, step: 1, totalSteps: 5, message: 'Queuing placement re-index…', result: null });
     try {
-      const response = await fetch('/api/sync/reprocess?stream=true', {
+      // POST returns 202 immediately with a jobId — waitUntil() runs computation in background
+      const response = await fetch('/api/sync/reprocess', {
         method: 'POST',
-        headers: { Accept: 'text/event-stream' },
         signal: controller.signal,
       });
       if (!response.ok) throw new Error('Reprocess failed');
-      const reader = response.body?.getReader();
-      if (!reader) throw new Error('No response stream');
-      const decoder = new TextDecoder();
-      let buffer = '';
+      const { jobId } = await response.json();
+      if (!jobId) throw new Error('No jobId returned');
+
+      setReprocessState((prev) => prev ? { ...prev, message: 'Processing in background…' } : null);
+
+      // Poll /status every 2s until done or error
       let completedSuccessfully = false;
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const messages = buffer.split('\n\n');
-        buffer = messages.pop() || '';
-        for (const message of messages) {
-          const lines = message.split('\n');
-          let event = '', dataStr = '';
-          for (const line of lines) {
-            if (line.startsWith('event: ')) event = line.slice(7).trim();
-            else if (line.startsWith('data: ')) dataStr = line.slice(6).trim();
+      await new Promise<void>((resolve, reject) => {
+        const poll = async () => {
+          if (controller.signal.aborted) { reject(new Error('AbortError')); return; }
+          try {
+            const statusRes = await fetch(`/api/sync/reprocess/status?jobId=${jobId}`, {
+              signal: controller.signal,
+            });
+            if (!statusRes.ok) { reject(new Error('Status check failed')); return; }
+            const job = await statusRes.json();
+
+            setReprocessState((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    step: job.step ?? prev.step,
+                    totalSteps: job.total_steps ?? prev.totalSteps,
+                    message: job.message ?? prev.message,
+                  }
+                : null
+            );
+
+            if (job.status === 'done') {
+              const r = job.result ?? {};
+              completedSuccessfully = true;
+              setReprocessState({
+                active: false,
+                step: job.total_steps || 5,
+                totalSteps: job.total_steps || 5,
+                message: 'Re-index complete',
+                result: {
+                  neoPatDrivesCount: r.neoPatDrivesCount,
+                  updatedApplications: r.updatedApplications,
+                },
+              });
+              appToast.success(
+                'Archive re-index complete',
+                `${r.neoPatDrivesCount || 0} drives tracked, ${r.updatedApplications || 0} applications updated.`
+              );
+              router.refresh();
+              resolve();
+            } else if (job.status === 'error') {
+              reject(new Error(job.message || 'Re-index error'));
+            } else {
+              setTimeout(poll, 2000);
+            }
+          } catch (pollErr: any) {
+            reject(pollErr);
           }
-          if (event && dataStr) {
-            try {
-              const parsed = JSON.parse(dataStr);
-              if (event === 'progress') {
-                setReprocessState((prev) => prev ? { ...prev, ...parsed } : null);
-              } else if (event === 'complete') {
-                completedSuccessfully = true;
-                setReprocessState({
-                  active: false,
-                  step: parsed.totalSteps || 5,
-                  totalSteps: parsed.totalSteps || 5,
-                  message: 'Re-index complete',
-                  result: {
-                    neoPatDrivesCount: parsed.neoPatDrivesCount,
-                    updatedApplications: parsed.updatedApplications,
-                  },
-                });
-                appToast.success(
-                  'Archive re-index complete',
-                  `${parsed.neoPatDrivesCount || 0} drives tracked, ${parsed.updatedApplications || 0} applications updated.`
-                );
-                router.refresh();
-              } else if (event === 'error') {
-                completedSuccessfully = true;
-                setReprocessState({ active: false, step: 0, totalSteps: 5, message: parsed.message || 'Re-index error', result: null });
-                appToast.error('Re-index error', parsed.message);
-              }
-            } catch { /* ignore json parse errors */ }
-          }
-        }
-      }
+        };
+        setTimeout(poll, 2000);
+      });
+
       if (!completedSuccessfully) {
         setReprocessState({ active: false, step: 5, totalSteps: 5, message: 'Re-index complete', result: null });
         router.refresh();
       }
     } catch (err: any) {
-      if (err?.name === 'AbortError') return; // Intentionally cancelled
+      if (err?.name === 'AbortError' || err?.message === 'AbortError') return; // Intentionally cancelled
       setReprocessState({ active: false, step: 0, totalSteps: 5, message: err.message || 'Reprocess failed', result: null });
       appToast.error('Reprocess failed', err.message || 'Could not re-index placement archive');
     }
   }, [reprocessState?.active, router]);
+
 
   const dismissReprocess = useCallback(() => {
     reprocessAbortRef.current?.abort();

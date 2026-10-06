@@ -11,9 +11,7 @@ __pycache__/
 .env.production.local
 
 # local scripts & database runners
-scripts/*
-!scripts/backup-db.js
-!scripts/restore-db.js
+scripts/
 scratch/
 backups/
 *.sql
@@ -44,4 +42,4 @@ next-env.d.ts
 .freebuff/
 supabase/.temp/
 .tempmediaStorage/
-.kilo/agents/data.md
+.kilo/

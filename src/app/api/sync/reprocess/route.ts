@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { waitUntil } from '@vercel/functions';
 import { getSession } from '@/lib/auth';
 import { loadUserCandidateIdentity } from '@/lib/sync/user-identity';
 import { createAdminClient } from '@/lib/supabase/admin';
@@ -3251,6 +3252,101 @@ export async function POST(req: Request) {
   const isStream =
     req.headers.get('accept')?.includes('text/event-stream') ||
     new URL(req.url).searchParams.get('stream') === 'true';
+
+  // ── waitUntil / job-queue path (default) ──────────────────────────────────
+  // Avoids Vercel 60s response timeout by returning a jobId immediately and
+  // running the heavy computation in background via waitUntil().
+  // The SSE stream path is preserved for internal tooling / cron.
+  if (!isStream) {
+    const supabaseJob = createAdminClient();
+
+    // Check for an already-running job for this user
+    const { data: existingJob } = await supabaseJob
+      .from('reprocess_jobs')
+      .select('id, status')
+      .eq('user_id', userId)
+      .in('status', ['pending', 'running'])
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (existingJob) {
+      return NextResponse.json({ jobId: existingJob.id, status: existingJob.status, queued: true });
+    }
+
+    const { data: newJob, error: insertErr } = await supabaseJob
+      .from('reprocess_jobs')
+      .insert({
+        user_id: userId,
+        type: 'single',
+        status: 'pending',
+        step: 0,
+        total_steps: 5,
+        message: 'Queued…',
+      })
+      .select('id')
+      .single();
+
+    if (insertErr || !newJob) {
+      // Fall through to SSE path if job creation fails
+      console.error('[Sync Reprocess] Failed to create job record, falling back to SSE:', insertErr);
+    } else {
+      const jobId = newJob.id;
+
+      waitUntil(
+        (async () => {
+          try {
+            await supabaseJob
+              .from('reprocess_jobs')
+              .update({ status: 'running', step: 1, message: 'Cleaning recipient matches & fetching stored circulars…' })
+              .eq('id', jobId);
+
+            const result = await performReprocess(userId!, async (progress) => {
+              await supabaseJob
+                .from('reprocess_jobs')
+                .update({
+                  step: progress.step,
+                  total_steps: progress.totalSteps,
+                  message: progress.message,
+                })
+                .eq('id', jobId);
+            });
+
+            // Trigger calendar reconciliation in background
+            import('@/lib/calendar/google-sync')
+              .then(({ reconcileUserGoogleCalendar }) => reconcileUserGoogleCalendar(userId!))
+              .catch((cErr) => console.warn('[Sync Reprocess] Calendar reconcile warning:', cErr));
+
+            await supabaseJob
+              .from('reprocess_jobs')
+              .update({
+                status: 'done',
+                step: 5,
+                total_steps: 5,
+                message: `Complete — ${result.updatedApplications} application(s) updated across ${result.neoPatDrivesCount} drives.`,
+                result: {
+                  updatedApplications: result.updatedApplications,
+                  neoPatDrivesCount: result.neoPatDrivesCount,
+                  collegeCircularsLinked: result.collegeCircularsLinked,
+                  collegeCircularsDiscarded: result.collegeCircularsDiscarded,
+                },
+              })
+              .eq('id', jobId);
+          } catch (err: any) {
+            console.error(`[Sync Reprocess] Background job ${jobId} failed:`, err);
+            try {
+              await supabaseJob
+                .from('reprocess_jobs')
+                .update({ status: 'error', message: err?.message || 'Reprocess failed' })
+                .eq('id', jobId);
+            } catch (_) {}
+          }
+        })()
+      );
+
+      return NextResponse.json({ jobId, status: 'pending' }, { status: 202 });
+    }
+  }
 
   if (isStream) {
     const encoder = new TextEncoder();

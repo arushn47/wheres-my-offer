@@ -1,10 +1,23 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { waitUntil } from '@vercel/functions';
 import { requireAdmin } from '@/lib/auth/admin';
+import { createAdminClient } from '@/lib/supabase/admin';
 import { performReprocess } from '@/app/api/sync/reprocess/route';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 300;
 
+/**
+ * POST /api/admin/reprocess/[userId]
+ *
+ * Vercel-timeout-safe reprocess using waitUntil():
+ *  1. Creates a reprocess_jobs row (status = 'pending')
+ *  2. Returns 202 immediately with the jobId
+ *  3. waitUntil() keeps the heavy computation alive in background
+ *     even after the HTTP response is sent — no SSE connection needed.
+ *
+ * Client polls GET /api/admin/reprocess/[userId]/status?jobId=<id> every 2s.
+ */
 export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ userId: string }> }
@@ -23,85 +36,98 @@ export async function POST(
     return NextResponse.json({ error: 'Missing userId parameter' }, { status: 400 });
   }
 
-  const isStream =
-    req.headers.get('accept')?.includes('text/event-stream') ||
-    req.nextUrl.searchParams.get('stream') === 'true';
+  const supabase = createAdminClient();
 
-  if (isStream) {
-    const encoder = new TextEncoder();
-    const stream = new ReadableStream({
-      async start(controller) {
-        const sendEvent = (event: string, data: any) => {
-          try {
-            controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
-          } catch {
-            // Client closed
-          }
-        };
+  // Check for a recent in-flight job for this user — avoid duplicate runs
+  const { data: existing } = await supabase
+    .from('reprocess_jobs')
+    .select('id, status, created_at')
+    .eq('user_id', userId)
+    .in('status', ['pending', 'running'])
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
 
-        const interval = setInterval(() => {
-          try {
-            controller.enqueue(encoder.encode(`: keep-alive\n\n`));
-          } catch {
-            clearInterval(interval);
-          }
-        }, 2000);
+  if (existing) {
+    // A job is already running — return its ID so the client can poll it
+    return NextResponse.json({ jobId: existing.id, status: existing.status, queued: true });
+  }
 
+  // Create a new job record
+  const { data: job, error: insertErr } = await supabase
+    .from('reprocess_jobs')
+    .insert({
+      user_id: userId,
+      type: 'single',
+      status: 'pending',
+      step: 0,
+      total_steps: 5,
+      message: 'Queued…',
+    })
+    .select('id')
+    .single();
+
+  if (insertErr || !job) {
+    console.error('[Admin Reprocess] Failed to create job record:', insertErr);
+    return NextResponse.json({ error: 'Failed to create reprocess job' }, { status: 500 });
+  }
+
+  const jobId = job.id;
+
+  // Use waitUntil() — lets the heavy computation continue running AFTER the
+  // HTTP response is returned. This sidesteps Vercel's response timeout completely.
+  waitUntil(
+    (async () => {
+      try {
+        // Mark as running
+        await supabase
+          .from('reprocess_jobs')
+          .update({ status: 'running', step: 1, message: 'Cleaning recipient matches & fetching stored circulars…' })
+          .eq('id', jobId);
+
+        const result = await performReprocess(userId, async (progress) => {
+          // Write progress to DB so client can poll it
+          await supabase
+            .from('reprocess_jobs')
+            .update({
+              step: progress.step,
+              total_steps: progress.totalSteps,
+              message: progress.message,
+            })
+            .eq('id', jobId);
+        });
+
+        // Mark done
+        await supabase
+          .from('reprocess_jobs')
+          .update({
+            status: 'done',
+            step: 5,
+            total_steps: 5,
+            message: `Complete — ${result.updatedApplications} application(s) updated across ${result.neoPatDrivesCount} drives.`,
+            result: {
+              updatedApplications: result.updatedApplications,
+              neoPatDrivesCount: result.neoPatDrivesCount,
+              collegeCircularsLinked: result.collegeCircularsLinked,
+              collegeCircularsDiscarded: result.collegeCircularsDiscarded,
+            },
+          })
+          .eq('id', jobId);
+      } catch (err: any) {
+        console.error(`[Admin Reprocess] Background job ${jobId} failed:`, err);
         try {
-          sendEvent('start', { message: 'Analyzing placement archive & recalculating drives…' });
+          await supabase
+            .from('reprocess_jobs')
+            .update({
+              status: 'error',
+              message: err?.message || 'Reprocess failed',
+            })
+            .eq('id', jobId);
+        } catch (_) {}
+      }
+    })()
+  );
 
-          const statusResult = await performReprocess(userId, (progress) => {
-            sendEvent('stage', progress);
-          });
-
-          sendEvent('complete', {
-            success: true,
-            updatedApplications: statusResult.updatedApplications,
-            neoPatDrivesCount: statusResult.neoPatDrivesCount,
-            collegeCircularsLinked: statusResult.collegeCircularsLinked,
-            collegeCircularsDiscarded: statusResult.collegeCircularsDiscarded,
-            companiesUpdated: statusResult.updatedApplications,
-            fixed: statusResult.updatedApplications,
-            message: `Reprocess complete: ${statusResult.updatedApplications} applications updated across ${statusResult.neoPatDrivesCount} drives.`,
-          });
-        } catch (err: any) {
-          sendEvent('error', { message: err?.message || 'Placement re-indexing failed' });
-        } finally {
-          clearInterval(interval);
-          try {
-            controller.close();
-          } catch {
-            // Closed
-          }
-        }
-      },
-    });
-
-    return new Response(stream, {
-      headers: {
-        'Content-Type': 'text/event-stream; charset=utf-8',
-        'Cache-Control': 'no-cache, no-transform',
-        Connection: 'keep-alive',
-        'Content-Encoding': 'none',
-        'X-Accel-Buffering': 'no',
-      },
-    });
-  }
-
-  try {
-    const result = await performReprocess(userId);
-    return NextResponse.json({
-      success: true,
-      result,
-      updatedApplications: result.updatedApplications,
-      companiesUpdated: result.updatedApplications,
-      fixed: result.updatedApplications,
-      message: `Reprocess complete: ${result.updatedApplications} applications updated.`,
-    });
-  } catch (err: any) {
-    return NextResponse.json(
-      { error: err.message || 'Admin reprocess failed' },
-      { status: 500 }
-    );
-  }
+  // Return immediately — client polls /status?jobId=<id>
+  return NextResponse.json({ jobId, status: 'pending' }, { status: 202 });
 }
