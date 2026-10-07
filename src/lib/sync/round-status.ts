@@ -118,9 +118,11 @@ export function resolveRecruitmentStatus(status: string, allDecisions: RoundStat
   const participation = getRoundParticipation(allDecisions, decision);
   // A broadcast announcing interviews/results does not establish any previous
   // participation. Rejection notes and old negative codes are not evidence either.
-  if (decision.roundType === 'ppt') return 'not_shortlisted';
   if (participation.interview && (decision.roundType === 'selected' || decision.roundType?.startsWith('interview'))) return 'rejected_interview';
   if (participation.test || status === 'test_completed') return 'rejected_test';
+  // Some later selection rounds include a PPT. Their absence cannot erase a
+  // verified earlier test qualification, including already-stored PPT verdicts.
+  if (decision.roundType === 'ppt') return 'not_shortlisted';
   return participation.ppt || ['ppt_completed', 'ppt_ongoing'].includes(status)
     ? 'not_shortlisted_post_ppt' : 'not_shortlisted';
 }

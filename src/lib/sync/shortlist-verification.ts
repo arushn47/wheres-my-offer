@@ -18,6 +18,8 @@ export interface CachedRosterInput {
   round?: 'test' | 'interview' | 'selected' | null;
   parseStatus?: string | null;
   extractedRows?: Array<{ sheetName: string; rows: unknown[][] }> | null;
+  /** Trusted, version-checked cache of the same canonical row-policy evaluation. */
+  indexedSummary?: { usable: boolean; match: { sheetName: string | null; rowNumber: number } | null };
 }
 
 export interface CachedRosterEvaluation {
@@ -62,6 +64,13 @@ export function evaluateCachedShortlistRosters(params: {
   let matchingRoster: (CachedRosterInput & { round: 'test' | 'interview' | 'selected' | null; details: string }) | undefined;
   let incomplete = false;
   for (const roster of relevant) {
+    if (roster.indexedSummary) {
+      if (roster.parseStatus !== 'complete' || !roster.indexedSummary.usable) { incomplete=true; continue; }
+      checkedRosterCount++;
+      const location=roster.indexedSummary.match;
+      if (location) matchingRoster={...roster,round:roster.round||null,details:`Matched in ${roster.filename}${location.sheetName ? ` (${location.sheetName}!row ${location.rowNumber})` : ''}`};
+      continue;
+    }
     if (roster.parseStatus !== 'complete' || !roster.extractedRows?.length) {
       incomplete = true;
       continue;

@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import * as jose from 'jose';
+import { shouldPauseRequest } from '@/lib/cutover/write-pause';
 
 /** Routes that don't require authentication */
 const PUBLIC_ROUTES = [
@@ -28,6 +29,13 @@ export async function proxy(request: NextRequest) {
   }
 
   const { pathname } = request.nextUrl;
+
+  if (shouldPauseRequest(pathname, request.method, process.env.DATABASE_WRITES_PAUSED === 'true')) {
+    return NextResponse.json(
+      { error: 'Database maintenance is in progress. Please retry shortly.' },
+      { status: 503, headers: { 'Retry-After': '60', 'Cache-Control': 'no-store' } }
+    );
+  }
 
   // Allow public routes and static assets
   if (

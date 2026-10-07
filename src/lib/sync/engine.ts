@@ -36,6 +36,8 @@ import { getLiveApplicationScope } from '@/lib/sync/application-scope';
 import { getMissingPersonalSyncSetup } from '@/lib/sync/participation-evidence';
 import { randomUUID } from 'node:crypto';
 import { currentMutationLease, withOwnedMutationLease } from '@/lib/sync/mutation-lease';
+import { withQueryMetrics } from '@/lib/supabase/query-metrics';
+import { postSyncDriveScope } from './post-sync-scope';
 import {
   APPROVED_COLLEGE_SENDER,
   CANONICAL_IDENTITY_VERSION,
@@ -1516,7 +1518,11 @@ export function requestUserSyncPause(userId: string): boolean {
  * @param userId - The user's UUID
  * @param onProgress - Optional callback for streaming progress updates
  */
-export async function runSync(
+export async function runSync(...args: Parameters<typeof runSyncMeasured>): Promise<SyncResult> {
+  return withQueryMetrics('sync', () => runSyncMeasured(...args));
+}
+
+async function runSyncMeasured(
   userId: string,
   onProgress?: (progress: SyncProgress) => void,
   options?: {
@@ -1712,7 +1718,7 @@ export async function runSync(
       // This prevents loading all 1,500+ circulars with 50KB bodies on every sync run
       const { data: storedCirculars } = await supabase
         .from('college_emails')
-        .select('id, subject, sender:sender_email, body_text, received_at:created_at')
+        .select('id, subject, sender:sender_email, received_at:created_at')
         .or('subject.ilike.%apple%,subject.ilike.%honeywell%,subject.ilike.%zluri%,subject.ilike.%ey%');
 
       circularCatalog = buildCircularCatalog(storedCirculars || []);
@@ -2647,6 +2653,7 @@ export async function runSync(
       const hasPlacementRelevantData = result.newCompanies > 0 || hadCompletedInitialPages;
       if (!result.paused && !result.hasMorePagesPending && hasPlacementRelevantData) {
         result.statusUpdatesCompleted = false;
+        const postSyncTargets = postSyncDriveScope(hadCompletedInitialPages, currentMutationLease()?.touchedDriveIds || []);
         const remainingBudgetMs = options?.globalDeadline ? options.globalDeadline - Date.now() : Infinity;
         if (remainingBudgetMs > 30_000) {
           try {
@@ -2657,7 +2664,7 @@ export async function runSync(
               skippedDuplicates: result.skippedDuplicates, errors: [], currentSubject: 'Matching shared College shortlist archive…',
             };
             notifyProgress(personalScanProgress, true);
-            await scanSharedCollegeCandidateMatches(supabase, userId);
+            await scanSharedCollegeCandidateMatches(supabase, userId, postSyncTargets);
 
             const statusProgress: SyncProgress = {
               ...personalScanProgress,
@@ -2665,7 +2672,9 @@ export async function runSync(
             };
             notifyProgress(statusProgress, true);
             const { recalculateApplicationStatuses } = await import('@/lib/sync/reprocess');
-            await recalculateApplicationStatuses(userId);
+            await recalculateApplicationStatuses(userId, undefined, postSyncTargets
+              ? { targetPlacementDriveIds: postSyncTargets }
+              : undefined);
             const { catchUpMissingNotifications } = await import('@/lib/sync/reprocess');
             await catchUpMissingNotifications(supabase, userId);
             result.statusUpdatesPending = false;

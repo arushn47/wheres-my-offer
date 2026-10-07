@@ -10,6 +10,7 @@ import { extractAllDriveNumbers, extractEvents, extractJobDetails } from '@/lib/
 import { CANONICAL_PARSER_VERSION } from '@/lib/sync/canonical-email';
 import { classifyUnsupportedAttachment, isSupportedWorkbookAttachment, isTerminalUnsupportedRow } from '@/lib/sync/attachment-status';
 import { isPdfAttachment, parsePdfAttachment } from '@/lib/sync/pdf-parser';
+import { cacheStoredRoster } from '@/lib/sync/roster-lookup';
 import * as XLSX from 'xlsx';
 
 const ROW_BATCH_SIZE = 25;
@@ -493,6 +494,7 @@ export async function refreshSharedCollegeArchive(
                 ? await client.from('college_attachments').update(attachmentPayload).eq('id', prior.id)
                 : await client.from('college_attachments').upsert(attachmentPayload, { onConflict: 'college_email_id,attachment_id' });
               if (write.error) throw write.error;
+              if (!isPdf) await cacheStoredRoster(client,{kind:'attachment',emailId:canonicalReferenceId!,attachmentId:attachment.attachmentId,filename:attachment.filename,rows,parseStatus});
             }
           } catch (error) {
             result.attachmentsFailed++;

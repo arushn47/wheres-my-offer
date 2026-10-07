@@ -48,7 +48,7 @@ async function checkpoint(
   if (error || data !== true) throw new Error(error?.message || 'Shared College sync lease/checkpoint lost.');
 }
 
-export async function runSharedCollegeSync(options: { limit?: number } = {}) {
+export async function runSharedCollegeSync(options: { limit?: number; globalDeadline?: number } = {}) {
   const supabase = createAdminClient();
   const requestedEmail = (process.env.SHARED_COLLEGE_EMAIL || '').toLowerCase();
   const { data: accounts, error: accountsError } = await supabase
@@ -236,6 +236,8 @@ export async function runSharedCollegeSync(options: { limit?: number } = {}) {
     await checkpoint(supabase, account.id, runId, state);
 
     for (let index = 0; index < batch.length; index++) {
+      // Stop between messages; the persisted offset keeps the unconsumed IDs resumable.
+      if (options.globalDeadline && Date.now() >= options.globalDeadline - 10_000) break;
       const messageId = batch[index];
       try {
         const result = await ingestSharedCollegeCircular({ account: account as GmailAccount, gmailMessageId: messageId, gmail });

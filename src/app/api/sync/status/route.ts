@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { getSession } from '@/lib/auth';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { getActiveSyncProgress, isUserSyncActive } from '@/lib/sync/engine';
+import { readPersonalPageProgress } from '@/lib/sync/progress-readers';
 
 export const dynamic = 'force-dynamic';
 
@@ -106,13 +107,7 @@ export async function GET() {
       let personalPagesExist = false;
 
       if (personalAccountIds.length > 0) {
-        const { data: personalPages } = await supabase
-          .from('sync_pages')
-          .select('gmail_account_id, page_index, message_ids, next_offset')
-          .eq('user_id', session.userId)
-          .in('gmail_account_id', personalAccountIds)
-          .neq('status', 'complete')
-          .order('page_index', { ascending: true });
+        const personalPages = await readPersonalPageProgress(supabase,session.userId,personalAccountIds).catch(()=>null);
         if (personalPages?.length) {
           personalPagesExist = true;
           const page = personalPages[0];
@@ -120,7 +115,7 @@ export async function GET() {
           currentAccountEmail = account?.id === page.gmail_account_id ? (dbSyncState.account_email || '') : currentAccountEmail;
           accountType = 'personal';
           activePhase = 'processing';
-          activeTotal = Array.isArray(page.message_ids) ? page.message_ids.length : totalMessages;
+          activeTotal = page.message_count ?? totalMessages;
           activeProcessed = page.next_offset || 0;
           currentPageIndex = page.page_index;
           totalPagesCount = personalPages.length;

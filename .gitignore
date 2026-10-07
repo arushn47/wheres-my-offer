@@ -44,3 +44,6 @@ supabase/.temp/
 .tempmediaStorage/
 .kilo/
 !supabase/migrations/migration_v40_round_decisions.sql
+!supabase/migrations/migration_v41_roster_lookup.sql
+!supabase/migrations/migration_v42_compact_sync_progress.sql
+!supabase/migrations/migration_v43_compact_dashboard_reads.sql

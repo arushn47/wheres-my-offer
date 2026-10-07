@@ -629,9 +629,8 @@ export default async function CompanyDetailPage(props: {
     return emailRef ? companyEmailIds.has(emailRef) : true;
   });
 
-  const { data: roundDecisions, error: roundDecisionError } = await supabase.from('round_verdicts')
-    .select('verdict,is_current').eq('user_id', session.userId).in('placement_drive_id', driveFilterIds);
-  if (roundDecisionError) throw roundDecisionError;
+  const { readRoundStatusRows } = await import('@/lib/sync/dashboard-readers');
+  const roundDecisions = await readRoundStatusRows(supabase, session.userId, driveFilterIds, true);
   const displayDecisions = summarizeRoundDecisions(roundDecisions || []);
   const roundDisplay = getRoundStatusDisplay(application?.status || 'not_applied', displayDecisions, Boolean(application?.manual_override), application?.notes || '');
   const rosterStates = new Map<string, string>();

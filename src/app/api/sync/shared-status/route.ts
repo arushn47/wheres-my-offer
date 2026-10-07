@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getSession } from '@/lib/auth';
 import { createAdminClient } from '@/lib/supabase/admin';
+import { readSharedProgress } from '@/lib/sync/progress-readers';
 
 export const dynamic = 'force-dynamic';
 
@@ -10,13 +11,7 @@ export async function GET() {
 
   const supabase = createAdminClient();
   try {
-    const { data: stateRows, error: stateError } = await supabase
-      .from('shared_college_sync_state')
-      .select('gmail_account_id,is_syncing,phase,initial_scan_complete,next_page_token,pending_message_ids,pending_offset,updated_at,lease_expires_at,last_error')
-      .order('updated_at', { ascending: false })
-      .limit(1);
-    if (stateError) throw stateError;
-    const state = stateRows?.[0] ?? null;
+    const state = await readSharedProgress(supabase);
     if (!state) return NextResponse.json({ status: null }, { headers: { 'Cache-Control': 'no-store' } });
 
     const [accountResult, archiveResult] = await Promise.all([
@@ -30,10 +25,9 @@ export async function GET() {
     if (accountResult.error) throw accountResult.error;
     if (archiveResult.error) throw archiveResult.error;
 
-    const pendingIds = Array.isArray(state.pending_message_ids) ? state.pending_message_ids : [];
     const hasMoreArchivePages = Boolean(state.next_page_token);
     const isSyncing = state.is_syncing && Boolean(state.lease_expires_at) &&
-      new Date(state.lease_expires_at).getTime() > Date.now();
+      new Date(state.lease_expires_at || 0).getTime() > Date.now();
     const complete = state.initial_scan_complete && !hasMoreArchivePages;
     const recentlyUpdated = Boolean(state.updated_at) &&
       Date.now() - new Date(state.updated_at).getTime() < 3 * 60 * 1000;
@@ -52,7 +46,7 @@ export async function GET() {
         phase: state.phase,
         complete,
         hasMoreArchivePages,
-        pendingMessages: Math.max(0, pendingIds.length - (state.pending_offset || 0)),
+        pendingMessages: Math.max(0, state.pending_message_count - (state.pending_offset || 0)),
         updatedAt: state.updated_at,
         lastSyncAt: accountResult.data?.last_sync_at || null,
         lastError: state.last_error,

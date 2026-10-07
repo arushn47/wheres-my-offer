@@ -7,6 +7,7 @@ import CompaniesClient, { type CompanyWithDetails } from './companies-client';
 import { detectCampus } from '@/lib/utils';
 import { summarizeRoundDecisions } from '@/lib/sync/round-status';
 import { getRoundStatusDisplay } from '@/lib/sync/status-display';
+import { readDriveActivity, readRoundStatusRows } from '@/lib/sync/dashboard-readers';
 
 export const metadata: Metadata = {
   title: 'NeoPAT Recruitment Drives & Companies',
@@ -28,9 +29,8 @@ export default async function CompaniesPage() {
     { data: events },
     { data: matches },
     { data: accounts },
-    { data: personalEmails },
-    { data: emailDriveLinks },
-    { data: roundDecisions, error: roundDecisionError },
+    driveActivity,
+    roundDecisions,
   ] = await Promise.all([
     supabase
       .from('companies')
@@ -63,24 +63,10 @@ export default async function CompaniesPage() {
       .select('email, account_type')
       .eq('user_id', session.userId),
 
-    supabase
-      .from('personal_emails')
-      .select('placement_drive_id, received_at')
-      .eq('user_id', session.userId)
-      .not('placement_drive_id', 'is', null),
-
-    supabase
-      .from('email_drive_links')
-      .select('placement_drive_id, college_emails(received_at)')
-      .eq('user_id', session.userId),
-
-    supabase
-      .from('round_verdicts')
-      .select('placement_drive_id,verdict,is_current')
-      .eq('user_id', session.userId),
+    readDriveActivity(supabase, session.userId),
+    readRoundStatusRows(supabase, session.userId),
   ]);
 
-  if (roundDecisionError) throw roundDecisionError;
   const decisionsByDrive = new Map<string, typeof roundDecisions>();
   for (const decision of roundDecisions || []) {
     const rows = decisionsByDrive.get(decision.placement_drive_id) || [];
@@ -215,7 +201,6 @@ export default async function CompaniesPage() {
   for (const e of events || []) if ((e as any).college_email_id) allCollegeEmailIds.add((e as any).college_email_id);
   for (const m of matches || []) if ((m as any).college_email_id) allCollegeEmailIds.add((m as any).college_email_id);
   for (const d of placementDrives || []) if ((d as any).source_college_email_id) allCollegeEmailIds.add((d as any).source_college_email_id);
-  for (const l of emailDriveLinks || []) if ((l as any).email_id) allCollegeEmailIds.add((l as any).email_id);
 
   const { data: collegeEmailsData } = allCollegeEmailIds.size > 0
     ? await supabase.from('college_emails').select('id, received_at').in('id', Array.from(allCollegeEmailIds))
@@ -232,12 +217,8 @@ export default async function CompaniesPage() {
     }
   };
 
-  for (const pe of (personalEmails || [])) {
+  for (const pe of driveActivity) {
     trackDriveEmail(pe.placement_drive_id, pe.received_at);
-  }
-  for (const link of (emailDriveLinks || [])) {
-    const rAt = (link as any).college_emails?.received_at || collegeEmailMap.get((link as any).email_id);
-    trackDriveEmail(link.placement_drive_id, rAt);
   }
   for (const ev of (events || [])) {
     if (ev.placement_drive_id && (ev as any).college_email_id) {

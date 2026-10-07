@@ -6,6 +6,8 @@ export const dynamic = 'force-dynamic';
 export const maxDuration = 300; // 5 min — handles multi-user sync on Vercel Pro
 
 async function executeBackgroundSync(userIds: string[], includeSharedCollege = false) {
+  const globalDeadline = Date.now() + CRON_TOTAL_BUDGET_MS;
+  const syncResults: Array<{userId:string;status:string;message?:string;result?:Awaited<ReturnType<typeof runSync>>;error?:string}> = [];
   const supabase = createAdminClient();
 
   // Renew any Gmail Pub/Sub watch subscriptions expiring within 48 hours.
@@ -53,7 +55,6 @@ async function executeBackgroundSync(userIds: string[], includeSharedCollege = f
   // Shared wall-clock deadline for this entire cron invocation.
   // All runSync calls share this deadline so serial per-user work
   // can't stack and exceed maxDuration when there are multiple users.
-  const globalDeadline = Date.now() + CRON_TOTAL_BUDGET_MS;
 
   if (includeSharedCollege && Date.now() < globalDeadline) {
     try {
@@ -61,7 +62,7 @@ async function executeBackgroundSync(userIds: string[], includeSharedCollege = f
       let sharedResult: Awaited<ReturnType<typeof runSharedCollegeSync>>;
       let batches = 0;
       do {
-        sharedResult = await runSharedCollegeSync({ limit: 100 });
+        sharedResult = await runSharedCollegeSync({ limit: 100, globalDeadline });
         batches++;
         if (sharedResult.alreadyRunning || sharedResult.failed > 0 || !sharedResult.hasMore) break;
       } while (batches < 20 && Date.now() < globalDeadline - 5000);
@@ -78,6 +79,9 @@ async function executeBackgroundSync(userIds: string[], includeSharedCollege = f
 
     try {
       const res = await runSync(userId, undefined, { isBackgroundCron: true, globalDeadline });
+      if (res?.alreadyRunning) {
+        syncResults.push({userId,status:'skipped_already_running',message:'Sync already in progress'});
+      }
 
       // These checks are time-based and must run even when Gmail had no new mail.
       if (!res?.alreadyRunning) {
@@ -86,11 +90,14 @@ async function executeBackgroundSync(userIds: string[], includeSharedCollege = f
         );
         await checkAndNotifyLiveEvents(userId);
         await checkAndNotifyRegistrationDeadlines(userId);
+        syncResults.push({userId,status:'success',result:res});
       }
     } catch (err: any) {
       console.error(`[Cron Sync] Failed for user ${userId}:`, err);
+      syncResults.push({userId,status:'error',error:err.message});
     }
   }
+  return syncResults;
 }
 
 /**
@@ -129,7 +136,8 @@ export async function GET(req: NextRequest) {
       .select('user_id')
       .eq('is_connected', true);
 
-    if (error || !accounts || accounts.length === 0) {
+    if (error) throw error;
+    if (!accounts || accounts.length === 0) {
       return NextResponse.json({ message: 'No connected accounts to sync' }, { status: 200 });
     }
 
@@ -140,28 +148,10 @@ export async function GET(req: NextRequest) {
     const shouldWait = req.nextUrl.searchParams.get('wait') === 'true';
 
     if (shouldWait) {
-      const syncResults = [];
-      for (const userId of userIds) {
-        try {
-          const result = await runSync(userId, undefined, { isBackgroundCron: true });
-          if (result?.alreadyRunning) {
-            syncResults.push({ userId, status: 'skipped_already_running', message: 'Sync already in progress' });
-          } else {
-            syncResults.push({ userId, status: 'success', result });
-            const { checkAndNotifyLiveEvents, checkAndNotifyRegistrationDeadlines } = await import(
-              '@/lib/notifications/service'
-            );
-            await checkAndNotifyLiveEvents(userId);
-            await checkAndNotifyRegistrationDeadlines(userId);
-          }
-        } catch (err: any) {
-          console.error(`[Cron Sync] Failed for user ${userId}:`, err);
-          syncResults.push({ userId, status: 'error', error: err.message });
-        }
-      }
+      const syncResults = await executeBackgroundSync(userIds, includeSharedCollege);
       return NextResponse.json({
         success: true,
-        usersProcessed: userIds.length,
+        usersProcessed: syncResults.length,
         details: syncResults,
       });
     }
@@ -169,7 +159,7 @@ export async function GET(req: NextRequest) {
     // Non-blocking execution for external cron services (cron-job.org):
     // Dispatches background work via Next.js after() and immediately responds 200 OK in ~50ms
     // to prevent external cron HTTP 30-second timeouts.
-    after(executeBackgroundSync(userIds, includeSharedCollege));
+    after(async () => { await executeBackgroundSync(userIds, includeSharedCollege); });
 
     return NextResponse.json({
       success: true,

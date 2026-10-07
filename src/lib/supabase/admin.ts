@@ -1,5 +1,6 @@
 import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 import { currentMutationLease } from '@/lib/sync/lease-context';
+import { measuredAdminFetch } from './query-metrics';
 
 /**
  * Creates a Supabase admin client using the service role key.
@@ -18,7 +19,7 @@ export function createAdminClient() {
           const lease = currentMutationLease();
           const headers = new Headers(init?.headers);
           if (lease) headers.set('x-sync-run-id', lease.runId);
-          return fetch(input, { ...init, headers });
+          return measuredAdminFetch(input, { ...init, headers });
         },
       },
       auth: {

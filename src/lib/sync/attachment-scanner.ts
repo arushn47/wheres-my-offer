@@ -14,6 +14,8 @@ import {
   notifyShortlistMatch,
 } from '@/lib/notifications/service';
 import { classifyShortlistEmail } from '@/lib/sync/round-identity';
+import { loadCandidateRosters } from '@/lib/sync/roster-lookup';
+import { restrictEligibleDrives } from './post-sync-scope';
 
 /**
  * Scans `.xlsx` / `.xls` attachments on circular emails linked to placement drives
@@ -229,7 +231,7 @@ async function scanSharedCollegeCandidateMatchesUnlocked(
   const candidateIdentity = await loadUserCandidateIdentity(supabase, userId);
   if (!userEmail && !userNeoId) return 0;
 
-  const eligibleDriveIds = new Set<string>([
+  const eligibleDriveIds = restrictEligibleDrives(new Set<string>([
     ...((applications || []).filter((app) => app.manual_override).map((app) => app.placement_drive_id).filter(Boolean) as string[]),
     ...((personalEmails || []).map((email) => email.placement_drive_id).filter(Boolean) as string[]),
     ...((existingMatches || [])
@@ -251,7 +253,7 @@ async function scanSharedCollegeCandidateMatchesUnlocked(
       ) ||
       (applications || []).some((application) => application.placement_drive_id === driveId && application.manual_override)
     )),
-  ]);
+  ]), targetDriveIds);
   if (eligibleDriveIds.size === 0) return 0;
 
   const { data: sharedSyncState, error: sharedSyncStateError } = await supabase
@@ -291,6 +293,7 @@ async function scanSharedCollegeCandidateMatchesUnlocked(
     if (!data || data.length < 1000) break;
   }
   const cachedAttachments: Array<{
+    id: string;
     college_email_id: string;
     filename: string | null;
     size_bytes: number | null;
@@ -300,7 +303,7 @@ async function scanSharedCollegeCandidateMatchesUnlocked(
   for (let from = 0; ; from += 1000) {
     const { data, error } = await supabase
       .from('college_attachments')
-      .select('college_email_id, filename, size_bytes, parse_status')
+      .select('id, college_email_id, filename, size_bytes, parse_status')
       .range(from, from + 999);
     if (error) throw error;
     cachedAttachments.push(...(data || []));
@@ -481,9 +484,11 @@ async function scanSharedCollegeCandidateMatchesUnlocked(
 
   // Phase 2: Targeted fetch of extracted_rows only for candidate circular attachments in workItems
   const candidateEmailIds = Array.from(new Set(Array.from(workItems.values()).map(({ email }) => email.id)));
+  const indexedRosters = await loadCandidateRosters(supabase,candidateEmailIds,getStrongIdentityTokens(candidateIdentity));
+  const indexedById = new Map(indexedRosters?.filter(roster=>roster.sourceKind==='attachment').map(roster=>[roster.sourceKey,roster]));
   const parsedRowsByFile = new Map<string, unknown>();
 
-  if (candidateEmailIds.length > 0) {
+  if (!indexedRosters && candidateEmailIds.length > 0) {
     const candidateAttachments = cachedAttachments.filter((att) => candidateEmailIds.includes(att.college_email_id));
     const rowsQuery = supabase.from('college_attachments')
       .select('college_email_id, filename, size_bytes, parse_status, extracted_rows')
@@ -525,6 +530,7 @@ async function scanSharedCollegeCandidateMatchesUnlocked(
     const archiveAttachments = (cachedAttachments || [])
       .filter((attachment) => attachment.college_email_id === email.id)
       .map((attachment) => {
+        const indexed = indexedById.get(attachment.id);
         const content = resolveRosterContent(attachment);
         return {
           filename: attachment.filename || '',
@@ -536,8 +542,9 @@ async function scanSharedCollegeCandidateMatchesUnlocked(
               : /online\s+test|coding\s+test|assessment|test\s+shortlist/i.test(email.subject || '')
                 ? 'test' as const
                 : null,
-          parseStatus: content.parseStatus,
-          extractedRows: content.extractedRows as Array<{ sheetName: string; rows: unknown[][] }> | null,
+          parseStatus: indexed?.parseStatus ?? content.parseStatus,
+          extractedRows: (indexed ? indexed.extractedRows : content.extractedRows) as Array<{ sheetName: string; rows: unknown[][] }> | null,
+          indexedSummary: indexed?.indexedSummary,
         };
       });
     const evaluation = evaluateCachedShortlistRosters({

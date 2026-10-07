@@ -5,6 +5,7 @@ import { resolveRoundVerdicts, statusForRoundVerdict, type RoundEvidence, type R
 import { currentMutationLease, assertMutationLease } from './mutation-lease';
 import { sendNotification, type CreateNotificationParams } from '@/lib/notifications/service';
 import { personalPlacementEvidence, hasPublishedShortlistContext, inlineShortlistRoster, isOpenPptInvitation } from './placement-evidence';
+import { loadCandidateRosters } from './roster-lookup';
 
 type Admin = ReturnType<typeof createAdminClient>;
 export interface VerdictEmail {
@@ -19,15 +20,16 @@ export async function calculateDriveRoundVerdicts(supabase: Admin, userId: strin
   const circulars = emails.filter((email) => email.college_email_id || email.canonical_email_id || (email as any).sender_email || (!email.sender && email.id) ||
     /noreply\.cdcinfo@vitstudent\.ac\.in/i.test(email.sender || '') && /test\s+link|password|passkey|assessment\s+link|you.*(?:selected|shortlisted)|your.*(?:offer|reject)|congratulations|regret.*inform/i.test(email.body_text || email.body_snippet || ''));
   const ids = Array.from(new Set(circulars.map((email) => email.college_email_id || email.canonical_email_id || email.id)));
+  const indexedRosters = await loadCandidateRosters(supabase,ids,getStrongIdentityTokens(identity));
   const attachments: Array<{ college_email_id: string; filename: string; content_hash: string | null; parse_status: string; extracted_rows: RoundEvidence['rosters'][number]['extractedRows'] }> = [];
-  for (let offset = 0; offset < ids.length; offset += 100) {
+  for (let offset = 0; !indexedRosters && offset < ids.length; offset += 100) {
     const { data, error } = await supabase.from('college_attachments')
       .select('college_email_id,filename,content_hash,parse_status,extracted_rows').in('college_email_id', ids.slice(offset, offset + 100));
     if (error) throw error;
     attachments.push(...(data || []));
   }
   const sheets: Array<{ college_email_id: string; source_url: string; parse_status: string; content_hash: string | null; college_sheet_snapshots: { extracted_rows: RoundEvidence['rosters'][number]['extractedRows'] } | null }> = [];
-  for (let offset = 0; offset < ids.length; offset += 100) {
+  for (let offset = 0; !indexedRosters && offset < ids.length; offset += 100) {
     const { data, error } = await supabase.from('college_sheet_sources').select('college_email_id,source_url,parse_status,content_hash,college_sheet_snapshots(extracted_rows)').in('college_email_id', ids.slice(offset, offset + 100));
     if (error) throw error;
     sheets.push(...(data || []) as unknown as typeof sheets);
@@ -41,7 +43,9 @@ export async function calculateDriveRoundVerdicts(supabase: Admin, userId: strin
     const subject = email.subject || '';
     const raw = email.body_text || email.body_snippet || '';
     const body = getEvidenceMessageText({ subject, bodyPlain: raw, bodyHtml: '', bodySnippet: '' });
-    const rosters = attachments.filter((attachment) => attachment.college_email_id === ref && /\.(xlsx|xls|csv)$/i.test(attachment.filename))
+    const rosters: RoundEvidence['rosters'] = indexedRosters
+      ? indexedRosters.filter(roster=>roster.collegeEmailId===ref && /\.(xlsx|xls|csv)$/i.test(roster.filename))
+      : attachments.filter((attachment) => attachment.college_email_id === ref && /\.(xlsx|xls|csv)$/i.test(attachment.filename))
       .map((attachment) => ({ filename: attachment.filename, collegeEmailId: ref, contentHash: attachment.content_hash, parseStatus: attachment.parse_status, extractedRows: attachment.extracted_rows }));
     for (const sheet of sheets.filter((sheet) => sheet.college_email_id === ref)) {
       rosters.push({ filename: 'Google Sheet shortlist.csv', collegeEmailId: ref, contentHash: sheet.content_hash, parseStatus: sheet.parse_status, extractedRows: sheet.college_sheet_snapshots?.extracted_rows || null });
@@ -49,7 +53,7 @@ export async function calculateDriveRoundVerdicts(supabase: Admin, userId: strin
     if (isQuotedReply(subject) && rosters.length === 0) continue;
     // Legacy sheet matches must carry a strong identity, not a common-name hit.
     const sourceMatches = (matches || []).filter((match) => match.college_email_id === ref);
-    const sheetMatch = !sheets.some((sheet) => sheet.college_email_id === ref) && sourceMatches.some((match) => match.college_email_id === ref &&
+    const sheetMatch = !(indexedRosters ? indexedRosters.some(roster=>roster.collegeEmailId===ref && roster.sourceKind==='sheet') : sheets.some((sheet) => sheet.college_email_id === ref)) && sourceMatches.some((match) => match.college_email_id === ref &&
       /Google Sheet/i.test(match.matched_value || '') &&
       matchesCandidateRow((match.matched_value || '').split(/[:,]/).map((cell: string) => cell.trim()), identity).matched);
     const isPersonalOfficial = !email.college_email_id && !email.canonical_email_id && /noreply\.cdcinfo@vitstudent\.ac\.in/i.test(email.sender || '');
@@ -58,7 +62,7 @@ export async function calculateDriveRoundVerdicts(supabase: Admin, userId: strin
     const personalInvitation = personalEvidence.invitation;
     const openInvitation = /(?:applied|registered)\s+(?:students|candidates)/i.test(`${subject}\n${body}`) && /tests?\.mettl\.com|test\s+link|assessment\s+link/i.test(body) && !/shortlist/i.test(`${subject}\n${body}`);
     const openPpt = isOpenPptInvitation(subject, body);
-    const pptOnlySubject = /\bppt\b|pre[\s-]*placement\s+talk/i.test(subject) && !/test|assessment|interview|game|\bgd\b/i.test(subject);
+    const pptOnlySubject = /\bppt\b|pre[\s-]*placement\s+talk/i.test(subject) && !/test|assessment|interview|game|\bgd\b|next\s+round|selection\s+process/i.test(subject);
     evidence.push({ emailId: ref, subject, body, receivedAt: email.received_at || '', rosters, outcome, roundTypeOverride: openPpt || pptOnlySubject ? 'ppt' : undefined, snapshotHashes: sourceMatches.flatMap((match) => match.evidence?.contentHash ? [match.evidence.contentHash] : []), directInvitation: personalInvitation || openInvitation || openPpt,
       // Inline tables must pass the row outcome check; a waitlisted ID is not shortlisted.
       directMatch: sheetMatch || (!inlineShortlistRoster(subject,body) && hasPublishedShortlistContext(subject,body) && !/waitlist|not\s+(?:selected|shortlisted)|rejected/i.test(body) && matchesCandidateText(body, identity).matched) });

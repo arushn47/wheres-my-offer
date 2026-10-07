@@ -40,6 +40,20 @@ describe('screening, post-PPT, and test elimination require personal participati
     expect(statusForRoundVerdict(absent, 'applied', false, decisions)).toBe('rejected_test');
   });
 
+  it('preserves Foodhub test qualification when the later interview list was stored as PPT', () => {
+    const decisions = [prior('test'), { ...absent, roundKey: 'ppt:2026-10-06', roundType: 'ppt' as const }];
+    const status = resolveRecruitmentStatus('not_shortlisted', decisions);
+    expect(status).toBe('rejected_test');
+    expect(statusForRoundVerdict(decisions[1], 'applied', false, decisions)).toBe('rejected_test');
+    expect(getEliminationRoundDecision(decisions)?.roundType).toBe('test');
+    for (const compact of [true, false]) {
+      const pipeline = renderToStaticMarkup(React.createElement(StageStepper, { status, roundDecisions: decisions, compact }));
+      expect(pipeline).toContain('data-stage-id="test" data-stage-state="absent"');
+      expect(pipeline).toContain('data-stage-id="interview" data-stage-state="unverified"');
+      expect(pipeline).not.toContain('Not Shortlisted for Test');
+    }
+  });
+
   it('uses the latest verified evaluated round for the cross without changing the status label', () => {
     const decisions = [
       prior('test'),

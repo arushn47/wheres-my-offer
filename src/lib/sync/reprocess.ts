@@ -1,6 +1,8 @@
 import { buildExtractionProvenance } from './extraction-provenance';
 import { loadUserCandidateIdentity } from '@/lib/sync/user-identity';
+import { isCompanySubjectMatch as matchesCompanySubject, loadRecalculationScope, loadSelectedCanonicalBodies, type RecalculationCircularMetadata } from './recalculation-scope';
 import { createAdminClient } from '@/lib/supabase/admin';
+import { withQueryMetrics } from '@/lib/supabase/query-metrics';
 import {
   classifyEmail,
   cleanCompanyName,
@@ -54,7 +56,7 @@ import {
  * status errors from incremental per-email processing.
  */
 export async function recalculateApplicationStatuses(...args: Parameters<typeof recalculateApplicationStatusesUnlocked>) {
-  return withUserMutationLease(args[0], () => recalculateApplicationStatusesUnlocked(...args));
+  return withQueryMetrics('recalculation', () => withUserMutationLease(args[0], () => recalculateApplicationStatusesUnlocked(...args)));
 }
 
 async function recalculateApplicationStatusesUnlocked(
@@ -72,6 +74,9 @@ async function recalculateApplicationStatusesUnlocked(
   }
 ): Promise<{ updatedCount: number; results: Array<{ company: string; status: string; role?: string | null; ctc?: string | null }> }> {
   const supabase = createAdminClient();
+  const sourceScope = options?.targetPlacementDriveIds?.length
+    ? await loadRecalculationScope(supabase, userId, options.targetPlacementDriveIds)
+    : null;
 
   onProgress?.({
     step: 5,
@@ -109,12 +114,15 @@ async function recalculateApplicationStatusesUnlocked(
   while (true) {
     const { data: chunk, error: chunkErr } = await supabase
       .from('personal_emails')
-      .select('id, subject, sender, body_snippet, gmail_account_id, gmail_message_id, canonical_email_id, college_email_id, college_emails!personal_emails_college_email_id_fkey(body_text), rfc_message_id, classification, placement_drive_id, received_at, assignment_state, assignment_source')
+      .select<string>(sourceScope
+        ? 'id, subject, sender, body_snippet, gmail_account_id, gmail_message_id, canonical_email_id, college_email_id, rfc_message_id, classification, placement_drive_id, received_at, assignment_state, assignment_source'
+        : 'id, subject, sender, body_snippet, gmail_account_id, gmail_message_id, canonical_email_id, college_email_id, college_emails!personal_emails_college_email_id_fkey(body_text), rfc_message_id, classification, placement_drive_id, received_at, assignment_state, assignment_source')
       .eq('user_id', userId)
       .order('received_at', { ascending: true })
       .range(page * pageSize, (page + 1) * pageSize - 1);
 
     if (chunkErr) {
+      if (sourceScope) throw chunkErr;
       console.error('[recalculateApplicationStatuses] Error loading personal_emails:', chunkErr);
       break;
     }
@@ -124,10 +132,20 @@ async function recalculateApplicationStatusesUnlocked(
     page++;
   }
 
+  // Preserve the light catalog for identity/link checks, but hydrate only evidence
+  // that can be consumed by a selected drive. Never classify unrelated bodies.
+  const selectedPersonalEmails = sourceScope ? rawEmailChunks.filter(email => sourceScope.includesPersonal(email)) : rawEmailChunks;
+  if (sourceScope) {
+    const bodies = await loadSelectedCanonicalBodies(supabase, selectedPersonalEmails.flatMap(email => email.college_email_id ? [email.college_email_id] : []));
+    for (const email of selectedPersonalEmails) {
+      if (email.college_email_id && bodies.has(email.college_email_id)) email.college_emails = { body_text: bodies.get(email.college_email_id) };
+    }
+  }
+
   // Targeted RFC lookup: only query college_emails for RFC message IDs that lack foreign-key canonical bodies
-  if (!options?.preloadedCanonicalMap && rawEmailChunks.length > 0) {
+  if (!options?.preloadedCanonicalMap && selectedPersonalEmails.length > 0) {
     const missingRfcIds = Array.from(new Set(
-      rawEmailChunks
+      selectedPersonalEmails
         .filter((e) => {
           const canonical = Array.isArray(e.college_emails) ? e.college_emails[0] : e.college_emails;
           return !canonical?.body_text && Boolean(e.rfc_message_id);
@@ -188,7 +206,7 @@ async function recalculateApplicationStatusesUnlocked(
   });
 
   if (!options?.skipBodyRecovery) {
-    const recoveredBodies = await recoverTruncatedEmailBodies(allEmails);
+    const recoveredBodies = await recoverTruncatedEmailBodies(sourceScope ? allEmails.filter(email => sourceScope.includesPersonal(email)) : allEmails);
     for (const email of allEmails) {
       const recoveredBody = recoveredBodies.get(email.id);
       if (recoveredBody) email.body_snippet = recoveredBody;
@@ -220,25 +238,34 @@ async function recalculateApplicationStatusesUnlocked(
     while (true) {
       const { data: cChunk, error: cErr } = await supabase
         .from('college_emails')
-        .select('id, subject, sender_email, received_at, created_at, body_text, classification, parsed_company_name, parsed_drive_numbers')
+        .select<string>(sourceScope
+          ? 'id, subject, sender_email, received_at, created_at, classification, parsed_company_name, parsed_drive_numbers'
+          : 'id, subject, sender_email, received_at, created_at, body_text, classification, parsed_company_name, parsed_drive_numbers')
         .order('received_at', { ascending: true })
-        .range(clgPage * pageSize, (clgPage + 1) * pageSize - 1);
+        .range(clgPage * pageSize, (clgPage + 1) * pageSize - 1)
+        .returns<RecalculationCircularMetadata[]>();
 
       if (cErr) {
+        if (sourceScope) throw cErr;
         console.error('[recalculateApplicationStatuses] Error loading college_emails:', cErr);
         break;
       }
       if (!cChunk || cChunk.length === 0) break;
 
+      const selectedBodies = sourceScope
+        ? await loadSelectedCanonicalBodies(supabase, cChunk.filter(email => sourceScope.includesCircular(email)).map(email => email.id))
+        : null;
+
       for (const ce of cChunk) {
+        const body = selectedBodies ? selectedBodies.get(ce.id) : (ce as any).body_text;
         let classification = ce.classification;
-        const dynamicClass = classifyEmail({
+        const dynamicClass = (!selectedBodies || selectedBodies.has(ce.id)) ? classifyEmail({
           subject: ce.subject || '',
-          bodySnippet: (ce as any).body_text ? (ce as any).body_text.slice(0, 500) : '',
-          bodyPlain: (ce as any).body_text || '',
+          bodySnippet: body ? body.slice(0, 500) : '',
+          bodyPlain: body || '',
           sender: ce.sender_email || '',
           senderEmail: ce.sender_email || '',
-        } as any).classification;
+        } as any).classification : null;
 
         if (dynamicClass && dynamicClass !== 'unclassified' && dynamicClass !== ce.classification) {
           classification = dynamicClass;
@@ -247,11 +274,11 @@ async function recalculateApplicationStatusesUnlocked(
 
         allCollegeEmails.push({
           id: ce.id,
-          subject: ce.subject,
+          subject: ce.subject || null,
           sender: ce.sender_email,
           received_at: ce.received_at || ce.created_at,
-          body_snippet: (ce as any).body_text ? (ce as any).body_text.slice(0, 500) : '',
-          body_text: (ce as any).body_text || '',
+          body_snippet: body ? body.slice(0, 500) : '',
+          body_text: body || '',
           classification,
           parsed_company_name: ce.parsed_company_name,
           parsed_drive_numbers: ce.parsed_drive_numbers || [],
@@ -259,7 +286,7 @@ async function recalculateApplicationStatusesUnlocked(
           college_email_id: ce.id,
           canonical_email_id: ce.id,
           assignment_source: 'college_broadcast',
-          has_canonical_body: Boolean((ce as any).body_text?.length > 200),
+          has_canonical_body: Boolean(body?.length > 200),
         });
       }
 
@@ -566,40 +593,7 @@ async function recalculateApplicationStatusesUnlocked(
           }
         }
 
-        const aliases = (comp.aliases || []).map((a: string) => a.toLowerCase().trim());
-        const compNameLower = comp.name.toLowerCase().trim();
-
-        const isCompanySubjectMatch = (subject: string): boolean => {
-          const sub = subject.toLowerCase();
-          // Match full company name with word boundary
-          if (compNameLower.length >= 3) {
-            const escaped = compNameLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            if (new RegExp(`\\b${escaped}\\b`, 'i').test(sub)) return true;
-          }
-          // Match drive number
-          if (drive.drive_number) {
-            const cleanDn = drive.drive_number.toLowerCase().replace(/[^a-z0-9]/g, '');
-            const cleanSub = sub.replace(/[^a-z0-9]/g, '');
-            if (cleanDn.length >= 4 && cleanSub.includes(cleanDn)) return true;
-          }
-          // Match substantive aliases (must be >= 4 chars, never short acronyms or generic words)
-          for (const a of aliases) {
-            if (!a || a.length < 4 || ['ngi', 'pan', 'work', 'part', 'pls', 'data', 'asia', 'tech'].includes(a) || isInvalidCompanyName(a)) continue;
-            const escaped = a.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            if (new RegExp(`\\b${escaped}\\b`, 'i').test(sub)) {
-              return true;
-            }
-          }
-          // Match root brand stem (e.g. "Axxela" from "Axxela Research & Analytics")
-          const rootStem = comp.name.replace(/\s+(?:research|analytics|technologies|technology|services|service|solutions|solution|consulting|group|capital|systems|system|labs|lab)\b/gi, '').replace(/\s*(?:&|and)\s*$/i, '').trim().toLowerCase();
-          if (rootStem && rootStem.length >= 4) {
-            const escaped = rootStem.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            if (new RegExp(`(?:^|[^a-z0-9])${escaped}(?:[^a-z0-9]|$)`, 'i').test(sub)) {
-              return true;
-            }
-          }
-          return false;
-        };
+        const isCompanySubjectMatch = (subject: string): boolean => matchesCompanySubject(subject, comp, drive);
 
         // 4. Fallback: unassigned personal emails matching company within active timeframe
         for (const e of allEmails) {
@@ -2335,7 +2329,7 @@ export async function catchUpMissingNotifications(
 }
 
 export async function performReprocess(...args: Parameters<typeof performReprocessUnlocked>) {
-  return withUserMutationLease(args[0], () => performReprocessUnlocked(...args));
+  return withQueryMetrics('reprocess', () => withUserMutationLease(args[0], () => performReprocessUnlocked(...args)));
 }
 
 async function performReprocessUnlocked(
