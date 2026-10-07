@@ -113,7 +113,7 @@ export async function processEmailForEventsAndStatus(...args: Parameters<typeof 
       if (targets.length) {
         const { recalculateApplicationStatuses, catchUpMissingNotifications } = await import('./reprocess');
         await recalculateApplicationStatuses(args[1], undefined, { targetPlacementDriveIds: targets, skipBodyRecovery: true, skipGSheetScan: true });
-        await catchUpMissingNotifications(args[0], args[1]);
+        await catchUpMissingNotifications(args[0], args[1], targets);
       }
     }
   });

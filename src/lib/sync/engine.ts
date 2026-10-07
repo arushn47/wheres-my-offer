@@ -2676,7 +2676,7 @@ async function runSyncMeasured(
               ? { targetPlacementDriveIds: postSyncTargets }
               : undefined);
             const { catchUpMissingNotifications } = await import('@/lib/sync/reprocess');
-            await catchUpMissingNotifications(supabase, userId);
+            await catchUpMissingNotifications(supabase, userId, hadCompletedInitialPages ? undefined : [...(currentMutationLease()?.touchedDriveIds || [])]);
             result.statusUpdatesPending = false;
             result.statusUpdatesCompleted = true;
             notifyProgress({
@@ -2704,7 +2704,7 @@ async function runSyncMeasured(
       if (touchedDrives.length && !result.statusUpdatesCompleted) {
         const { recalculateApplicationStatuses, catchUpMissingNotifications } = await import('@/lib/sync/reprocess');
         await recalculateApplicationStatuses(userId, undefined, { targetPlacementDriveIds: touchedDrives, skipBodyRecovery: true, skipGSheetScan: true });
-        await catchUpMissingNotifications(supabase, userId);
+        await catchUpMissingNotifications(supabase, userId, touchedDrives);
         result.statusUpdatesCompleted = true;
         result.statusUpdatesPending = false;
       }
@@ -2736,7 +2736,7 @@ async function runSyncMeasured(
         const { error } = await supabase.from('pending_drive_recalculations').delete().eq('user_id',userId).eq('placement_drive_id',row.placement_drive_id).eq('source_received_at',row.source_received_at);
         if (error) throw error;
       }
-      await catchUpMissingNotifications(supabase,userId);
+      await catchUpMissingNotifications(supabase,userId,pendingDrives.map(row=>row.placement_drive_id));
     }
 
     const { dispatchRoundNotificationOutbox } = await import('@/lib/sync/round-verdict-service');

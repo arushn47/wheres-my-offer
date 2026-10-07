@@ -2161,9 +2161,39 @@ async function recalculateApplicationStatusesUnlocked(
  * - Deduplication Guard: Checks against existing dedupe_keys in the notifications table. Already-sent alerts are never repeated.
  * - Category & Stage Guard: Adheres to user notification preferences and candidate elimination stages.
  */
+// Bound IN filters and paginate each batch so PostgREST's row cap cannot drop
+// recent emails/events or dedupe keys. No bodies or roster payloads are read.
+type CatchUpApplication = {
+  placement_drive_id: string | null; status: string;
+  role?: string | null; ctc?: string | null; stipend?: string | null;
+  location?: string | null; notes?: string | null; category?: string | null;
+};
+type CatchUpDrive = { id: string; company_id: string | null; drive_name: string | null; created_at: string | null; source_college_email_id: string | null };
+type CatchUpEvent = { id: string; placement_drive_id: string; event_type: string; start_time: string; venue: string | null };
+
+async function readCatchUpPages<T>(page: (from: number, to: number) => PromiseLike<{ data: T[] | null; error?: unknown }>): Promise<T[]> {
+  const rows: T[] = [];
+  for (let from = 0; ; from += 1000) {
+    const { data, error } = await page(from, from + 999);
+    if (error) throw error;
+    rows.push(...(data || []));
+    if (!data || data.length < 1000) return rows;
+  }
+}
+
+async function readCatchUpBatches<T>(ids: string[], page: (ids: string[], from: number, to: number) => PromiseLike<{ data: T[] | null; error?: unknown }>): Promise<T[]> {
+  const rows: T[] = [];
+  for (let offset = 0; offset < ids.length; offset += 200) {
+    const batch = ids.slice(offset, offset + 200);
+    rows.push(...await readCatchUpPages((from, to) => page(batch, from, to)));
+  }
+  return rows;
+}
+
 export async function catchUpMissingNotifications(
   supabase: any,
-  userId: string
+  userId: string,
+  targetPlacementDriveIds?: string[]
 ): Promise<{ newDrivesNotified: number; eventsNotified: number; shortlistsNotified: number }> {
   let newDrivesNotified = 0;
   let eventsNotified = 0;
@@ -2173,62 +2203,87 @@ export async function catchUpMissingNotifications(
   const maxEmailAgeMs = 48 * 60 * 60 * 1000; // 48 hours
   const recentThresholdIso = new Date(now - maxEmailAgeMs).toISOString();
 
-  // 1. Fetch user candidate identity (Neo ID / registration number)
-  const candidateIdentity = await loadUserCandidateIdentity(supabase, userId);
-  const userNeoId = candidateIdentity.neoId || candidateIdentity.emails[0] || '';
-
-  // 2. Fetch user's active applications
-  const { data: userApps } = await supabase
+  // Undefined is reserved for full onboarding/explicit recovery. An empty
+  // incremental scope never falls back to scanning every application.
+  const targets = targetPlacementDriveIds === undefined ? undefined : [...new Set(targetPlacementDriveIds.filter(Boolean))];
+  if (targets?.length === 0) {
+    await dispatchRoundNotificationOutbox(supabase, userId);
+    return { newDrivesNotified, eventsNotified, shortlistsNotified };
+  }
+  const applicationQuery = () => supabase
     .from('applications')
     .select('id, placement_drive_id, status, role, ctc, stipend, location, notes, category')
     .eq('user_id', userId);
+  const userApps = targets
+    ? await readCatchUpBatches<CatchUpApplication>(targets, (ids, from, to) => applicationQuery().in('placement_drive_id', ids).order('id').range(from, to))
+    : await readCatchUpPages<CatchUpApplication>((from, to) => applicationQuery().order('id').range(from, to));
 
   if (!userApps || userApps.length === 0) {
     return { newDrivesNotified, eventsNotified, shortlistsNotified };
   }
 
-  const driveIds = userApps.map((a: any) => a.placement_drive_id).filter(Boolean);
+  const driveIds = [...new Set(userApps.map(a => a.placement_drive_id).filter((id): id is string => Boolean(id)))];
   if (driveIds.length === 0) {
     return { newDrivesNotified, eventsNotified, shortlistsNotified };
   }
 
   // 3. Fetch placement drives & company names
-  const { data: placementDrives } = await supabase
-    .from('placement_drives')
-    .select('id, drive_name, company_id, created_at, source_college_email_id')
-    .in('id', driveIds);
+  const placementDrives = await readCatchUpBatches<CatchUpDrive>(driveIds, (ids, from, to) => supabase
+    .from('placement_drives').select('id, drive_name, company_id, created_at, source_college_email_id')
+    .in('id', ids).order('id').range(from, to));
 
-  const drivesMap = new Map<string, any>((placementDrives || []).map((d: any) => [d.id, d]));
+  const drivesMap = new Map(placementDrives.map(d => [d.id, d]));
   const companyIds = Array.from(
-    new Set((placementDrives || []).map((d: any) => d.company_id).filter(Boolean))
+    new Set(placementDrives.map(d => d.company_id).filter((id): id is string => Boolean(id)))
   );
 
-  const { data: companies } = await supabase
-    .from('companies')
-    .select('id, name')
-    .in('id', companyIds);
+  const companies = await readCatchUpBatches<{ id: string; name: string }>(companyIds, (ids, from, to) => supabase
+    .from('companies').select('id, name').in('id', ids).order('id').range(from, to));
 
-  const companyMap = new Map<string, any>((companies || []).map((c: any) => [c.id, c.name]));
+  const companyMap = new Map(companies.map(c => [c.id, c.name]));
 
   // 4. Pre-fetch all existing notification dedupe_keys for this user
-  const { data: existingNotifs } = await supabase
-    .from('notifications')
-    .select('dedupe_key')
-    .eq('user_id', userId);
+  const existingNotifs = await readCatchUpPages<{ dedupe_key: string | null }>((from, to) => supabase
+    .from('notifications').select('dedupe_key').eq('user_id', userId).order('id').range(from, to));
 
   const existingDedupeKeys = new Set(
-    (existingNotifs || []).map((n: any) => n.dedupe_key).filter(Boolean)
+    existingNotifs.map(n => n.dedupe_key).filter(Boolean)
   );
 
-  const { notifyNewDrive, notifyEventScheduled, notifyShortlistMatch } = await import(
+  const missingDriveIds = driveIds.filter(id => !existingDedupeKeys.has(`new_drive:${userId}:${id}`));
+  const personalEmails = await readCatchUpBatches<{ id: string; placement_drive_id: string; received_at: string }>(missingDriveIds, (ids, from, to) => supabase
+    .from('personal_emails').select('id,placement_drive_id,received_at').eq('user_id', userId)
+    .in('placement_drive_id', ids).gte('received_at', recentThresholdIso)
+    .order('received_at', { ascending: false }).order('id').range(from, to));
+  const personalByDrive = new Map<string, (typeof personalEmails)[number]>();
+  for (const email of personalEmails) if (!personalByDrive.has(email.placement_drive_id)) personalByDrive.set(email.placement_drive_id, email);
+  const collegeIds = [...new Set<string>(missingDriveIds.filter(id => !personalByDrive.has(id))
+    .map(id => drivesMap.get(id)?.source_college_email_id).filter((id): id is string => Boolean(id)))];
+  const collegeEmails = await readCatchUpBatches<{ id: string; received_at: string }>(collegeIds, (ids, from, to) => supabase
+    .from('college_emails').select('id,received_at').in('id', ids).gte('received_at', recentThresholdIso)
+    .order('id').range(from, to));
+  const collegeById = new Map(collegeEmails.map(email => [email.id, email]));
+  const events = await readCatchUpBatches<CatchUpEvent>(driveIds, (ids, from, to) => supabase
+    .from('events').select('id,placement_drive_id,event_type,title,start_time,venue,mode').eq('user_id', userId)
+    .in('placement_drive_id', ids).gte('start_time', new Date(now - 24 * 60 * 60 * 1000).toISOString())
+    .neq('event_type', 'registration_deadline').order('id').range(from, to));
+  const eventsByDrive = new Map<string, typeof events>();
+  for (const event of events) {
+    const list = eventsByDrive.get(event.placement_drive_id) || [];
+    list.push(event);
+    eventsByDrive.set(event.placement_drive_id, list);
+  }
+
+  const { notifyNewDrive, notifyEventScheduled } = await import(
     '@/lib/notifications/service'
   );
   const { getDriveMode } = await import('@/lib/utils');
 
   // 5. Evaluate each tracked drive for missing notifications
-  for (const app of userApps as any[]) {
+  for (const app of userApps) {
     const driveId = app.placement_drive_id;
-    const drive: any = drivesMap.get(driveId);
+    if (!driveId) continue;
+    const drive = drivesMap.get(driveId);
     if (!drive) continue;
 
     const companyName = (drive.company_id && companyMap.get(drive.company_id)) || drive.drive_name || 'Placement Drive';
@@ -2236,27 +2291,13 @@ export async function catchUpMissingNotifications(
     // A. Check for missing New Drive notification
     const newDriveDedupeKey = `new_drive:${userId}:${driveId}`;
     if (!existingDedupeKeys.has(newDriveDedupeKey)) {
-      // Check personal emails for this drive
-      const { data: pEmail } = await supabase
-        .from('personal_emails')
-        .select('id, received_at')
-        .eq('user_id', userId)
-        .eq('placement_drive_id', driveId)
-        .gte('received_at', recentThresholdIso)
-        .order('received_at', { ascending: false })
-        .limit(1)
-        .maybeSingle();
+      const pEmail = personalByDrive.get(driveId);
 
       let isRecent = Boolean(pEmail);
       let sourceEmailId = pEmail?.id;
 
       if (!isRecent && drive.source_college_email_id) {
-        const { data: cEmail } = await supabase
-          .from('college_emails')
-          .select('id, received_at')
-          .eq('id', drive.source_college_email_id)
-          .gte('received_at', recentThresholdIso)
-          .maybeSingle();
+        const cEmail = collegeById.get(drive.source_college_email_id);
 
         if (cEmail) {
           isRecent = true;
@@ -2288,13 +2329,9 @@ export async function catchUpMissingNotifications(
     }
 
     // B. Check for missing Event notifications
-    const { data: driveEvents } = await supabase
-      .from('events')
-      .select('id, event_type, title, start_time, venue, mode')
-      .eq('user_id', userId)
-      .eq('placement_drive_id', driveId);
+    const driveEvents = eventsByDrive.get(driveId);
 
-    for (const evt of (driveEvents || []) as any[]) {
+    for (const evt of driveEvents || []) {
       if (!evt.start_time) continue;
       if (evt.event_type === 'registration_deadline') continue;
 
