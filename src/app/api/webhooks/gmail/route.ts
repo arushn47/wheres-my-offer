@@ -4,6 +4,7 @@ import { runSync } from '@/lib/sync/engine';
 import { runSharedCollegeSync } from '@/lib/sync/shared-college-sync';
 import { OAuth2Client } from 'google-auth-library';
 import { randomUUID } from 'node:crypto';
+import { describeError, diagnosticForStorage, diagnosticMessage } from '@/lib/error-diagnostics';
 
 interface PubSubPayload {
   message?: {
@@ -95,7 +96,7 @@ export async function POST(req: NextRequest) {
       p_lease_seconds: 120,
     });
     if (claimError) {
-      console.error('[Pub/Sub] Idempotency claim failed:', claimError);
+      console.error('[Pub/Sub] Idempotency claim failed:', describeError(claimError));
       return NextResponse.json({ error: 'Webhook idempotency is unavailable' }, { status: 503 });
     }
     if (claimed !== true) {
@@ -143,6 +144,7 @@ export async function POST(req: NextRequest) {
 
     console.log(`[Pub/Sub] Triggering ${isSharedCollegeSource ? 'shared College ingest' : 'Personal sync'} for ${emailAddress} at historyId ${historyId}`);
     after(async () => {
+      let operation = isSharedCollegeSource ? 'shared_college_sync' : 'personal_sync';
       try {
         if (isSharedCollegeSource) {
           let result: Awaited<ReturnType<typeof runSharedCollegeSync>>;
@@ -156,6 +158,7 @@ export async function POST(req: NextRequest) {
         } else if (account.account_type === 'personal') {
           await runSync(account.user_id);
         }
+        operation = 'complete_gmail_pubsub_message';
         const { error: completeError } = await supabase.rpc('complete_gmail_pubsub_message', {
           p_subscription: subscription,
           p_message_id: messageId,
@@ -163,8 +166,10 @@ export async function POST(req: NextRequest) {
         });
         if (completeError) throw completeError;
       } catch (syncErr) {
-        const errorMsg = syncErr instanceof Error ? syncErr.message : String(syncErr);
-        console.error(`[Pub/Sub] Background sync failed for ${emailAddress}:`, errorMsg);
+        const diagnostic = describeError(syncErr);
+        const errorMsg = diagnosticMessage(diagnostic);
+        const context = { operation, messageId, runId, error: diagnostic };
+        console.error(`[Pub/Sub] Background sync failed for ${emailAddress}:`, errorMsg, context);
 
         // Terminal setup or credential errors must NOT cause infinite Pub/Sub retries.
         const isTerminalError =
@@ -174,19 +179,30 @@ export async function POST(req: NextRequest) {
           errorMsg.includes('Token has been expired or revoked') ||
           errorMsg.includes('User was not found');
 
-        if (isTerminalError) {
-          console.warn(`[Pub/Sub] Marking terminal failure as completed in inbox to prevent retry storm: ${errorMsg}`);
-          await supabase.rpc('complete_gmail_pubsub_message', {
-            p_subscription: subscription,
-            p_message_id: messageId,
-            p_run_id: runId,
-          });
-        } else {
-          await supabase.rpc('fail_gmail_pubsub_message', {
-            p_subscription: subscription,
-            p_message_id: messageId,
-            p_run_id: runId,
-            p_error: errorMsg,
+        // Diagnostics must also survive a failure to record/acknowledge the error.
+        // Keep the existing terminal policy and never reject the after() callback.
+        try {
+          if (isTerminalError) {
+            console.warn(`[Pub/Sub] Marking terminal failure as completed in inbox to prevent retry storm: ${errorMsg}`);
+            const { error: recordError } = await supabase.rpc('complete_gmail_pubsub_message', {
+              p_subscription: subscription,
+              p_message_id: messageId,
+              p_run_id: runId,
+            });
+            if (recordError) throw recordError;
+          } else {
+            const { error: recordError } = await supabase.rpc('fail_gmail_pubsub_message', {
+              p_subscription: subscription,
+              p_message_id: messageId,
+              p_run_id: runId,
+              p_error: diagnosticForStorage({ operation, messageId, runId, error: diagnostic }),
+            });
+            if (recordError) throw recordError;
+          }
+        } catch (recordError) {
+          console.error('[Pub/Sub] Failed to record background outcome:', {
+            operation: isTerminalError ? 'complete_gmail_pubsub_message' : 'fail_gmail_pubsub_message',
+            messageId, runId, originalError: diagnostic, error: describeError(recordError),
           });
         }
         // Never re-throw inside after() — re-throwing crashes the background handler and generates noisy runtime logs.
@@ -199,7 +215,7 @@ export async function POST(req: NextRequest) {
     }, { status: 200 });
 
   } catch (err) {
-    console.error('Error handling Gmail Pub/Sub webhook:', err);
+    console.error('Error handling Gmail Pub/Sub webhook:', describeError(err));
     return NextResponse.json({ error: 'Internal handler error' }, { status: 500 });
   }
 }
