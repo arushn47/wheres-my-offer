@@ -70,7 +70,7 @@ export function DriveModeBadge({
       title={detail ? `${config.tooltip}. ${detail}` : config.tooltip}
     >
       <Icon className="h-3 w-3 shrink-0" />
-      <span>{driveMode}</span>
+      <span>{driveMode === 'To be announced' ? 'TBA' : driveMode}</span>
     </span>
   );
 }

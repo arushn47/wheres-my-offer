@@ -129,6 +129,7 @@ export default function DashboardClient({
   branch,
 }: DashboardClientProps) {
   const { isSyncing, statusUpdatesPending, syncResult } = useSync();
+  const upcomingRounds = upcomingEvents.filter(event => event.event_type !== 'registration_deadline');
   // Top 4 active drives: Scheduled rounds first, then Completed rounds, then Applied drives
   const spotlightDrives = useMemo(() => {
     const active = activeApplications.filter(
@@ -383,13 +384,13 @@ export default function DashboardClient({
         </motion.div>
       )}
 
-      {/* Section 1: Upcoming Schedule & Assessment Agenda */}
+      {/* Section 1: Upcoming recruitment rounds; deadlines stay in the reminder strip. */}
       <div className="space-y-4 pt-2">
         <div className="flex items-center justify-between gap-2 min-w-0">
           <div className="flex items-center gap-2 min-w-0">
             <Calendar className="h-4 w-4 text-emerald-400 shrink-0" />
             <h2 className="font-display text-sm sm:text-base md:text-lg font-bold tracking-tight text-zinc-100 truncate">
-              Upcoming Assessment Schedule
+              Upcoming Rounds
             </h2>
           </div>
           <Link
@@ -400,7 +401,7 @@ export default function DashboardClient({
           </Link>
         </div>
 
-        {upcomingEvents.length === 0 ? (
+        {upcomingRounds.length === 0 ? (
           <div className="relative overflow-hidden rounded-2xl border border-zinc-800/80 bg-linear-to-b from-[#121218] to-[#0a0a0e] p-6 sm:p-8 text-center shadow-lg">
             {/* Ambient subtle glow background */}
             <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top,var(--tw-gradient-stops))] from-emerald-500/10 via-transparent to-transparent pointer-events-none" />
@@ -414,10 +415,10 @@ export default function DashboardClient({
             </div>
 
             <h3 className="font-display text-sm sm:text-base font-bold text-zinc-100 tracking-tight">
-              All Caught Up on Assessments
+              No Upcoming Rounds
             </h3>
             <p className="mt-1.5 text-xs text-zinc-400 max-w-md mx-auto leading-relaxed">
-              No imminent online tests or interviews scheduled right now. The live inbox radar scans 24/7 for new CDC circulars and will notify you immediately.
+              No PPTs, tests or interviews scheduled right now. New round schedules will appear here after syncing.
             </p>
 
             {/* Quick Status & Action Pills */}
@@ -440,7 +441,12 @@ export default function DashboardClient({
           </div>
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 w-full min-w-0 max-w-full">
-            {upcomingEvents.slice(0, 6).map((ev) => (
+            {upcomingRounds.slice(0, 6).map((ev) => {
+              const eventLabel = ev.event_type.replace(/_/g, ' ');
+              const eventTitle = cleanEventTitle(ev.title, ev.companyName, eventLabel);
+              const normalizeLabel = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/g, '');
+              const showTitle = normalizeLabel(eventTitle) !== normalizeLabel(eventLabel);
+              return (
               <Link
                 key={ev.id}
                 href={`/companies/${ev.placement_drive_id}`}
@@ -452,12 +458,14 @@ export default function DashboardClient({
                       {ev.companyName || 'Company'}
                     </span>
                     <span className={`shrink-0 whitespace-nowrap rounded-full border px-2 py-0.5 font-mono text-[9px] font-bold uppercase tracking-wider ${NEXT_EVENT_CLS[ev.event_type] || 'border-amber-500/30 bg-amber-500/10 text-amber-300'}`}>
-                      {ev.event_type.replace(/_/g, ' ')}
+                      {eventLabel}
                     </span>
                   </div>
-                  <h4 className="mt-2 text-xs font-semibold text-zinc-300 line-clamp-1">
-                    {cleanEventTitle(ev.title, ev.companyName, 'Recruitment Assessment')}
-                  </h4>
+                  {showTitle && (
+                    <h4 className="mt-2 text-xs font-semibold text-zinc-300 line-clamp-1">
+                      {eventTitle}
+                    </h4>
+                  )}
                   <div className="mt-2 flex items-center gap-1.5 font-mono text-[11px] text-zinc-400">
                     <Clock className="h-3 w-3 text-amber-400" />
                     <span>{formatEventTime(ev.start_time)}</span>
@@ -473,7 +481,8 @@ export default function DashboardClient({
                   View Drive <ArrowUpRight className="h-3.5 w-3.5" />
                 </div>
               </Link>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>

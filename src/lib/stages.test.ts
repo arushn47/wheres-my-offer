@@ -1,5 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { getEffectiveStage } from './stages';
+import { getEffectiveStage, isEliminatedStatus, isInactiveStatus } from './stages';
+
+describe('active application classification', () => {
+  it('excludes a post-PPT shortlist rejection from dashboard active totals', () => {
+    expect(isEliminatedStatus('not_shortlisted_post_ppt')).toBe(true);
+    expect(isInactiveStatus('not_shortlisted_post_ppt')).toBe(true);
+    expect(isInactiveStatus('test_completed')).toBe(false);
+    expect(isInactiveStatus('ppt_completed')).toBe(false);
+    expect(isInactiveStatus('registration_open')).toBe(false);
+  });
+});
 
 describe('not-shortlisted stage with PPT evidence', () => {
   it('does not label a future PPT as post-PPT', () => {

@@ -1173,6 +1173,7 @@ export function isEliminatedStatus(status?: string | null): boolean {
   const s = status.toLowerCase().trim();
   return (
     s === 'not_shortlisted' ||
+    s === 'not_shortlisted_post_ppt' ||
     s === 'rejected' ||
     s === 'rejected_test' ||
     s === 'rejected_interview' ||

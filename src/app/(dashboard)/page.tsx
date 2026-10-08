@@ -312,8 +312,8 @@ export default async function DashboardPage() {
     return tA - tB;
   });
 
-  // Only pass top 6 to DashboardClient to avoid UI clutter, enriched with companyName
-  const topUpcomingEvents = uniqueUpcomingEvents.slice(0, 6).map((e) => ({
+  // The client limits reminders and rounds separately so deadlines cannot crowd out rounds.
+  const upcomingEvents = uniqueUpcomingEvents.map((e) => ({
     ...e,
     companyName: companyNameMap.get(e.placement_drive_id) || 'Campus Drive',
   }));
@@ -372,7 +372,7 @@ export default async function DashboardPage() {
   return (
     <DashboardClient
       stats={stats}
-      upcomingEvents={topUpcomingEvents}
+      upcomingEvents={upcomingEvents}
       activeApplications={allAppsList}
       hasAccounts={hasPersonalAccount && hasCollegeAccount}
       hasPersonalAccount={hasPersonalAccount}

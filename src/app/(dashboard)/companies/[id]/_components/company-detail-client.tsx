@@ -27,7 +27,7 @@ import {
 import { getCurrentRoundDecision, usesAutomaticRoundStatus, type RoundStatusDecision } from '@/lib/sync/recruitment/round-status';
 
 import type { DriveVenueDisplay } from '@/lib/drive-venues';
-import { getDriveModeBadgeConfig } from '@/components/ui/drive-mode-badge';
+import { DriveModeDetails } from '@/components/ui/drive-mode-details';
 
 export interface CompanyDetail {
   venue?: DriveVenueDisplay;
@@ -424,8 +424,6 @@ export default function CompanyDetailClient({
 
   // Display-only projection for the selected drive; recruitment/status notes remain unchanged.
   const driveModeDisplay = company.venue?.label || 'To be announced';
-  const driveModeConfig = getDriveModeBadgeConfig(driveModeDisplay, company.venue?.requiresTravel);
-  const DriveModeIcon = driveModeConfig.icon;
 
   // Role display: only show real, meaningful roles. Fallback to Campus Placement Drive if missing/generic.
   const displayRole = cleanRoleTitle(company.application?.role) || 'Campus Placement Drive';
@@ -764,11 +762,7 @@ export default function CompanyDetailClient({
 
           <div data-testid="ctc-drive-mode" className="rounded-xl border border-zinc-800 bg-zinc-900/50 px-3.5 py-3">
             <div className="font-mono text-[9px] uppercase tracking-widest text-zinc-500">Drive Mode</div>
-            <div className={cn("font-tabular mt-1 flex items-center gap-2 font-display text-base sm:text-lg font-bold", driveModeConfig.textCls)} title={company.venue?.detail ? `${driveModeConfig.tooltip}. ${company.venue.detail}` : driveModeConfig.tooltip}>
-              <DriveModeIcon className="h-4 w-4 shrink-0" />
-              {driveModeDisplay}
-            </div>
-            {company.venue?.detail && <p className="mt-1 text-[11px] text-zinc-400">{company.venue.detail}</p>}
+            <DriveModeDetails label={driveModeDisplay} detail={company.venue?.detail} requiresTravel={company.venue?.requiresTravel} />
           </div>
 
           <div data-testid="ctc-location" className="group relative rounded-xl border border-zinc-800 bg-zinc-900/50 px-3.5 py-3 hover:border-zinc-700 transition-colors">
