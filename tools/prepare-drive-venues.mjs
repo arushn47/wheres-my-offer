@@ -3,7 +3,7 @@
 import { Client } from 'pg';
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { readCutoverConnections } from './cutover-connections.mjs';
+import { readDestinationConnection } from './cutover-connections.mjs';
 import { extractRecruitmentVenues, resolveDriveVenue } from '../src/lib/drive-venues.ts';
 import { getEvidenceMessageText } from '../src/lib/sync/extraction/body.ts';
 const uuid = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i;
@@ -15,7 +15,7 @@ if (!(applying && args.length === 2 || args[0] === '--drive' && uuid.test(args[1
 const reviewed = applying ? JSON.parse(await readFile(args[1], 'utf8')) : null;
 const driveId = reviewed?.driveId || args[1];
 if (!uuid.test(driveId)) throw Error('Exact drive UUID required');
-const { destination } = await readCutoverConnections();
+const destination = await readDestinationConnection();
 const db = new Client({ ...destination, ssl: { rejectUnauthorized: false }, connectionTimeoutMillis: 15000 });
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 try {

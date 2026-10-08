@@ -2,7 +2,7 @@ import { Globe, Building2, MapPin, HelpCircle } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 export function getDriveModeBadgeConfig(driveMode: string) {
-  const isOnline = driveMode === 'Online';
+  const isOnline = driveMode === 'Online' || driveMode === 'Own location';
   const isCampus = driveMode.startsWith('VIT ');
 
   if (isOnline) {
@@ -10,7 +10,7 @@ export function getDriveModeBadgeConfig(driveMode: string) {
       cls: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300',
       textCls: 'text-emerald-300',
       icon: Globe,
-      tooltip: 'Recruitment venue: Online',
+      tooltip: `Recruitment venue: ${driveMode}`,
     };
   }
   if (isCampus) {

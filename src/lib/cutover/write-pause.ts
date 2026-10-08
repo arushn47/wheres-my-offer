@@ -1,6 +1,7 @@
 const READ_ONLY_APIS = new Set([
   '/api/sync/status',
   '/api/sync/shared-status',
+  '/api/sync/updates',
   '/api/notifications',
 ]);
 

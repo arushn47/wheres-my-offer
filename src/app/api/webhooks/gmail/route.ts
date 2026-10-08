@@ -1,10 +1,13 @@
 import { NextRequest, NextResponse, after } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { runSync } from '@/lib/sync/engine';
+import { drainPersonalPush } from '@/lib/sync/personal-push';
 import { runSharedCollegeSync } from '@/lib/sync/canonical/shared-college-sync';
 import { OAuth2Client } from 'google-auth-library';
 import { randomUUID } from 'node:crypto';
 import { describeError, diagnosticForStorage, diagnosticMessage } from '@/lib/error-diagnostics';
+
+export const maxDuration = 300;
 
 interface PubSubPayload {
   message?: {
@@ -85,6 +88,12 @@ export async function POST(req: NextRequest) {
 
     const supabase = createAdminClient();
 
+    // Completed messages must not reacquire an expired processing lease on redelivery.
+    const { data: previous, error: previousError } = await supabase.from('gmail_pubsub_inbox')
+      .select('status').eq('subscription', subscription).eq('message_id', messageId).maybeSingle();
+    if (previousError) return NextResponse.json({ error: 'Webhook inbox is unavailable' }, { status: 503 });
+    if (previous?.status === 'completed') return NextResponse.json({ success: true, duplicate: true }, { status: 200 });
+
     const runId = randomUUID();
     const { data: claimed, error: claimError } = await supabase.rpc('claim_gmail_pubsub_message', {
       p_subscription: subscription,
@@ -93,14 +102,14 @@ export async function POST(req: NextRequest) {
       p_history_id: historyId || null,
       p_publish_time: body.message.publishTime || null,
       p_run_id: runId,
-      p_lease_seconds: 120,
+      p_lease_seconds: 300,
     });
     if (claimError) {
       console.error('[Pub/Sub] Idempotency claim failed:', describeError(claimError));
       return NextResponse.json({ error: 'Webhook idempotency is unavailable' }, { status: 503 });
     }
     if (claimed !== true) {
-      return NextResponse.json({ success: true, duplicate: true }, { status: 200 });
+      return NextResponse.json({ message: 'Push is still processing; retry' }, { status: 503 });
     }
 
     // Find the user who owns this Gmail account
@@ -109,9 +118,18 @@ export async function POST(req: NextRequest) {
       .select('id, user_id, account_type, email, access_token_encrypted, refresh_token_encrypted, token_expiry, last_sync_at, last_history_id')
       .eq('email', emailAddress)
       .eq('is_connected', true)
-      .single();
+      .maybeSingle();
 
-    if (error || !account) {
+    if (error) {
+      await supabase.rpc('fail_gmail_pubsub_message', {
+        p_subscription: subscription,
+        p_message_id: messageId,
+        p_run_id: runId,
+        p_error: diagnosticForStorage({ operation: 'find_connected_account', error: describeError(error) }),
+      });
+      return NextResponse.json({ error: 'Connected account lookup unavailable' }, { status: 503 });
+    }
+    if (!account) {
       console.warn(`[Pub/Sub] No connected account found for email ${emailAddress} — acknowledging terminal state`);
       await supabase.rpc('complete_gmail_pubsub_message', {
         p_subscription: subscription,
@@ -121,8 +139,8 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ message: 'Account not found (acknowledged)' }, { status: 200 });
     }
 
-    // Keep the invocation alive after acknowledging Pub/Sub. The lease in
-    // runSync still deduplicates concurrent/replayed notifications.
+    // Shared ingestion keeps its existing after() worker. Personal delivery
+    // waits for its durable checkpoint; runSync enforces the per-user lease.
     const sharedCollegeInbox = (process.env.SHARED_COLLEGE_EMAIL || 'arush.23bce10472@vitbhopal.ac.in').toLowerCase();
     const isSharedCollegeSource =
       account.account_type === 'college' &&
@@ -143,7 +161,7 @@ export async function POST(req: NextRequest) {
     }
 
     console.log(`[Pub/Sub] Triggering ${isSharedCollegeSource ? 'shared College ingest' : 'Personal sync'} for ${emailAddress} at historyId ${historyId}`);
-    after(async () => {
+    const processPush = async () => {
       let operation = isSharedCollegeSource ? 'shared_college_sync' : 'personal_sync';
       try {
         if (isSharedCollegeSource) {
@@ -156,15 +174,20 @@ export async function POST(req: NextRequest) {
           } while (runs < 20);
           console.log(`[Shared College Ingest] ${emailAddress}:`, { runs, ...result });
         } else if (account.account_type === 'personal') {
-          await runSync(account.user_id);
+          await drainPersonalPush({
+            admin: supabase, sync: runSync, userId: account.user_id,
+            accountId: account.id, historyId,
+          });
         }
         operation = 'complete_gmail_pubsub_message';
-        const { error: completeError } = await supabase.rpc('complete_gmail_pubsub_message', {
+        const { data: completed, error: completeError } = await supabase.rpc('complete_gmail_pubsub_message', {
           p_subscription: subscription,
           p_message_id: messageId,
           p_run_id: runId,
         });
         if (completeError) throw completeError;
+        if (completed !== true) throw new Error('Push completion lease was lost');
+        return true;
       } catch (syncErr) {
         const diagnostic = describeError(syncErr);
         const errorMsg = diagnosticMessage(diagnostic);
@@ -205,9 +228,17 @@ export async function POST(req: NextRequest) {
             messageId, runId, originalError: diagnostic, error: describeError(recordError),
           });
         }
-        // Never re-throw inside after() — re-throwing crashes the background handler and generates noisy runtime logs.
+        return isTerminalError;
       }
-    });
+    };
+
+    // A personal push is not acknowledged until its saved checkpoint covers the
+    // notification. Busy, failed or unfinished work receives a Pub/Sub retry.
+    if (account.account_type === 'personal') {
+      const completed = await processPush();
+      return NextResponse.json({ success: completed, message: completed ? 'Personal sync complete' : 'Sync checkpoint saved; retry' }, { status: completed ? 200 : 503 });
+    }
+    after(async () => { await processPush(); });
 
     return NextResponse.json({
       success: true,

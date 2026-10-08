@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { cutoverConnections, verifyProductionPause, requireNoLiveWriters } from './cutover-connections.mjs';
+import { cutoverConnections, destinationConnection, verifyProductionPause, requireNoLiveWriters } from './cutover-connections.mjs';
 const env = {NEXT_PUBLIC_SUPABASE_URL:'https://mltfzskewmpifnyleevb.supabase.co',db_pass:'synthetic-source',
  RESTORE_PROJECT_REF:'nvkxyeugonjevmbvxirm',RESTORE_SUPABASE_URL:'https://nvkxyeugonjevmbvxirm.supabase.co',
  host:'aws-1-ap-south-1.pooler.supabase.com',user:'postgres.nvkxyeugonjevmbvxirm',DB_PASS:'synthetic-replacement'};
@@ -13,6 +13,19 @@ test('keeps source and destination credentials independent',()=>{
  assert.equal(cutoverConnections(sourceOnly,restoreOnly).destination.password,'synthetic-replacement');
  for (const patch of [{user:'postgres.mltfzskewmpifnyleevb'},{RESTORE_PROJECT_REF:'xvxkkqdnatnqumnlshlg'},
    {NEXT_PUBLIC_SUPABASE_URL:env.RESTORE_SUPABASE_URL},{port:'6543'},{DB_USER:'postgres.nvkxyeugonjevmbvxirm'}]) assert.throws(()=>cutoverConnections({...env,...patch}));
+});
+test('destination maintenance works after cutover without source credentials and rejects mixed projects',()=>{
+ const restore={...env}; delete restore.NEXT_PUBLIC_SUPABASE_URL; delete restore.db_pass;
+ assert.equal(destinationConnection(restore).user,'postgres.nvkxyeugonjevmbvxirm');
+ assert.equal(destinationConnection(restore).password,'synthetic-replacement');
+ for (const patch of [{user:'postgres.mltfzskewmpifnyleevb'},
+   {RESTORE_PROJECT_REF:'mltfzskewmpifnyleevb'},
+   {RESTORE_SUPABASE_URL:'https://mltfzskewmpifnyleevb.supabase.co'},
+   {port:'6543'},{host:'attacker.example'},{DB_PASS:''}]) {
+   assert.throws(()=>destinationConnection({...restore,...patch}));
+ }
+ // An application switch still cannot authorize a two-database refresh.
+ assert.throws(()=>cutoverConnections({...env,NEXT_PUBLIC_SUPABASE_URL:env.RESTORE_SUPABASE_URL}));
 });
 test('accepts only explicit maintenance fence responses, never ordinary service errors',async()=>{
  const seen=[];

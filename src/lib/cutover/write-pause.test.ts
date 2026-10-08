@@ -18,7 +18,7 @@ describe('cutover writer fence', () => {
   });
 
   it('blocks server actions and mutations even on otherwise readable paths', () => {
-    for (const path of ['/companies', '/settings', '/api/notifications', '/api/sync/status']) {
+    for (const path of ['/companies', '/settings', '/api/notifications', '/api/sync/status', '/api/sync/updates']) {
       for (const method of ['POST', 'PUT', 'PATCH', 'DELETE']) {
         expect(shouldPauseRequest(path, method, true)).toBe(true);
       }
@@ -26,7 +26,7 @@ describe('cutover writer fence', () => {
   });
 
   it('keeps existing pages and audited progress APIs readable', () => {
-    for (const path of ['/companies', '/companies/drive-id', '/login', '/api/sync/status', '/api/sync/shared-status', '/api/notifications']) {
+    for (const path of ['/companies', '/companies/drive-id', '/login', '/api/sync/status', '/api/sync/updates', '/api/sync/shared-status', '/api/notifications']) {
       expect(shouldPauseRequest(path, 'GET', true)).toBe(false);
       expect(shouldPauseRequest(path, 'HEAD', true)).toBe(false);
     }

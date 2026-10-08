@@ -13,7 +13,8 @@ export interface HistoryResult {
  */
 export async function fetchHistoryChanges(
   gmail: gmail_v1.Gmail,
-  startHistoryId: string
+  startHistoryId: string,
+  options: { addedOnly?: boolean } = {}
 ): Promise<HistoryResult> {
   const messageIds = new Set<string>();
   const deletedMessageIds = new Set<string>();
@@ -27,6 +28,7 @@ export async function fetchHistoryChanges(
         startHistoryId,
         maxResults: 100,
         pageToken,
+        ...(options.addedOnly ? { historyTypes: ['messageAdded', 'messageDeleted'] } : {}),
       });
 
       if (response.data.historyId) {
@@ -35,7 +37,7 @@ export async function fetchHistoryChanges(
 
       if (response.data.history) {
         for (const record of response.data.history) {
-          if (record.messages) {
+          if (!options.addedOnly && record.messages) {
             for (const msg of record.messages) {
               if (msg.id) messageIds.add(msg.id);
             }
@@ -47,12 +49,12 @@ export async function fetchHistoryChanges(
               }
             }
           }
-          if (record.labelsAdded) {
+          if (!options.addedOnly && record.labelsAdded) {
             for (const item of record.labelsAdded) {
               if (item.message?.id) messageIds.add(item.message.id);
             }
           }
-          if (record.labelsRemoved) {
+          if (!options.addedOnly && record.labelsRemoved) {
             for (const item of record.labelsRemoved) {
               if (item.message?.id) messageIds.add(item.message.id);
             }
@@ -69,7 +71,8 @@ export async function fetchHistoryChanges(
     } while (pageToken);
 
     return {
-      messageIds: Array.from(messageIds),
+      // The page planner expects newest first; Gmail history is oldest first.
+      messageIds: options.addedOnly ? Array.from(messageIds).reverse() : Array.from(messageIds),
       deletedMessageIds: Array.from(deletedMessageIds),
       latestHistoryId,
       historyExpired: false,
@@ -78,7 +81,7 @@ export async function fetchHistoryChanges(
     const errorObj = err as { code?: number; status?: number; message?: string };
     const statusCode = errorObj.code || errorObj.status;
 
-    // 404 or 400 means historyId is too old (past 30 days) or invalid
+    // History retention varies; Gmail reports an unavailable cursor with 404.
     if (statusCode === 404 || statusCode === 400 || (errorObj.message && errorObj.message.includes('HistoryId'))) {
       console.warn(`History ID ${startHistoryId} expired or invalid. Falling back to full search.`);
       const profile = await getProfileHistoryId(gmail);

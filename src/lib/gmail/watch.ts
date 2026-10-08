@@ -119,8 +119,8 @@ export async function renewExpiringWatches(
           .from('gmail_accounts')
           .update({
             watch_expires_at: expiresAt,
-            // Only update history ID if account has already had an initial sync
-            ...(account.last_history_id ? { last_history_id: result.historyId } : {}),
+            // Renewal establishes notification coverage, not processed-mail
+            // progress. Advancing the sync cursor here would skip unseen mail.
           })
           .eq('id', account.id);
 

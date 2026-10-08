@@ -662,6 +662,53 @@ export function SyncProvider({
     return () => window.removeEventListener('start-placement-sync', handleTriggerSync);
   }, [handleSync]);
 
+  // This authenticated fallback also works when public Realtime publication or
+  // Supabase Auth is unavailable. It only reads a compact version, never Gmail.
+  useEffect(() => {
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let controller: AbortController | null = null;
+    let version: string | null | undefined;
+    const poll = async () => {
+      if (disposed) return;
+      if (document.visibilityState==='visible' && !isSseActiveRef.current && !isSyncingRef.current) {
+        controller = new AbortController();
+        try {
+          const response = await fetch('/api/sync/updates', { cache: 'no-store', signal: controller.signal });
+          if (response.ok && !disposed) {
+            const data = await response.json();
+            if (disposed) return;
+            if (version !== undefined && version !== data.version) {
+              router.refresh();
+              window.dispatchEvent(new CustomEvent('wmo:refresh_notifications'));
+            }
+            version = data.version;
+            if (data.isSyncing) {
+              isSyncingRef.current = true;
+              setIsSyncing(true);
+              startPolling(true);
+            }
+          }
+        } catch { /* Retry the passive check without starting a sync. */ }
+        finally { controller = null; }
+      }
+      if (!disposed) timer = setTimeout(() => void poll(), 10_000);
+    };
+    const visible = () => {
+      if (document.visibilityState !== 'visible' || controller) return;
+      if (timer) clearTimeout(timer);
+      void poll();
+    };
+    void poll();
+    document.addEventListener('visibilitychange',visible);
+    return () => {
+      disposed = true;
+      if (timer) clearTimeout(timer);
+      controller?.abort();
+      document.removeEventListener('visibilitychange',visible);
+    };
+  }, [router, startPolling]);
+
   // Supabase Realtime listener: instant updates when applications change
   useEffect(() => {
     let refreshDebounceTimer: NodeJS.Timeout | null = null;

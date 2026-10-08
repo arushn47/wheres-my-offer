@@ -18,6 +18,7 @@ import {
 } from '@/lib/sync/attachments/attachment-status';
 import { isPdfAttachment, mergePdfJobDetails, parsePdfAttachment } from '@/lib/sync/extraction/pdf-parser';
 import { getDriveRegistrationDateBoundary, isEmailAllowedByDriveBoundary } from '@/lib/sync/identity/drive-temporal-boundary';
+import { persistSharedCircularVenues } from './shared-college-venues';
 
 interface SharedDriveRow {
   id: string;
@@ -25,6 +26,7 @@ interface SharedDriveRow {
   drive_number: string | null;
   normalized_drive_number: string | null;
   source_college_email_id: string | null;
+  recruitment_venues?: { version?: number; entries?: unknown[] } | null;
 }
 
 interface SharedCompanyRow {
@@ -405,6 +407,14 @@ export async function ingestSharedCollegeCircular(params: {
   });
   if (!drive) return { canonicalId, appliedUsers: 0, skippedUsers: 0, attachmentErrors };
 
+  // Check the original anchor before existing registration updates can replace it.
+  // This runs once per shared circular, independently of individual user fan-out.
+  const venueCompany = Array.isArray(drive.companies) ? drive.companies[0] : drive.companies;
+  await persistSharedCircularVenues(supabase, drive, {
+    id: canonicalId, numbers: payload.parsed_drive_numbers,
+    classification: payload.classification, companyName: payload.parsed_company_name,
+  }, venueCompany || null, parsedEmail);
+
   // If this circular is a registration circular within the drive's registration boundary,
   // link this canonical circular as source_college_email_id and backfill any missing location/role/ctc/stipend
   const driveUpdates: Record<string, any> = {};
@@ -518,7 +528,7 @@ export async function fanOutSharedCollegeArchiveToUser(userId: string): Promise<
     supabase.from('applications').select('placement_drive_id,manual_override,status').eq('user_id', userId),
     supabase.from('personal_emails').select('placement_drive_id').eq('user_id', userId).not('placement_drive_id', 'is', null),
     supabase.from('candidate_matches').select('placement_drive_id,match_type,matched_value,matched_round_type').eq('user_id', userId),
-    supabase.from('placement_drives').select('id,company_id,drive_number,normalized_drive_number,source_college_email_id'),
+    supabase.from('placement_drives').select('id,company_id,drive_number,normalized_drive_number,source_college_email_id,recruitment_venues'),
     supabase.from('companies').select('id,name,aliases'),
     supabase.from('users').select('neo_id,email').eq('id', userId).single(),
   ]);
@@ -684,6 +694,15 @@ export async function fanOutSharedCollegeArchiveToUser(userId: string): Promise<
         })) {
           skipped++;
           continue;
+        }
+        // A personal announcement can create the drive after its college
+        // circular was ingested. Seed only missing projections from bodies
+        // this existing fan-out already loaded; no additional archive fetch.
+        if (!drive.recruitment_venues?.entries?.length) {
+          await persistSharedCircularVenues(supabase, drive, {
+            id: circular.id, numbers: circular.parsed_drive_numbers || [],
+            classification: circular.classification, companyName: circular.parsed_company_name,
+          }, company, parsedEmail);
         }
         await processEmailForEventsAndStatus(supabase, userId, drive.company_id, parsedEmail, circular.id, user.neo_id, user.email, drive.id, undefined, 'drive');
         applied++;

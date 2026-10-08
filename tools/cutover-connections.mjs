@@ -11,6 +11,23 @@ export async function readCutoverConnections() {
   const destination = parseEnv(await readFile(resolve('.env.restore.local'),'utf8'));
   return cutoverConnections(source,destination);
 }
+// Post-cutover maintenance must not depend on the retired source credentials.
+// Keep the two-database cutover guard unchanged for refresh/restore tooling.
+export async function readDestinationConnection() {
+  return destinationConnection(parseEnv(await readFile(resolve('.env.restore.local'),'utf8')));
+}
+export function destinationConnection(restore) {
+  const ref = restore.DESTINATION_PROJECT_REF || restore.RESTORE_PROJECT_REF;
+  const url = restore.DESTINATION_SUPABASE_URL || restore.RESTORE_SUPABASE_URL;
+  if (ref !== DESTINATION_REF || new URL(url).hostname !== `${ref}.supabase.co`) throw new Error('Pinned Mumbai destination required');
+  const connection = {host:restore.DESTINATION_DB_HOST || restore.host,port:Number(restore.DESTINATION_DB_PORT || restore.port || 5432),
+    user:restore.DESTINATION_DB_USER || restore.user,password:restore.DESTINATION_DB_PASSWORD || restore.DB_PASS,database:'postgres'};
+  if (!connection.password || connection.port !== 5432 ||
+    !(connection.host === `db.${ref}.supabase.co` || connection.host?.endsWith('.pooler.supabase.com') && connection.user === `postgres.${ref}`)) {
+    throw new Error('Invalid or mixed destination database credentials');
+  }
+  return connection;
+}
 export function cutoverConnections(env, restore = env) {
   if (new URL(env.NEXT_PUBLIC_SUPABASE_URL).hostname !== `${SOURCE_REF}.supabase.co`) throw new Error('Local source configuration must still identify production');
   const ref = restore.DESTINATION_PROJECT_REF || restore.RESTORE_PROJECT_REF;

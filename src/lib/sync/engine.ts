@@ -28,6 +28,8 @@ import {
 import { createAdminClient } from '@/lib/supabase/admin';
 import { getCurrentMessageText, getEvidenceMessageText } from '@/lib/sync/extraction/body';
 import { extractRecruitmentVenues } from '@/lib/drive-venues';
+import { discoverPersonalMessages } from '@/lib/gmail/personal-discovery';
+import { readGmailMessageIfPresent } from '@/lib/gmail/message-read';
 import { persistDriveVenues } from '@/lib/drive-venue-data';
 import { resolvePlacementDrive } from '@/lib/sync/identity/drive-resolution';
 import { getLiveApplicationScope } from '@/lib/sync/identity/application-scope';
@@ -499,11 +501,12 @@ export async function planSyncPages(
   newMsgIds: string[]
 ): Promise<SyncPageRow[]> {
   // Check if active (pending or in_progress) pages already exist for this account
-  const { data: existingPages } = await supabase
+  const { data: existingPages, error: readError } = await supabase
     .from('sync_pages')
     .select('id, user_id, gmail_account_id, page_index, message_ids, next_offset, status, created_at, updated_at')
     .eq('gmail_account_id', account.id)
     .order('page_index', { ascending: true });
+  if (readError) throw readError;
 
   const pendingOrActive = (existingPages || []).filter((p) => p.status !== 'complete');
   if (pendingOrActive.length > 0) {
@@ -541,7 +544,9 @@ export async function planSyncPages(
   }
 
   // Delete any old completed pages for this account before inserting new season plan
-  await supabase.from('sync_pages').delete().eq('gmail_account_id', account.id);
+  const { error: deleteError } = await supabase.from('sync_pages').delete()
+    .eq('gmail_account_id', account.id).eq('status', 'complete');
+  if (deleteError) throw deleteError;
 
   const { data: inserted, error } = await supabase
     .from('sync_pages')
@@ -554,7 +559,8 @@ export async function planSyncPages(
     throw new Error(`Failed to plan sync pages: ${error.message}`);
   }
 
-  return (inserted || []) as SyncPageRow[];
+  if (!inserted?.length) throw new Error('Sync page insertion returned no saved rows');
+  return inserted as SyncPageRow[];
 }
 
 // ============================================
@@ -659,7 +665,11 @@ async function processSingleMessage(
     } else {
       // Stage 1: Cheap metadata inspection
       let shouldFetchFull = true;
-      const metadata = await withQuotaBackoff(() => fetchMessageMetadata(gmail, msgId));
+      const metadata = await readGmailMessageIfPresent(() => withQuotaBackoff(() => fetchMessageMetadata(gmail, msgId)));
+      if (!metadata) {
+        ctx.liveTracker.processedMessages++;
+        return result;
+      }
       t1 = Date.now();
       const subj = metadata.subject.toLowerCase();
       const snippet = metadata.snippet.toLowerCase();
@@ -689,7 +699,12 @@ async function processSingleMessage(
       }
 
       // Stage 2: Full message detail & attachments
-      parsedEmail = await withQuotaBackoff(() => fetchMessageDetail(gmail, msgId));
+      const detail = await readGmailMessageIfPresent(() => withQuotaBackoff(() => fetchMessageDetail(gmail, msgId)));
+      if (!detail) {
+        ctx.liveTracker.processedMessages++;
+        return result;
+      }
+      parsedEmail = detail;
     }
     const t2 = Date.now();
 
@@ -955,7 +970,9 @@ async function processSingleMessage(
       // The RPC additionally checks the exact canonical anchor/number and rejects conflicting sources.
       if (placementDriveId && collegeEmailId && driveAssignmentConfidence === 'high' && driveAssignmentSource !== 'company_only') {
         try {
-          const venues = parsedEmail.cachedJobDetails?.recruitmentVenues ?? extractRecruitmentVenues(parsedEmail.subject, getEvidenceMessageText(parsedEmail));
+          // Re-extract from the already loaded circular so older cached parser
+          // results cannot restore incorrect attendance venues after a backfill.
+          const venues = extractRecruitmentVenues(parsedEmail.subject, getEvidenceMessageText(parsedEmail));
           await persistDriveVenues(supabase, placementDriveId, collegeEmailId, parsedEmail.receivedAt.toISOString(), venues);
         } catch (venueError) {
           console.warn('[Drive venue] Display metadata update failed', venueError instanceof Error ? venueError.message : 'Database error');
@@ -1242,7 +1259,7 @@ export async function processPage(
   const startTime = Date.now();
 
   const isPersonal = account.account_type === 'personal';
-  const isAccountInitialSync = !account.last_history_id;
+  const isAccountInitialSync = !account.last_sync_at;
   let batchSize = isAccountInitialSync && chronoSortedMsgIds.length > 200 ? 4 : 8;
   const INTER_BATCH_DELAY_MS = 0;
 
@@ -1599,7 +1616,8 @@ async function runSyncMeasured(
   const globalDeadline = options?.globalDeadline ?? (Date.now() + totalBudgetMs);
 
   // Determine if this is an initial discovery sync across any connected account
-  const isInitialSync = sortedAccounts.some((a) => !a.last_history_id);
+  const isInitialSync = sortedAccounts.some((a) => !a.last_sync_at);
+  let completedAccountPages = false;
 
   // Sort accounts so 'personal' is processed FIRST
   // This allows official NeoPAT emails to establish master company records first
@@ -1763,11 +1781,12 @@ async function runSyncMeasured(
         const { fetchHistoryChanges, getProfileHistoryId } = await import('@/lib/gmail/history');
 
         // Check for active or pending pages for this account
-        const { data: existingPages } = await supabase
+        const { data: existingPages, error: pagesReadError } = await supabase
           .from('sync_pages')
           .select('id, user_id, gmail_account_id, page_index, message_ids, next_offset, status, created_at, updated_at')
           .eq('gmail_account_id', account.id)
           .order('page_index', { ascending: true });
+        if (pagesReadError) throw pagesReadError;
 
         let pages: SyncPageRow[] = (existingPages || []) as SyncPageRow[];
         let pendingPages = pages.filter((p) => p.status !== 'complete');
@@ -1789,14 +1808,9 @@ async function runSyncMeasured(
           };
 
           if (account.account_type === 'personal') {
-            // Personal accounts: master records for NeoPAT companies and registrations.
-            // Volume is small (~250-450 emails total across placement season).
-            // Always query from:noreply.cdcinfo@vitstudent.ac.in after:2026/07/01 directly
-            // rather than trusting ephemeral history IDs. This guarantees zero missed drives
-            // or registration confirmations while still completing in <200ms via DB existingSet check.
-            const query = getPlacementSearchQuery('personal');
-            messageIds = await fetchMessageIds(gmail, query, 2500, onFetchBatch);
-            nextHistoryId = await getProfileHistoryId(gmail);
+            const discovery = await discoverPersonalMessages(gmail, account.last_history_id, onFetchBatch);
+            messageIds = discovery.messageIds;
+            nextHistoryId = discovery.nextHistoryId;
           } else if (account.last_history_id) {
             const historyResult = await fetchHistoryChanges(gmail, account.last_history_id);
             if (!historyResult.historyExpired) {
@@ -1901,25 +1915,15 @@ async function runSyncMeasured(
             result.skippedDuplicates += skippedCount;
 
             if (newMsgIds.length > 0) {
-              const isEphemeral = !isInitialSync && newMsgIds.length <= 15;
-              if (isEphemeral) {
-                pages = [
-                  {
-                    id: 'ephemeral-page',
-                    user_id: userId,
-                    gmail_account_id: account.id,
-                    page_index: 0,
-                    message_ids: newMsgIds,
-                    next_offset: 0,
-                    status: 'pending',
-                    created_at: new Date().toISOString(),
-                    updated_at: new Date().toISOString(),
-                  },
-                ];
-                pendingPages = pages;
-              } else {
-                pages = await planSyncPages(supabase, userId, account, newMsgIds);
-                pendingPages = pages.filter((p) => p.status !== 'complete');
+              // Persist even a single incoming email before advancing its cursor.
+              pages = await planSyncPages(supabase, userId, account, newMsgIds);
+              pendingPages = pages.filter((p) => p.status !== 'complete');
+              // The IDs are now durably queued. Save the discovery boundary,
+              // not a later profile ID that could skip mail arriving mid-page.
+              if (nextHistoryId) {
+                const { error } = await supabase.from('gmail_accounts')
+                  .update({ last_history_id: nextHistoryId }).eq('id', account.id);
+                if (error) throw error;
               }
             } else {
               // No new emails to process
@@ -2032,19 +2036,20 @@ async function runSyncMeasured(
             }
 
             // Update history ID if all pages are now done
-            const { data: refreshedPages } = await supabase
+            const { data: refreshedPages, error: pagesRefreshError } = await supabase
               .from('sync_pages')
-              .select('status')
+              .select('status, page_index')
               .eq('gmail_account_id', account.id);
+            if (pagesRefreshError) throw pagesRefreshError;
 
             const allDone = (refreshedPages && refreshedPages.length > 0 && refreshedPages.every((p) => p.status === 'complete')) || (pages.length === 1 && pages[0].id === 'ephemeral-page');
             if (allDone) {
-              const nextHistId = nextHistoryId || (await getProfileHistoryId(gmail).catch(() => null));
+              completedAccountPages = true;
               await supabase
                 .from('gmail_accounts')
                 .update({
                   last_sync_at: new Date().toISOString(),
-                  last_history_id: nextHistId || account.last_history_id,
+                  ...(nextHistoryId ? { last_history_id: nextHistoryId } : {}),
                 })
                 .eq('id', account.id);
 
@@ -2129,19 +2134,20 @@ async function runSyncMeasured(
             }
 
             // Check if all pages for this account are now complete
-            const { data: refreshedPages } = await supabase
+            const { data: refreshedPages, error: pagesRefreshError } = await supabase
               .from('sync_pages')
-              .select('status')
+              .select('status, page_index')
               .eq('gmail_account_id', account.id);
+            if (pagesRefreshError) throw pagesRefreshError;
 
             const allDone = (refreshedPages && refreshedPages.length > 0 && refreshedPages.every((p) => p.status === 'complete')) || (pages.length === 1 && pages[0].id === 'ephemeral-page' && result.errors.length === 0);
             if (allDone) {
-              const nextHistId = nextHistoryId || (await getProfileHistoryId(gmail).catch(() => null));
+              completedAccountPages = true;
               await supabase
                 .from('gmail_accounts')
                 .update({
                   last_sync_at: new Date().toISOString(),
-                  last_history_id: nextHistId || account.last_history_id,
+                  ...(nextHistoryId ? { last_history_id: nextHistoryId } : {}),
                 })
                 .eq('id', account.id);
 
@@ -2178,14 +2184,15 @@ async function runSyncMeasured(
 
     // Check whether any sync_pages across ANY accounts remain pending
     const personalAccountIds = sortedAccounts.map((account) => account.id);
-    const { data: allPendingPages } = await supabase
+    const { data: allPendingPages, error: pendingReadError } = await supabase
       .from('sync_pages')
       .select('status')
       .eq('user_id', userId)
       .in('gmail_account_id', personalAccountIds);
+    if (pendingReadError) throw pendingReadError;
 
     const hasAnyPending = (allPendingPages || []).some((p) => p.status !== 'complete');
-    const hadCompletedInitialPages = (allPendingPages || []).length > 0 && !hasAnyPending;
+    const hadCompletedInitialPages = isInitialSync && completedAccountPages && !hasAnyPending;
     result.hasMorePagesPending = hasAnyPending;
     if (syncPauseRequests.has(userId)) {
       result.paused = true;

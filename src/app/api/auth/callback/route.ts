@@ -226,20 +226,11 @@ export async function GET(request: Request) {
         // expiration is a Unix timestamp in milliseconds returned as a string by Gmail API
         const watchExpiresAt = new Date(Number(watchResult.expiration)).toISOString();
 
-        // Only update last_history_id if the account already completed its initial discovery sync.
-        // If last_history_id is null, keep it null so initial full discovery is not skipped.
-        const { data: existingAcc } = await supabase
-          .from('gmail_accounts')
-          .select('last_history_id')
-          .eq('user_id', userId)
-          .eq('email', userInfo.email)
-          .single();
-
         await supabase
           .from('gmail_accounts')
           .update({
             watch_expires_at: watchExpiresAt,
-            ...(existingAcc?.last_history_id ? { last_history_id: watchResult.historyId } : {}),
+            // Keep the processed/queued-mail cursor intact across reconnects.
           })
           .eq('user_id', userId)
           .eq('email', userInfo.email);
