@@ -5,6 +5,20 @@ import { getEvidenceMessageText } from './sync/extraction/body';
 const projection = (entries: VenueEntry[]) => ({ version: 1, entries: entries.map(e => ({ ...e, sourceId: 'canonical-1407', receivedAt: '2026-10-07T12:00:00Z' })) });
 const display = (body: string, subject = 'Chargebee registration', campus?: string) => resolveDriveVenue(projection(extractRecruitmentVenues(subject, body)), campus);
 describe('explicit drive venue display', () => {
+  it('keeps LeadSquared Vellore PPT/interviews separate from the respective-campus test', () => {
+    const body='Online Test : 15th October 2026 (2 PM) @ respective campus venues.PPT &\nInterviews : 27th October 2026 from 9 AM onwards @ VIT Vellore campus';
+    const entries=extractRecruitmentVenues('LeadSquared : Registration : Super Dream Internship - 2027 Batch',body);
+    expect(entries).toEqual(expect.arrayContaining([
+      expect.objectContaining({stage:'Test',kind:'respective'}),
+      expect.objectContaining({stage:'PPT',kind:'campus',name:'VIT Vellore'}),
+      expect.objectContaining({stage:'Interviews',kind:'campus',name:'VIT Vellore'}),
+    ]));
+    expect(entries.filter(e=>['PPT','Interviews'].includes(e.stage)).every(e=>!e.audience)).toBe(true);
+    expect(resolveDriveVenue(projection(entries),'VIT Bhopal')).toMatchObject({label:'VIT Vellore',requiresTravel:true});
+  });
+  it('does not apply a home-campus test venue to a separate Vellore interview row', () => {
+    expect(display('Test: 15 October @ respective campus labs.\nInterviews: 27 October @ VIT Vellore campus.', 'Registration', 'VIT Bhopal')).toMatchObject({label:'VIT Vellore',requiresTravel:true});
+  });
   it('resolves Chargebee #1407 office instructions without borrowing a Bhopal test', () => {
     expect(display('Job Location: Chennai\nInterview Process & Location: All rounds of interviews will be held in person at the ChargeBee Chennai office, preferably targeted for next week.')).toEqual({ label: 'Company Office · Chennai', detail: 'Interviews: ChargeBee Chennai office' });
   });

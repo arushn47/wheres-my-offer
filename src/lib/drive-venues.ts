@@ -61,6 +61,8 @@ export function extractRecruitmentVenues(subject: string, body: string): VenueEn
   // Sentence-local extraction prevents a Work Location/office footer from supplying a venue.
   // Gmail plain text wraps prose at ~78 columns; restore continued clauses, not table headings.
   const unwrapped = body.replace(/[*_]/g, '').replace(/\b(in|at|from|the|our|respective|VIT)\s*\r?\n\s*/g, '$1 ')
+    .replace(/\b(PPT|Interviews?|Test)\s*(&|and|\+)\s*\r?\n\s*(?=Interviews?|PPT|(?:Online\s+)?Test)/gi, '$1 $2 ')
+    .replace(/([.!?])(?=(?:PPT|Interviews?|Online\s+Test)\s*(?:&|:))/gi, '$1\n')
     .replace(/([^\n.!?:])\r?\n[ \t]*(?=[a-z])/g, '$1 ')
     .replace(/\b(Bhopal|AP)\s*\r?\n\s*,\s*(AP|Bhopal)\b/gi, '$1, $2');
   const clauses = unwrapped.replace(/,\s*(?=(?:VIT\s+)?(?:Bhopal|Vellore|Chennai|AP)(?:\s*(?:&|and)\s*(?:VIT\s+)?(?:Bhopal|Vellore|Chennai|AP))?\s+(?:campus\s+)?(?:students|candidates|campus)\s+(?:will|must|should|need|are)\b)/gi, '\n')
@@ -111,7 +113,7 @@ export function extractRecruitmentVenues(subject: string, body: string): VenueEn
     const recruitment = stage !== 'Recruitment' || /\b(?:recruitment|placement drive|selection process|(?:the|this)\s+drive|drive\s+(?:will|shall))\b/i.test(line) || reportingRoom || audienceRemote;
     const attendance = /\b(?:held|conducted|scheduled|attend|report|appear|travel|take|will have|will be having)\b|\b(?:will|shall)\s+be\b|\b(?:is|are)\s+(?:virtual|remote)\b/i.test(line);
     const venueLabel = /(?:^|\b)(?:(?:test|interview|PPT|assessment)\s+)?venue\s*[:\-@]/i.test(line);
-    const datedVenue = /^\s*(?:(?:online|physical)\s+)?(?:test|assessment|interviews?|PPT)(?:\s*&\s*Online\s+Test|\s+Date)?\s*:\s*[^\n@]{0,90}@/i.test(line);
+    const datedVenue = /^\s*(?:(?:online|physical)\s+)?(?:test|assessment|interviews?|PPT)(?:\s*(?:&|and|\+)\s*(?:(?:online|physical)\s+)?(?:test|assessment|interviews?|PPT))*(?:\s+Date)?\s*:\s*[^\n@]{0,90}@/i.test(line);
     const tableVenue = /^(?:Online\s+)?(?:Test|Assessment|PPT)\b.{0,150}\bAt\s+(?:the\s+)?respective\s+campus(?:es)?\b/i.test(line);
     if (!recruitment || (!attendance && !audienceRemote && !venueLabel && !datedVenue && !tableVenue && !/\b(?:test|assessment).{0,25}(?:at|from)\s+(?:own|home)\s+location/i.test(line))) continue;
     if (/\b(?:not|no longer|cancelled|canceled)\b|\b(?:may|might|could)\s+(?:be|take)\b/i.test(line)) continue;
@@ -156,7 +158,11 @@ export function extractRecruitmentVenues(subject: string, body: string): VenueEn
     // Explicit home/virtual attendance is required, and physical venues take priority.
     else if (/\b(?:virtual(?:ly)?|remote(?:ly)?|own locations?|home location|(?:held|conducted|attend)\s+online)\b/i.test(line)
       && !/\b(?:labs?|LC|PRP|SJT|CDC|Channa|in person|in-person|office|auditorium|gallery|campus)\b/i.test(audienceList ? line.slice(audienceList.prefix.length) : line)) entry = { ...base, kind: 'online', name: 'Online' };
-    if (entry) entries.push(...(audiences.length>1 ? audiences.map(a=>({...entry!,audience:a})) : [entry]));
+    if (entry) {
+      const roundLabel = datedVenue ? line.slice(0,line.indexOf(':')) : '';
+      const stages = roundLabel ? [...new Set(roundLabel.split(/\s*(?:&|and|\+)\s*/i).map(stageIn).filter((stage): stage is string=>Boolean(stage)))] : [entry.stage];
+      for (const stage of stages) entries.push(...(audiences.length>1 ? audiences.map(a=>({...entry!,stage,audience:a})) : [{...entry,stage}]));
+    }
   }
   // A campus team's separate venue arrangements mean attendance at that campus,
   // even when its room number has not been announced yet.
@@ -176,12 +182,15 @@ export function extractRecruitmentVenues(subject: string, body: string): VenueEn
   }
   // Conflicting instructions for one stage/audience stay unknown rather than guessing.
   const grouped = new Map<string, VenueEntry[]>();
-  const campusRouting = entries.some(entry => entry.kind==='respective' || entry.audience && entry.kind==='online')
-    || Boolean(localArrangements) || /\b(?:Bhopal|AP)\b[^\n]{0,100}\bvirtual(?:ly)?\b/i.test(clauses);
+  const routesCampus = (entry: VenueEntry) => entry.kind==='respective' || Boolean(entry.audience && entry.kind==='online');
+  const wholeProcessRouting = entries.some(entry=>routesCampus(entry) && /\b(?:entire\s+(?:selection|further)\s+process|(?:the|this)\s+drive\s+will\s+be)\b/i.test(entry.quote));
   for (const original of entries) {
     // A circular that explicitly routes other campuses separately does not make
     // the headline campus venue a universal attendance instruction.
     const physicalCampus = venueCampus(original);
+    // Campus routing for a test says nothing about where later interviews occur.
+    const campusRouting = Boolean(localArrangements) || wholeProcessRouting
+      || entries.some(entry=>routesCampus(entry) && (entry.stage===original.stage || original.stage==='Recruitment' && entry.audience));
     const entry = campusRouting && !original.audience && physicalCampus
       ? { ...original, audience: physicalCampus } : original;
     const key = `${entry.stage}:${entry.audience || ''}`;

@@ -70,3 +70,10 @@ Apple source review: the earlier SDET registration plan mentions virtual intervi
 The first campus correction pass checked 126 drives / 986 exact sources and applied 203 source merges across 76 drives, verifying that all other drive fields stayed unchanged. A second bounded pass applied 26 source merges across eight drives for the newly reported compact American Express lab list and remaining CDC aliases, again verifying that other fields stayed unchanged. The final saved projections resolve 90 drives; 36 remain unannounced because qualifying attendance evidence is absent. Snapshots and per-drive verification results remain under ignored scratch/drive-venue-reviews; no Gmail fetch or broad status reprocessing is involved.
 
 Validation for this correction: 636 application tests pass (three database integration tests skipped), all 14 tool tests pass, TypeScript and the production Webpack build pass. Focused venue/badge lint is clean. The six pre-existing dashboard files retain the same 42 lint diagnostics as HEAD; no lint cleanup is included in this change.
+
+
+### LeadSquared round-scoping correction
+
+LeadSquared #1414's registration circular explicitly assigns the 15 October test to respective campus venues and the 27 October PPT/interviews to VIT Vellore. The previous parser incorrectly used any respective-campus round to scope every physical venue in the circular to the host campus. Routing now applies to the relevant round, with explicit entire-process exceptions preserved. Combined dated rows such as PPT & Interviews are extracted for both rounds, including Gmail wrapping and adjacent table text without a separating space. LeadSquared therefore displays VIT Vellore with travel required for Bhopal, retaining the local test in the details.
+
+Validation: 638 application tests pass (three database integration tests skipped), all 14 tool tests pass, TypeScript, focused lint and the production Webpack build pass. The exact saved LeadSquared body is a regression fixture. Existing campus-virtual, LC and reminder tests continue to pass.
