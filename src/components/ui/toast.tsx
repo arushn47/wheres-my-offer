@@ -1,20 +1,8 @@
 'use client';
 
-import React from 'react';
 import { toast } from 'sonner';
 import {
-  Sparkles,
-  CheckCircle2,
-  AlertCircle,
-  AlertTriangle,
-  Info,
-  Calendar,
-  Award,
-  FileText,
-  Building2,
   X,
-  ArrowUpRight,
-  Zap,
   Loader2,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';

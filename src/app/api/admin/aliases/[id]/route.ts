@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireAdmin } from '@/lib/auth/admin';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { normalizeDriveNumber } from '@/lib/drive-number';
-import { normalizeCompanyName } from '@/lib/sync/classifier';
+import { normalizeCompanyName } from '@/lib/sync/classification/classifier';
 
 export const dynamic = 'force-dynamic';
 

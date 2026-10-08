@@ -1,10 +1,10 @@
 import type { Metadata } from 'next';
 import { requireSession } from '@/lib/auth';
 import { createAdminClient } from '@/lib/supabase/admin';
-import { loadRoundStatusSummaries } from '@/lib/sync/round-status-data';
-import { resolveRecruitmentStatus } from '@/lib/sync/round-status';
+import { loadRoundStatusSummaries } from '@/lib/sync/recruitment/round-status-data';
+import { resolveRecruitmentStatus } from '@/lib/sync/recruitment/round-status';
 import { detectCampus, detectBranch } from '@/lib/utils';
-import AnalyticsClient from './analytics-client';
+import AnalyticsClient from './_components/analytics-client';
 
 export const metadata: Metadata = {
   title: 'Placement Radar Analytics',

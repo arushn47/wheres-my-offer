@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatEventTimeRange } from '@/app/(dashboard)/calendar/calendar-client';
+import { formatEventTimeRange } from '@/app/(dashboard)/calendar/_components/calendar-client';
 
 describe('formatEventTimeRange', () => {
   it('formats time range when explicit endTime is provided on the same day', () => {

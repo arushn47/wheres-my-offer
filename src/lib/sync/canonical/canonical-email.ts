@@ -1,0 +1,129 @@
+import { createHash } from 'node:crypto';
+import { htmlToCanonicalText } from '@/lib/sync/extraction/body';
+
+export const CANONICAL_IDENTITY_VERSION = 2;
+export const CANONICAL_PARSER_VERSION = 3;
+export const APPROVED_COLLEGE_SENDER = 'vitlions2027@vitbhopal.ac.in';
+
+/**
+ * Secondary, GATED college senders.
+ *
+ * Unlike the primary batch group (vitlions2027, ~99% relevant), these senders mix
+ * drive circulars with heavy chatter (meeting start pings, meet links, greetings).
+ * Every message from them is scored once by `scoreCollegeMessageRelevance()`; the
+ * verdict lives in college_emails.processing_status ('rejected' = chatter), so
+ * there is no deployment-time flag to manage — the database is the switch.
+ */
+export const GATED_COLLEGE_SENDERS = ['placementoffice@vitbhopal.ac.in'] as const;
+
+export function extractSenderAddress(sender: string | null | undefined): string {
+  const raw = (sender || '').trim();
+  const angleMatch = raw.match(/<([^>]+)>/);
+  return (angleMatch ? angleMatch[1] : raw).trim().toLowerCase();
+}
+
+export function isGatedCollegeSender(senderEmail: string | null | undefined): boolean {
+  const address = extractSenderAddress(senderEmail);
+  return (GATED_COLLEGE_SENDERS as readonly string[]).includes(address);
+}
+
+export function isApprovedCanonicalSender(senderEmail: string | null | undefined): boolean {
+  if (!senderEmail) return false;
+  if (/noreply\.cdcinfo@vitstudent\.ac\.in/i.test(senderEmail)) return false;
+  const address = extractSenderAddress(senderEmail);
+  return address === APPROVED_COLLEGE_SENDER || (GATED_COLLEGE_SENDERS as readonly string[]).includes(address);
+}
+
+export function normalizeRfcMessageId(messageId: string | null | undefined): string | null {
+  const value = (messageId || '').trim().replace(/^<|>$/g, '').trim().toLowerCase();
+  return value || null;
+}
+
+export function normalizeCanonicalSubject(subject: string | null | undefined): string {
+  return (subject || '')
+    .replace(/^(?:(?:re|fw|fwd)\s*:\s*)+/i, '')
+    .normalize('NFC')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+export function normalizeCanonicalBody(body: string | null | undefined): string {
+  return (body || '')
+    .normalize('NFC')
+    .replace(/\r\n?/g, '\n')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+export function computeCanonicalContentKey(
+  senderEmail: string,
+  subject: string,
+  body: string
+): string {
+  const identity = [
+    CANONICAL_IDENTITY_VERSION,
+    senderEmail.trim().toLowerCase(),
+    normalizeCanonicalSubject(subject),
+    normalizeCanonicalBody(body),
+  ].join('||');
+  return createHash('sha256').update(identity).digest('hex');
+}
+
+/**
+ * Computes a lightweight lookup key from metadata available at Gmail metadata-fetch time.
+ * MUST use only the snippet prefix (not the full body) so that write-time and lookup-time
+ * produce identical hashes. The content_key uses the full body for dedup correctness;
+ * this key exists purely for fast cache probing before downloading the full message.
+ */
+export function computeCanonicalMetadataKey(senderEmail: string, subject: string, snippet: string): string {
+  const identity = [
+    CANONICAL_IDENTITY_VERSION,
+    senderEmail.trim().toLowerCase(),
+    normalizeCanonicalSubject(subject),
+    normalizeCanonicalBody((snippet || '').slice(0, 200)),
+  ].join('||');
+  return createHash('sha256').update(identity).digest('hex');
+}
+
+export function canonicalBodyFromEmail(bodyPlain: string, bodyHtml: string, bodySnippet: string): string {
+  const plain = bodyPlain?.trim() || '';
+  const html = htmlToCanonicalText(bodyHtml);
+  return normalizeCanonicalBody(plain || html || bodySnippet || '');
+}
+
+export interface CanonicalEmailCacheRow {
+  id: string;
+  content_key: string;
+  message_id: string | null;
+  sender_email: string;
+  subject: string;
+  body_text: string | null;
+  classification: string | null;
+  classification_confidence: number | null;
+  parsed_company_name: string | null;
+  parsed_drive_numbers: string[] | null;
+  parsed_job_details: Record<string, unknown> | null;
+  parsed_events: unknown[] | null;
+  processing_status: string;
+  parser_version: number;
+  identity_version: number;
+  has_attachments: boolean | null;
+  metadata_key?: string | null;
+}
+
+/**
+ * Determines if a canonical row's body text can be reused to skip the full Gmail API download.
+ * Attachment emails are reusable for body/classification — only the attachment *content*
+ * (e.g. Excel shortlist scanning) requires per-user processing, which happens separately.
+ */
+export function canReuseCanonicalBody(row: CanonicalEmailCacheRow | null): row is CanonicalEmailCacheRow {
+  return Boolean(
+    row &&
+    row.processing_status === 'complete' &&
+    row.identity_version === CANONICAL_IDENTITY_VERSION &&
+    row.parser_version >= CANONICAL_PARSER_VERSION &&
+    row.body_text
+  );
+}

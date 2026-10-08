@@ -1,5 +1,5 @@
 import pg from 'pg';
-import { getRoundParticipation, resolveRecruitmentStatus, summarizeRoundDecisions } from '@/lib/sync/round-status';
+import { getRoundParticipation, resolveRecruitmentStatus, summarizeRoundDecisions } from '@/lib/sync/recruitment/round-status';
 import { getEffectiveStage } from '@/lib/stages';
 
 const userId = process.argv.find(arg => arg.startsWith('--user='))?.slice(7);

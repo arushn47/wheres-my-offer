@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { catchUpMissingNotifications } from './reprocess';
 import { notifyNewDrive, notifyEventScheduled, notifyShortlistMatch } from '@/lib/notifications/service';
-import { dispatchRoundNotificationOutbox } from './round-verdict-service';
+import { dispatchRoundNotificationOutbox } from './recruitment/round-verdict-service';
 
-vi.mock('./round-verdict-service', () => ({ dispatchRoundNotificationOutbox: vi.fn().mockResolvedValue(undefined) }));
+vi.mock('./recruitment/round-verdict-service', () => ({ dispatchRoundNotificationOutbox: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('@/lib/notifications/service', () => ({
   notifyNewDrive: vi.fn().mockResolvedValue({ inAppCreated: true, pushSent: true }),
   notifyEventScheduled: vi.fn().mockResolvedValue({ inAppCreated: true, pushSent: true }),

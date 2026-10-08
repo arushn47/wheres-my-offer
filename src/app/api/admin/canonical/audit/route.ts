@@ -1,9 +1,9 @@
 import { NextResponse } from 'next/server';
 import { requireAdmin } from '@/lib/auth/admin';
 import { createAdminClient } from '@/lib/supabase/admin';
-import { CANONICAL_IDENTITY_VERSION, normalizeRfcMessageId } from '@/lib/sync/canonical-email';
-import { CANONICAL_PARSER_VERSION } from '@/lib/sync/canonical-email';
-import { isShortlistMatchEvidence } from '@/lib/sync/participation-evidence';
+import { CANONICAL_IDENTITY_VERSION, normalizeRfcMessageId } from '@/lib/sync/canonical/canonical-email';
+import { CANONICAL_PARSER_VERSION } from '@/lib/sync/canonical/canonical-email';
+import { isShortlistMatchEvidence } from '@/lib/sync/recruitment/participation-evidence';
 
 export const dynamic = 'force-dynamic';
 

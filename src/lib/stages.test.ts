@@ -67,7 +67,7 @@ describe('not-shortlisted stage with PPT evidence', () => {
 });
 
 import { getPipelineStages } from '@/components/companies/stage-stepper';
-import { buildAnnouncedProcessToken, parseRecruitmentProcess } from '@/lib/sync/round-identity';
+import { buildAnnouncedProcessToken, parseRecruitmentProcess } from '@/lib/sync/recruitment/round-identity';
 
 describe('getPipelineStages dynamic recruitment pipeline', () => {
   it('omits PPT when test round is completed without PPT (e.g. Axxela)', () => {

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireAdmin } from '@/lib/auth/admin';
-import { refreshSharedCollegeArchive } from '@/lib/sync/shared-archive-refresh';
+import { refreshSharedCollegeArchive } from '@/lib/sync/canonical/shared-archive-refresh';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 300;

@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireAdmin } from '@/lib/auth/admin';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { normalizeDriveNumber } from '@/lib/drive-number';
-import { getDriveRegistrationDateBoundary, isEmailAllowedByDriveBoundary } from '@/lib/sync/drive-temporal-boundary';
+import { getDriveRegistrationDateBoundary, isEmailAllowedByDriveBoundary } from '@/lib/sync/identity/drive-temporal-boundary';
 
 export const dynamic = 'force-dynamic';
 

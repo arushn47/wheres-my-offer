@@ -1,12 +1,12 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { createAdminClient } from '@/lib/supabase/admin';
-import { calculateDriveRoundVerdicts } from '@/lib/sync/round-verdict-service';
+import { calculateDriveRoundVerdicts } from '@/lib/sync/recruitment/round-verdict-service';
 import { recalculateApplicationStatuses } from '@/lib/sync/reprocess';
 import { withUserMutationLease } from '@/lib/sync/mutation-lease';
-import { loadUserCandidateIdentity, matchesCandidateRow } from '@/lib/sync/user-identity';
-import { classifyShortlistEmail } from '@/lib/sync/round-identity';
-import { isQuotedReply, getEvidenceMessageText } from '@/lib/sync/body';
+import { loadUserCandidateIdentity, matchesCandidateRow } from '@/lib/sync/identity/user-identity';
+import { classifyShortlistEmail } from '@/lib/sync/recruitment/round-identity';
+import { isQuotedReply, getEvidenceMessageText } from '@/lib/sync/extraction/body';
 
 const [userId,driveId,...flags]=process.argv.slice(2);
 if (!/^[a-f0-9-]{36}$/i.test(userId || '') || !/^[a-f0-9-]{36}$/i.test(driveId || '')) throw new Error('Usage: repair-shortlists.ts USER_UUID DRIVE_UUID [--apply]');

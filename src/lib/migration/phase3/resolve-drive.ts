@@ -20,7 +20,7 @@
  */
 
 import type { DriveEvidenceOutcome, TenantDriveRecord, TenantScope } from './types';
-import { assertDrivesBelongToTenant, assertDrivesBelongToUser } from './tenant-guard';
+import { assertDrivesBelongToUser } from './tenant-guard';
 import { normalizeDriveNumber } from '@/lib/drive-number';
 
 export { normalizeDriveNumber };

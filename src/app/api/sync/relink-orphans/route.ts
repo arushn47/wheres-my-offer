@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getSession } from '@/lib/auth';
 import { createAdminClient } from '@/lib/supabase/admin';
-import { extractCompanyName } from '@/lib/sync/classifier';
+import { extractCompanyName } from '@/lib/sync/classification/classifier';
 import { isFuzzyCompanyMatch } from '@/lib/sync/engine';
 
 export const dynamic = 'force-dynamic';

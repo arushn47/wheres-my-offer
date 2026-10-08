@@ -1,6 +1,6 @@
 import { requireAdmin } from '@/lib/auth/admin';
 import { redirect } from 'next/navigation';
-import SystemClient from './system-client';
+import SystemClient from './_components/system-client';
 
 export const dynamic = 'force-dynamic';
 

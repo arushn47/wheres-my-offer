@@ -208,3 +208,33 @@ The Mumbai application preview and rolled-back populated refresh are now verifie
 - An agreed maintenance window and a provider-supported continuity bridge if either platform restricts service before cutover or quota recovery.
 
 The source audit and backup use read-only database transactions. Rehearsal restores and additive cache migrations wrote only to the supplied replacement project. The production app, cron-job.org schedule, database environment values, recruitment labels and folder structure remain unchanged by this implementation. The user's Vercel region change is recorded above.
+
+## 8. Post-cutover egress investigation — 7 October 2026
+
+This section supersedes the pre-cutover deployment state above. Mumbai is now Production; writers and the existing cron are active. The logging-only release is `d7c0422`. The 120 MB/day figure is a budget target, **not a demonstrated production daily measurement**.
+
+The user's organization-wide usage screenshot shows 201.151 MB PostgREST, 3.746 MB shared pooler, and approximately 0.13 MB Auth/Realtime for 7 October. It includes all projects, so it cannot by itself attribute every byte to Where's My Offer. Pooler backup traffic cannot explain the much larger PostgREST component.
+
+Read-only Management API queries against the Mumbai project's API gateway logs (00:00–approximately 14:18 UTC) established:
+
+- About 84,000 requests by 14:12 UTC; over 63,000 occurred during 11:00–13:00 UTC, overlapping writer release and subsequent live work. Only about 2,100 requests were recorded before 11:00 UTC. This is not explained solely by earlier restore verification.
+- By 14:14 UTC, 13,035 event reads requested `id,event_type,title,start_time,venue,mode`; 11,753 college-email and 11,677 personal-email reads requested `id,received_at`.
+- These projections match `catchUpMissingNotifications` in `src/lib/sync/reprocess.ts`. It traverses every application and queries events per drive, plus personal/canonical email recency when a new-drive notification has no stored dedupe key. Historical drives outside the notification window never acquire that key, so the same empty checks repeat.
+- `processEmailForEventsAndStatus` in `src/lib/sync/status-engine.ts` invokes this whole-user catch-up after processing a circular outside an enclosing user lease. Shared ingestion can repeat that whole-user pass for each user/circular. Other sync completion paths also call it without a drive scope. This is confirmed query amplification; it does not establish how many of the billed bytes it accounts for.
+- There were 343 canonical spreadsheet reads with projection `extracted_rows,roster_revision,parse_status,content_hash`. These match cold indexed-roster fallback. Some are legitimate cache warming; their aggregate billed size is not available from these logs.
+- At 14:20 UTC, read-only SQL found 311 of 449 spreadsheet sources with current policy/revision indexes, about 8.52 MB total serialized roster JSON and 1.99 MB associated with cold sources. Unused sources need not be warmed. The recalculation queue was empty, and both shared archive states were complete and idle at that instant.
+
+Most larger responses omit `content_length`; summing the populated headers mostly counts tiny empty/boolean responses. **Do not present that sum as measured egress or assign the full 201 MB to a particular query.** The log audit reads aggregates only; it did not trigger syncs, reset cursors, change environment variables, publish indexes, or modify production data/cron.
+
+Next focused implementation priorities:
+
+1. Give notification catch-up an exact affected-drive scope, and batch personal-email recency, canonical-email recency and qualifying events. Preserve the existing 48-hour drive and 24-hour event windows, dedupe keys, candidate-confirmed checks, and committed-round outbox policy. Initial recovery can still request all drives explicitly. Check result equivalence and bound request count as the number of applications grows.
+2. Measure response bytes for real workload categories with the existing bounded query-metrics implementation before attributing daily savings. Distinguish onboarding/cache warming, maintenance checks, ordinary web reads, and live ingestion. The current production metrics flag remains off.
+3. Examine repeated canonical body/roster downloads across the same fan-out batch. Use shared immutable/versioned source facts or a bounded job-local cache; never reuse one user's roster membership for another. Preserve source revision/policy invalidation and raw canonical fallback on cache failure.
+4. Verify a full 24–48 hours of provider egress after the focused release, accounting for organization-wide other-project usage. Accept the 120 MB/day target only after measured steady-state evidence supports it.
+
+Provider references: [egress accounting](https://supabase.com/docs/guides/platform/manage-your-usage/egress), [read-only logs API](https://supabase.com/docs/reference/api/v1-get-project-logs), [captured log fields and limits](https://supabase.com/docs/guides/observability/log-field-reference).
+
+### 8 October release decision
+
+The user ended the observation hold and authorized repository cleanup and pushing the pending feature/refactor updates before choosing further egress work. The assistant's measurement automation is paused; production cron remains active. The new screenshots show organization-wide PostgREST usage of 393.454 MB on 7 October and 342.904 MB on 8 October at about 22:15 IST. Those calendar-day totals exceed the target but are not an exact project-only post-release comparison. Do not claim the 120 MB/day goal was achieved. The pending additive venue/email-link migrations remain separate from the Git push; see [release actions](email-and-venue-release.md).

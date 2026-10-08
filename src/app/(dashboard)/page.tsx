@@ -3,11 +3,13 @@ import { redirect } from 'next/navigation';
 import { requireSession } from '@/lib/auth';
 import { checkIsAdmin } from '@/lib/auth/admin';
 import { createAdminClient } from '@/lib/supabase/admin';
-import { loadRoundStatusSummaries } from '@/lib/sync/round-status-data';
-import { resolveRecruitmentStatus } from '@/lib/sync/round-status';
-import { detectCampus, detectBranch, getDriveMode } from '@/lib/utils';
+import { readDriveVenues } from '@/lib/drive-venue-data';
+import { knownCampus, resolveDriveVenue } from '@/lib/drive-venues';
+import { loadRoundStatusSummaries } from '@/lib/sync/recruitment/round-status-data';
+import { resolveRecruitmentStatus } from '@/lib/sync/recruitment/round-status';
+import { detectCampus, detectBranch } from '@/lib/utils';
 import { getEffectiveStage, isInactiveStatus, isEliminatedStatus } from '@/lib/stages';
-import DashboardClient from './dashboard-client';
+import DashboardClient from './_components/dashboard-client';
 
 export const metadata: Metadata = {
   title: 'Dashboard — NeoPAT Tracker & Placement Command Center',
@@ -336,6 +338,8 @@ export default async function DashboardPage() {
   const campus = detectCampus(collegeEmail || personalEmail);
   const branch = detectBranch(collegeEmail);
 
+  const venueMap = await readDriveVenues(supabase, (applications || []).map(a => a.placement_drive_id));
+  const venueCampus = knownCampus(collegeEmail);
   const allAppsList = (applications || []).map((a: any) => {
     const compEvents = eventsByCompany.get(a.placement_drive_id) || [];
     const latestEvent = compEvents[compEvents.length - 1] || null;
@@ -343,6 +347,7 @@ export default async function DashboardPage() {
     const drive = driveMap.get(a.placement_drive_id);
     const companyId = drive?.company_id || a.placement_drive_id;
     const companyName = companyById.get(companyId) || (drive as any)?.companies?.name || 'Company';
+    const venue = resolveDriveVenue(venueMap.get(a.placement_drive_id), venueCampus);
 
     return {
       id: a.id,
@@ -357,7 +362,8 @@ export default async function DashboardPage() {
       location: a.location || drive?.location || null,
       category: a.category || drive?.category || null,
       notes: a.notes,
-      driveMode: getDriveMode(a.notes, campus),
+      driveMode: venue.label,
+      driveModeDetail: venue.detail,
       lastUpdated: a.manual_override ? a.last_updated : (a.status_source_email_at || a.applied_at || a.last_updated),
     };
   });

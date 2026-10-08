@@ -1,5 +1,5 @@
 import type { createAdminClient } from '@/lib/supabase/admin';
-import type { RoundStatusDecision } from './round-status';
+import type { RoundStatusDecision } from './recruitment/round-status';
 
 type Admin = ReturnType<typeof createAdminClient>;
 export interface RoundStatusRow {

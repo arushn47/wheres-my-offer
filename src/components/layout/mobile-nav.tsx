@@ -10,7 +10,6 @@ import {
   PieChart,
   Settings as SettingsIcon,
   Search,
-  Shield,
   Users,
   Filter,
   Layers,

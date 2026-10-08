@@ -3,7 +3,7 @@ import { redirect } from 'next/navigation';
 import { requireSession } from '@/lib/auth';
 import { checkIsAdmin } from '@/lib/auth/admin';
 import { createAdminClient } from '@/lib/supabase/admin';
-import SettingsClient from './settings-client';
+import SettingsClient from './_components/settings-client';
 import { detectCampus, detectBranch, detectRegNo } from '@/lib/utils';
 
 export const metadata: Metadata = {

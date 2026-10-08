@@ -11,8 +11,8 @@
  * NOT classify evidence or decide actions — that remains the job of `resolve-drive.ts`/`plan.ts`.
  */
 
-import { extractAllDriveNumbers } from '@/lib/sync/events';
-import { extractJobDetails } from '@/lib/sync/events';
+import { extractAllDriveNumbers } from '@/lib/sync/extraction/events';
+import { extractJobDetails } from '@/lib/sync/extraction/events';
 import type { DriveMetadata, MigratableRecordType, TenantDriveRecord } from './types';
 import type { MigratableRecord } from './plan';
 

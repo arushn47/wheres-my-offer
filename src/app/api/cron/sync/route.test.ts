@@ -6,7 +6,7 @@ vi.mock('@/lib/supabase/admin',()=>({createAdminClient:()=>({from:mocks.query})}
 vi.mock('@/lib/sync/engine',()=>({runSync:mocks.runSync,CRON_TOTAL_BUDGET_MS:270000}));
 vi.mock('@/lib/gmail/watch',()=>({renewExpiringWatches:mocks.renew}));
 vi.mock('@/lib/notifications/service',()=>({checkAndNotifyLiveEvents:mocks.live,checkAndNotifyRegistrationDeadlines:mocks.deadlines}));
-vi.mock('@/lib/sync/shared-college-sync',()=>({runSharedCollegeSync:mocks.shared}));
+vi.mock('@/lib/sync/canonical/shared-college-sync',()=>({runSharedCollegeSync:mocks.shared}));
 import { GET } from './route';
 beforeEach(()=>{
  vi.resetAllMocks();vi.stubEnv('CRON_SECRET','test');vi.stubEnv('SHARED_COLLEGE_SYNC_ENABLED','true');

@@ -1,5 +1,5 @@
 import { deriveEventEndTime } from '@/lib/event-duration';
-import { parseEliminationToken, parseAnnouncedProcessToken, deriveStageId, deriveStageLabelFromId } from '@/lib/sync/round-identity';
+import { parseEliminationToken, parseAnnouncedProcessToken, deriveStageId, deriveStageLabelFromId } from '@/lib/sync/recruitment/round-identity';
 
 export interface StageDefinition {
   id: string;

@@ -2,10 +2,10 @@ import fs from 'node:fs';
 import pg from 'pg';
 import { recalculateApplicationStatuses } from '@/lib/sync/reprocess';
 import { createAdminClient } from '@/lib/supabase/admin';
-import { loadUserCandidateIdentity,getStrongIdentityTokens } from '@/lib/sync/user-identity';
-import { inlineShortlistRoster } from '@/lib/sync/placement-evidence';
-import { evaluateCachedShortlistRosters } from '@/lib/sync/shortlist-verification';
-import { getEvidenceMessageText } from '@/lib/sync/body';
+import { loadUserCandidateIdentity,getStrongIdentityTokens } from '@/lib/sync/identity/user-identity';
+import { inlineShortlistRoster } from '@/lib/sync/recruitment/placement-evidence';
+import { evaluateCachedShortlistRosters } from '@/lib/sync/attachments/shortlist-verification';
+import { getEvidenceMessageText } from '@/lib/sync/extraction/body';
 
 const apply=process.argv.includes('--apply');
 const projectRef=new URL(process.env.NEXT_PUBLIC_SUPABASE_URL!).hostname.split('.')[0];

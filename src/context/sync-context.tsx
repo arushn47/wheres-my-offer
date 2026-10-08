@@ -4,7 +4,7 @@ import React, { createContext, useContext, useState, useEffect, useRef, useCallb
 import { useRouter } from 'next/navigation';
 import { appToast } from '@/components/ui/toast';
 import { createClient } from '@/lib/supabase/client';
-import { getStatusUpdatePhase } from '@/lib/sync/status-display';
+import { getStatusUpdatePhase } from '@/lib/sync/recruitment/status-display';
 
 export interface SyncProgress {
   phase: 'initializing' | 'fetching' | 'processing' | 'complete' | 'error';

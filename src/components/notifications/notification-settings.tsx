@@ -16,7 +16,6 @@ import {
   Smartphone,
   Timer,
   Check,
-  Zap,
 } from 'lucide-react';
 import { usePushNotifications } from '@/hooks/use-push-notifications';
 import { cn } from '@/lib/utils';

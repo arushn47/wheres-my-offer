@@ -4,7 +4,7 @@ import { deriveEventEndTime } from '@/lib/event-duration';
 import { isInactiveStatus } from '@/lib/stages';
 import { createAdminClient } from '@/lib/supabase/admin';
 
-import CalendarClient, { type CalendarEvent } from './calendar-client';
+import CalendarClient, { type CalendarEvent } from './_components/calendar-client';
 
 export const metadata: Metadata = {
   title: 'Placement Calendar & Assessment Schedule',

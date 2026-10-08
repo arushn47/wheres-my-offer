@@ -2,11 +2,12 @@ import type { Metadata } from 'next';
 import { Suspense } from 'react';
 import { requireSession } from '@/lib/auth';
 import { createAdminClient } from '@/lib/supabase/admin';
-import { loadRoundStatusSummaries } from '@/lib/sync/round-status-data';
+import { readDriveVenues } from '@/lib/drive-venue-data';
+import { knownCampus, resolveDriveVenue } from '@/lib/drive-venues';
+import { loadRoundStatusSummaries } from '@/lib/sync/recruitment/round-status-data';
 import { readRecentCollegeSearchRows } from '@/lib/sync/dashboard-readers';
-import { resolveRecruitmentStatus } from '@/lib/sync/round-status';
-import SearchClient, { type SearchData, type SearchCompanyItem } from './search-client';
-import { detectCampus, getDriveMode } from '@/lib/utils';
+import { resolveRecruitmentStatus } from '@/lib/sync/recruitment/round-status';
+import SearchClient, { type SearchData, type SearchCompanyItem } from './_components/search-client';
 import { getEffectiveStage } from '@/lib/stages';
 
 export const metadata: Metadata = {
@@ -72,7 +73,8 @@ export default async function SearchPage() {
   }));
 
   const collegeAccount = accounts?.find((a) => a.account_type === 'college');
-  const userCampus = detectCampus(collegeAccount?.email);
+  const venueCampus = knownCampus(collegeAccount?.email);
+  const venueMap = await readDriveVenues(supabase, (placementDrives || []).map(d => d.id));
 
   const companyMap = new Map((companies || []).map((c) => [c.id, c]));
   const driveMap = new Map((placementDrives || []).map((d) => [d.id, d]));
@@ -115,7 +117,8 @@ export default async function SearchPage() {
       );
 
       const notes = app?.notes || null;
-      const driveMode = getDriveMode(notes, userCampus);
+      const venue = resolveDriveVenue(venueMap.get(drive.id), venueCampus);
+      const driveMode = venue.label;
       const compName = comp?.name || drive.drive_name || 'Placement Drive';
       const isMultiDrive = (driveCountMap.get(compName.toLowerCase().trim()) || 0) > 1;
 
@@ -134,6 +137,7 @@ export default async function SearchPage() {
         location: app?.location || drive.location || null,
         notes,
         driveMode,
+        driveModeDetail: venue.detail,
         status: eff.effectiveStatus,
         statusLabel: eff.statusSubtitle,
         isMultiDrive,
@@ -149,7 +153,8 @@ export default async function SearchPage() {
         const app = (applications || []).find((a) => (a as any).company_id === comp.id);
         const rawStatus = app?.status || 'applied';
         const eff = getEffectiveStage(rawStatus, null, [], app?.notes, app?.manual_override);
-        const driveMode = getDriveMode(app?.notes, userCampus);
+        const venue = resolveDriveVenue(null);
+        const driveMode = venue.label;
 
         companyItems.push({
           id: comp.id,
@@ -166,6 +171,7 @@ export default async function SearchPage() {
           location: app?.location || null,
           notes: app?.notes || null,
           driveMode,
+          driveModeDetail: venue.detail,
           status: eff.effectiveStatus,
           statusLabel: eff.statusSubtitle,
           isMultiDrive: false,

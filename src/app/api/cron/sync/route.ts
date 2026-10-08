@@ -58,7 +58,7 @@ async function executeBackgroundSync(userIds: string[], includeSharedCollege = f
 
   if (includeSharedCollege && Date.now() < globalDeadline) {
     try {
-      const { runSharedCollegeSync } = await import('@/lib/sync/shared-college-sync');
+      const { runSharedCollegeSync } = await import('@/lib/sync/canonical/shared-college-sync');
       let sharedResult: Awaited<ReturnType<typeof runSharedCollegeSync>>;
       let batches = 0;
       do {

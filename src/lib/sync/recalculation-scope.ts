@@ -1,5 +1,5 @@
 import type { createAdminClient } from '@/lib/supabase/admin';
-import { isInvalidCompanyName } from './classifier';
+import { isInvalidCompanyName } from './classification/classifier';
 import { isFuzzyCompanyMatch } from './engine';
 
 interface ScopeCompany { id: string; name: string; aliases?: string[] | null }

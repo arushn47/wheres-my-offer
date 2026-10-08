@@ -9,6 +9,7 @@ __pycache__/
 .env.*
 .env.local
 .env.production.local
+!.env.example
 
 # local scripts & database runners
 scripts/
@@ -20,6 +21,10 @@ backups/
 # next.js
 .next/
 out/
+build/
+coverage/
+playwright-report/
+test-results/
 
 # misc
 .DS_Store
@@ -29,6 +34,9 @@ emergent-design/
 
 # debug
 npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.eslintcache
 
 # vercel
 .vercel
@@ -43,7 +51,10 @@ next-env.d.ts
 supabase/.temp/
 .tempmediaStorage/
 .kilo/
+# Reviewed, versioned migrations (other local SQL/dumps stay private).
 !supabase/migrations/migration_v40_round_decisions.sql
 !supabase/migrations/migration_v41_roster_lookup.sql
 !supabase/migrations/migration_v42_compact_sync_progress.sql
 !supabase/migrations/migration_v43_compact_dashboard_reads.sql
+!supabase/migrations/migration_v44_drive_venues.sql
+!supabase/migrations/migration_v45_original_email_links.sql

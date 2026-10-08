@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import { CheckCircle2, FileText, RefreshCw } from 'lucide-react';
 import { cn, timeAgo } from '@/lib/utils';
 import { useSync } from '@/context/sync-context';
-import { getSharedStatusPollDelay } from '@/lib/sync/shared-status-polling';
+import { getSharedStatusPollDelay } from '@/lib/sync/progress/shared-status-polling';
 
 interface SharedCollegeStatus {
   inbox: string | null;

@@ -12,34 +12,31 @@ import {
   cleanCompanyName,
   extractCompanyName,
   normalizeCompanyName,
-  computeNormalizedKey,
-  checkAcronymMatch,
   extractCompanyAliases,
-  ENGLISH_STOPWORDS,
   boundedLevenshtein,
   GENERIC_MATCH_TOKENS,
   isFuzzyCompanyMatch,
-  type ClassificationResult,
-} from '@/lib/sync/classifier';
-import { extractDriveNumber, extractAllDriveNumbers, extractJobDetails, extractEvents } from '@/lib/sync/events';
+} from '@/lib/sync/classification/classifier';
+import { extractDriveNumber, extractAllDriveNumbers, extractJobDetails, extractEvents } from '@/lib/sync/extraction/events';
 import {
   buildCircularCatalog,
   loadAllDriveResolutions,
   resolveDriveByTimingCorrelation,
   type CircularRoleEntry,
   type DriveResolutionResult,
-} from '@/lib/sync/drive-correlator';
+} from '@/lib/sync/identity/drive-correlator';
 import { createAdminClient } from '@/lib/supabase/admin';
-import { getCurrentMessageText } from '@/lib/sync/body';
-import { resolvePlacementDrive } from '@/lib/sync/drive-resolution';
-import { getLiveApplicationScope } from '@/lib/sync/application-scope';
-import { getMissingPersonalSyncSetup } from '@/lib/sync/participation-evidence';
+import { getCurrentMessageText, getEvidenceMessageText } from '@/lib/sync/extraction/body';
+import { extractRecruitmentVenues } from '@/lib/drive-venues';
+import { persistDriveVenues } from '@/lib/drive-venue-data';
+import { resolvePlacementDrive } from '@/lib/sync/identity/drive-resolution';
+import { getLiveApplicationScope } from '@/lib/sync/identity/application-scope';
+import { getMissingPersonalSyncSetup } from '@/lib/sync/recruitment/participation-evidence';
 import { randomUUID } from 'node:crypto';
 import { currentMutationLease, withOwnedMutationLease } from '@/lib/sync/mutation-lease';
 import { withQueryMetrics } from '@/lib/supabase/query-metrics';
 import { postSyncDriveScope } from './post-sync-scope';
 import {
-  APPROVED_COLLEGE_SENDER,
   CANONICAL_IDENTITY_VERSION,
   CANONICAL_PARSER_VERSION,
   canonicalBodyFromEmail,
@@ -50,8 +47,8 @@ import {
   isGatedCollegeSender,
   normalizeRfcMessageId,
   type CanonicalEmailCacheRow,
-} from '@/lib/sync/canonical-email';
-import { scoreCollegeMessageRelevance } from '@/lib/sync/college-relevance';
+} from '@/lib/sync/canonical/canonical-email';
+import { scoreCollegeMessageRelevance } from '@/lib/sync/classification/college-relevance';
 
 // ============================================
 // Canonical Email Deduplication (Phase 2C — Shadow Mode)
@@ -104,10 +101,10 @@ async function shadowWriteCanonical(
   supabase: ReturnType<typeof createAdminClient>,
   parsedEmail: ParsedEmail,
   emailId: string | null,
-  classification: import('@/lib/sync/classifier').ClassificationResult,
+  classification: import('@/lib/sync/classification/classifier').ClassificationResult,
   companyName: string | null,
   account: GmailAccount,
-  preExtractedEvents?: import('@/lib/sync/events').ExtractedEvent[]
+  preExtractedEvents?: import('@/lib/sync/extraction/events').ExtractedEvent[]
 ): Promise<string | null> {
   try {
     if (!isApprovedCanonicalSender(parsedEmail.senderEmail || parsedEmail.sender)) return null;
@@ -204,7 +201,7 @@ async function shadowWriteCanonical(
                 : null,
         parsed_company_name: companyName || null,
         parsed_drive_numbers: extractAllDriveNumbers(`${parsedEmail.subject}\n${bodyText}`),
-        parsed_job_details: extractJobDetails(bodyText),
+        parsed_job_details: { ...extractJobDetails(bodyText), recruitmentVenues: extractRecruitmentVenues(parsedEmail.subject, getEvidenceMessageText(parsedEmail)) },
         parsed_events: canonicalEvents,
         processing_status: 'complete' as const,
         received_at: parsedEmail.receivedAt
@@ -257,7 +254,7 @@ async function shadowWriteCanonical(
             .from('college_emails')
             .update({
               body_text: bodyText,
-              parsed_job_details: extractJobDetails(bodyText),
+              parsed_job_details: { ...extractJobDetails(bodyText), recruitmentVenues: extractRecruitmentVenues(parsedEmail.subject, getEvidenceMessageText(parsedEmail)) },
               parsed_events: canonicalEvents,
               parsed_drive_numbers: extractAllDriveNumbers(`${parsedEmail.subject}\n${bodyText}`),
               identity_version: CANONICAL_IDENTITY_VERSION,
@@ -748,7 +745,7 @@ async function processSingleMessage(
       const baseCompanies = ['Apple', 'Honeywell', 'Zluri', 'EY'];
       for (const base of baseCompanies) {
         if (new RegExp(`\\b${base}\\b`, 'i').test(parsedEmail.subject) || new RegExp(`\\b${base}\\b`, 'i').test(parsedEmail.bodyPlain || parsedEmail.bodySnippet || '')) {
-          const { extractTrackOrRole } = await import('@/lib/sync/drive-correlator');
+          const { extractTrackOrRole } = await import('@/lib/sync/identity/drive-correlator');
           const trackInfo = extractTrackOrRole(fullEmailText, base);
           if (trackInfo) {
             const key = base.toLowerCase();
@@ -790,7 +787,7 @@ async function processSingleMessage(
       classification.classification
     );
 
-    let extractedEventsList: import('@/lib/sync/events').ExtractedEvent[] = [];
+    let extractedEventsList: import('@/lib/sync/extraction/events').ExtractedEvent[] = [];
 
     // Stage 4: Upsert company
     if (companyName && isPlacementClassification) {
@@ -955,12 +952,22 @@ async function processSingleMessage(
           .is('source_college_email_id', null);
       }
 
+      // The RPC additionally checks the exact canonical anchor/number and rejects conflicting sources.
+      if (placementDriveId && collegeEmailId && driveAssignmentConfidence === 'high' && driveAssignmentSource !== 'company_only') {
+        try {
+          const venues = parsedEmail.cachedJobDetails?.recruitmentVenues ?? extractRecruitmentVenues(parsedEmail.subject, getEvidenceMessageText(parsedEmail));
+          await persistDriveVenues(supabase, placementDriveId, collegeEmailId, parsedEmail.receivedAt.toISOString(), venues);
+        } catch (venueError) {
+          console.warn('[Drive venue] Display metadata update failed', venueError instanceof Error ? venueError.message : 'Database error');
+        }
+      }
+
       result.newEmails++;
       ctx.liveTracker.newEmails++;
 
       if (companyId && applicationScope?.kind === 'drive') {
         const { processEmailForEventsAndStatus } = await import(
-          '@/lib/sync/status-engine'
+          '@/lib/sync/recruitment/status-engine'
         );
         const backgroundTask = processEmailForEventsAndStatus(
           supabase,
@@ -1052,7 +1059,7 @@ async function processSingleMessage(
               .is('source_email_id', null);
           }
           const { processEmailForEventsAndStatus } = await import(
-            '@/lib/sync/status-engine'
+            '@/lib/sync/recruitment/status-engine'
           );
           const backgroundTask = processEmailForEventsAndStatus(
             supabase,
@@ -1475,16 +1482,6 @@ export async function processPage(
 const activeSyncMap = new Map<string, SyncProgress>();
 const activeSyncLocks = new Set<string>();
 const syncPauseRequests = new Set<string>();
-
-async function isPauseRequested(supabase: ReturnType<typeof createAdminClient>, userId: string): Promise<boolean> {
-  const { data, error } = await supabase
-    .from('sync_state')
-    .select('pause_requested')
-    .eq('user_id', userId)
-    .maybeSingle();
-  if (error) throw error;
-  return Boolean(data?.pause_requested);
-}
 
 export function getActiveSyncProgress(userId: string): SyncProgress | null {
   return activeSyncMap.get(userId) || null;
@@ -2597,7 +2594,7 @@ async function runSyncMeasured(
                 // Process reconciled circular for Events, CTC, and Roles
                 try {
                   const { processEmailForEventsAndStatus } = await import(
-                    '@/lib/sync/status-engine'
+                    '@/lib/sync/recruitment/status-engine'
                   );
                   // Check if this email already has a placement_drive_id from live sync
                   const { data: emailWithDrive } = await supabase
@@ -2657,7 +2654,7 @@ async function runSyncMeasured(
         const remainingBudgetMs = options?.globalDeadline ? options.globalDeadline - Date.now() : Infinity;
         if (remainingBudgetMs > 30_000) {
           try {
-            const { scanSharedCollegeCandidateMatches } = await import('@/lib/sync/attachment-scanner');
+            const { scanSharedCollegeCandidateMatches } = await import('@/lib/sync/attachments/attachment-scanner');
             const personalScanProgress: SyncProgress = {
               phase: 'processing', accountEmail: '', accountType: 'shared', totalMessages: 0,
               processedMessages: 0, newEmails: result.newEmails, newCompanies: result.newCompanies,
@@ -2739,11 +2736,11 @@ async function runSyncMeasured(
       await catchUpMissingNotifications(supabase,userId,pendingDrives.map(row=>row.placement_drive_id));
     }
 
-    const { dispatchRoundNotificationOutbox } = await import('@/lib/sync/round-verdict-service');
+    const { dispatchRoundNotificationOutbox } = await import('@/lib/sync/recruitment/round-verdict-service');
     await dispatchRoundNotificationOutbox(supabase,userId);
 
     // Reconcile elapsed event statuses under the same owned lease
-    await import('@/lib/sync/event-reconciliation')
+    await import('@/lib/sync/recruitment/event-reconciliation')
       .then(({ reconcileElapsedEventStatuses }) => reconcileElapsedEventStatuses(supabase, userId))
       .then((reconResult) => {
         if (reconResult.updatedCount > 0) {
@@ -2959,12 +2956,4 @@ async function doUpsertCompany(
   }
 
   return newCompany?.id || null;
-}
-
-// ============================================
-// Helpers
-// ============================================
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }

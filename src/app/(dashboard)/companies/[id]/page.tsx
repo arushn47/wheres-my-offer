@@ -2,13 +2,15 @@ import type { Metadata } from 'next';
 import { notFound, redirect } from 'next/navigation';
 import { requireSession } from '@/lib/auth';
 import { createAdminClient } from '@/lib/supabase/admin';
-import CompanyDetailClient, { type CompanyDetail } from './company-detail-client';
+import { readDriveVenues } from '@/lib/drive-venue-data';
+import { knownCampus, resolveDriveVenue } from '@/lib/drive-venues';
+import CompanyDetailClient, { type CompanyDetail } from './_components/company-detail-client';
 import { detectCampus, detectBranch, detectRegNo } from '@/lib/utils';
-import { extractAnnouncedRoundsFromEmails, buildAnnouncedProcessToken } from '@/lib/sync/round-identity';
+import { extractAnnouncedRoundsFromEmails, buildAnnouncedProcessToken } from '@/lib/sync/recruitment/round-identity';
 
-import { parseScheduledDate } from '@/lib/sync/drive-temporal-boundary';
-import { summarizeRoundDecisions } from '@/lib/sync/round-status';
-import { getRoundStatusDisplay } from '@/lib/sync/status-display';
+import { parseScheduledDate } from '@/lib/sync/identity/drive-temporal-boundary';
+import { summarizeRoundDecisions } from '@/lib/sync/recruitment/round-status';
+import { getRoundStatusDisplay } from '@/lib/sync/recruitment/status-display';
 
 export async function generateMetadata({
   params,
@@ -110,6 +112,7 @@ export default async function CompanyDetailPage(props: {
     targetDrive = companyDrives[0];
   }
   const placementDriveId = targetDrive?.id || null;
+  const venueMap = await readDriveVenues(supabase, placementDriveId ? [placementDriveId] : []);
 
   // Collect excluded email IDs for the active drive (scoped to target drive if resolved)
   const relevantDrives = targetDrive ? [targetDrive] : (companyDrives || []);
@@ -638,6 +641,7 @@ export default async function CompanyDetailPage(props: {
     for (const scan of decision.verdict.evaluations || []) rosterStates.set(scan.emailId, scan.state);
   }
   const detail: CompanyDetail = {
+    venue: resolveDriveVenue(venueMap.get(placementDriveId || ''), knownCampus(collegeAccount?.email)),
     id: company.id,
     placementDriveId,
     roundDecisions: displayDecisions,
@@ -723,6 +727,7 @@ export default async function CompanyDetailPage(props: {
       return {
         id: em.id,
         collegeEmailId: colId || null,
+        originalEmailUrl: `/api/emails/open?${new URLSearchParams({ source: colId ? 'college' : 'personal', id: colId || em.id })}`,
         verificationState: rosterStates.get(colId || em.id) || null,
         subject: em.subject || 'Campus Placement Notice',
         sender: em.sender || '',

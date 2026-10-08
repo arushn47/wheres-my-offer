@@ -5,7 +5,7 @@ const mocks = vi.hoisted(() => ({ after: vi.fn(), rpc: vi.fn(), runSync: vi.fn()
 vi.mock('next/server', () => ({ after: mocks.after, NextResponse: { json: (data: unknown, init?: ResponseInit) => new Response(JSON.stringify(data), init) } }));
 vi.mock('@/lib/supabase/admin', () => ({ createAdminClient: () => ({ rpc: mocks.rpc, from: () => ({ select: () => ({ eq: () => ({ eq: () => ({ single: async () => ({ data: { user_id: 'user-one', account_type: 'personal' }, error: null }) }) }) }) }) }) }));
 vi.mock('@/lib/sync/engine', () => ({ runSync: mocks.runSync }));
-vi.mock('@/lib/sync/shared-college-sync', () => ({ runSharedCollegeSync: mocks.shared }));
+vi.mock('@/lib/sync/canonical/shared-college-sync', () => ({ runSharedCollegeSync: mocks.shared }));
 vi.mock('google-auth-library', () => ({ OAuth2Client: class { verifyIdToken = mocks.verify; } }));
 import { POST } from './route';
 

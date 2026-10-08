@@ -3,8 +3,8 @@ import { createClient } from '@supabase/supabase-js';
 import { writeFile } from 'node:fs/promises';
 import type { createAdminClient } from '@/lib/supabase/admin';
 import { readDriveActivity, readRoundStatusRows, readRecentCollegeSearchRows } from './dashboard-readers';
-import { summarizeRoundDecisions } from './round-status';
-import { getRoundStatusDisplay } from './status-display';
+import { summarizeRoundDecisions } from './recruitment/round-status';
+import { getRoundStatusDisplay } from './recruitment/status-display';
 
 it.skipIf(process.env.WMO_READONLY_REHEARSAL !== 'true')('compact page reads preserve every restored user outcome and activity date', async () => {
   const url = process.env.RESTORE_SUPABASE_URL!;

@@ -1,5 +1,5 @@
 import type { Metadata } from 'next';
-import TermsClient from './terms-client';
+import TermsClient from './_components/terms-client';
 
 export const metadata: Metadata = {
   title: "Terms of Service — Where's My Offer?",

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse, after } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { runSync } from '@/lib/sync/engine';
-import { runSharedCollegeSync } from '@/lib/sync/shared-college-sync';
+import { runSharedCollegeSync } from '@/lib/sync/canonical/shared-college-sync';
 import { OAuth2Client } from 'google-auth-library';
 import { randomUUID } from 'node:crypto';
 import { describeError, diagnosticForStorage, diagnosticMessage } from '@/lib/error-diagnostics';

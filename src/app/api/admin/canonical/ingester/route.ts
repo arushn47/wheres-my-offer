@@ -1,8 +1,8 @@
 import { NextResponse } from 'next/server';
 import { requireAdmin } from '@/lib/auth/admin';
 import { createAdminClient } from '@/lib/supabase/admin';
-import { isSupportedWorkbookAttachment } from '@/lib/sync/attachment-status';
-import { isPdfAttachment } from '@/lib/sync/pdf-parser';
+import { isSupportedWorkbookAttachment } from '@/lib/sync/attachments/attachment-status';
+import { isPdfAttachment } from '@/lib/sync/extraction/pdf-parser';
 
 export const dynamic = 'force-dynamic';
 

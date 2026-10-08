@@ -1,6 +1,6 @@
 import type { Metadata } from 'next';
 import { getSession } from '@/lib/auth';
-import FeedbackClient from './feedback-client';
+import FeedbackClient from './_components/feedback-client';
 
 export const metadata: Metadata = {
   title: "Feedback & Support — Where's My Offer?",

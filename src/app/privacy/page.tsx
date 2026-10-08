@@ -1,5 +1,5 @@
 import type { Metadata } from 'next';
-import PrivacyClient from './privacy-client';
+import PrivacyClient from './_components/privacy-client';
 
 export const metadata: Metadata = {
   title: "Privacy Policy — Where's My Offer?",

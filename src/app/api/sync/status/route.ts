@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { getSession } from '@/lib/auth';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { getActiveSyncProgress, isUserSyncActive } from '@/lib/sync/engine';
-import { readPersonalPageProgress } from '@/lib/sync/progress-readers';
+import { readPersonalPageProgress } from '@/lib/sync/progress/progress-readers';
 
 export const dynamic = 'force-dynamic';
 

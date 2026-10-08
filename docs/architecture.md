@@ -1,521 +1,72 @@
-# Architecture — NeoPAT Placement Tracker
+# Where's My Offer architecture
 
-## 1. System Overview
+Current source layout and operating boundaries, reviewed 7 October 2026. Older implementation milestones in `memory.md`, phase plans and schema snapshots are historical; they do not override these boundaries or the current migration/runbooks.
 
-NeoPAT Placement Tracker is a **modern unified fullstack application** consisting of:
+## Runtime and entry points
 
-1. **Next.js 15+ Frontend & API Layer** — Dashboard UI, Google OAuth, Gmail API integration, and lightweight API routes.
-2. **In-Node Document Processing Engine** — In-memory XLSX/CSV parsing via `xlsx` with layout-agnostic roll-number pattern detection (<100ms lookup).
-3. **Supabase** — Managed PostgreSQL database, file storage (for attachments/JDs), and Row Level Security.
-4. **External Services** — Gmail API, Google OAuth 2.0, Gemini API (optional AI fallback).
+The application runs on Next.js 16.3 App Router and React 19. Server pages and route handlers remain under `src/app`; `src/proxy.ts` handles request authentication, canonical-host redirects and the maintenance write fence. Google OAuth credentials are encrypted, and application sessions use an HTTP-only JWT cookie. Database access uses the existing Supabase clients. Document processing runs in Node with SheetJS and PDF extraction; there is no active FastAPI parser service.
 
----
+Vercel Functions and the current production Supabase project are in Mumbai (`bom1` / `ap-south-1`). Deployment environment values are managed independently of local environment files.
 
-## 2. High-Level Architecture
+## Folder ownership
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                        CLIENT                               │
-│  Next.js 15 App Router (React 19, TypeScript)               │
-│  ┌─────────┐ ┌──────────┐ ┌──────────┐ ┌───────────────┐   │
-│  │Dashboard│ │ Company  │ │Calendar  │ │   Settings    │   │
-│  │  Page   │ │  Detail  │ │  View    │ │  & Accounts   │   │
-│  └────┬────┘ └────┬─────┘ └────┬─────┘ └───────┬───────┘   │
-│       └───────────┴────────────┴───────────────┘            │
-│                         │                                    │
-│              Server Components + Actions                     │
-└─────────────────────────┬───────────────────────────────────┘
-                          │
-          ┌───────────────┼───────────────┐
-          │               │               │
-          ▼               ▼               ▼
-┌─────────────┐  ┌──────────────┐  ┌─────────────────┐
-│  Next.js    │  │   In-Node    │  │    Supabase      │
-│  API Routes │  │ Doc Engine   │  │  (PostgreSQL +   │
-│             │  │ (SheetJS)    │  │   Storage)        │
-│ • OAuth     │  │              │  │                   │
-│ • Gmail API │  │ • XLSX parse │  │ • companies       │
-│ • Sync      │  │ • CSV parse  │  │ • applications    │
-│ • Dashboard │  │ • Neo ID     │  │ • emails          │
-│   queries   │  │   matching   │  │ • events          │
-│             │  │   (Gemini)   │  │ • documents       │
-└──────┬──────┘  └──────┬───────┘  │ • candidate_match │
-       │                │          └────────┬──────────┘
-       │                │                   │
-       └────────────────┴───────────────────┘
-                        │
-          ┌─────────────┼─────────────┐
-          ▼                           ▼
-   ┌─────────────┐            ┌─────────────┐
-   │  Gmail API  │            │ Gemini API  │
-   │  (Google)   │            │ (Optional)  │
-   └─────────────┘            └─────────────┘
+```text
+src/app/                         URL routes, layouts and HTTP handlers
+src/app/**/_components/          Components used by their owning route
+src/components/                 Shared UI: layout, admin, companies, notifications, ui, brand
+src/context/, src/hooks/         Shared client state and hooks
+src/lib/auth/, gmail/, supabase/ External integration and account/session access
+src/lib/calendar/               Calendar synchronization and delivery outbox
+src/lib/notifications/          Notification delivery and outbox
+src/lib/sync/
+  classification/               Deterministic email classification and gated AI extraction
+  extraction/                   Text/PDF, details, dates, roles and venue extraction
+  attachments/                  Roster scanning, candidate matching and compact lookups
+  canonical/                    Shared college archive, ingestion and backfill
+  identity/                     User identity, drive correlation and application scope
+  recruitment/                  Recruitment evidence, rounds, verdicts and status display
+  progress/                     Compact progress readers and shared-status polling
+  engine.ts, reprocess.ts        Workflow orchestration
+  mutation-lease.ts              Existing concurrency/mutation fencing
+  lease-context.ts              Lease propagation to database calls
+  dashboard-readers.ts          Compact dashboard projections
+src/lib/migration/              Existing compatibility and migration operations
+src/lib/crypto/, cutover/        Encryption and maintenance controls
+src/types/                      Shared type-only declarations
+public/                         Static assets and service worker
+tools/                          Maintained, explicit operational commands
+supabase/migrations/             Versioned schema changes
+docs/                           Architecture, operations, release and audit documents
 ```
 
----
+Next.js supports a `src` directory, route groups and private folders. It does not require a universal business-code hierarchy. This project keeps route entry points stable, colocates route-local UI and groups its existing large sync implementation by responsibility. Tests remain colocated, and `@/` resolves to `src/`. The refactor introduces no new service layer, barrels, public routes or forwarding compatibility files.
 
-## 3. Data Flow
+`scripts/`, `scratch/` and `backups/` contain ignored local diagnostics and recovery material. They are preserved, excluded from routine lint/test discovery and are not deployment inputs. Maintained `tools/` entry-point paths stay stable for documented operations.
 
-### 3.1 Authentication Flow
+## Placement flow and data ownership
 
-```
-User → "Sign in with Google" → Google OAuth 2.0 Consent Screen
-     → Access Token + Refresh Token returned
-     → Tokens encrypted and stored in Supabase (gmail_accounts)
-     → User redirected to Dashboard
-```
+Personal NeoPAT messages provide individual eligibility, registration and withdrawal evidence. An eligibility invitation alone is not an application or shortlist. College circulars are distributed broadly and provide shared drive details, schedules and rosters; receiving one alone is not candidate participation evidence.
 
-### 3.2 Email Sync Flow (Manual — Phase 1)
+Shared college mail is ingested canonically so its body, parsed attachments and rosters can be reused. Personal mail and candidate-specific participation remain scoped to the user. Companies may have multiple distinct placement drives; source links, candidate decisions and recruitment venues must resolve to the exact drive.
 
-```
-User clicks "Sync"
-     │
-     ▼
-Next.js API Route: /api/sync
-     │
-     ├─→ Fetch emails via Gmail API (search queries for placement keywords)
-     │   └─→ Store raw email metadata in `emails` table
-     │
-     ├─→ For each email:
-     │   ├─→ Classify email (deterministic rules first)
-     │   ├─→ Extract company name
-     │   ├─→ Extract events (dates, times, venues)
-     │   └─→ Upsert into `companies`, `applications`, `events`
-     │
-     ├─→ For attachments:
-     │   ├─→ Download attachment via Gmail API
-     │   ├─→ Upload to Supabase Storage
-     │   ├─→ In-Node Document Engine:
-     │   │   ├─→ XLSX/CSV → In-memory SheetJS cell search for Neo ID / roll numbers (<100ms)
-     │   │   └─→ JDs / Circulars → Structured extraction + gated AI fallback
-     │   └─→ Store results in `candidate_matches`, `documents`
-     │
-     └─→ Run Status Engine → Compute canonical status per company
-```
+The existing recruitment engine derives outcomes from candidate evidence and round history. A file move or display-only venue change must not alter those decisions. Drive Mode uses explicit recruitment venue evidence, independently of job location. Original-email opening resolves a message in the clicking user's connected mailbox rather than borrowing the shared ingester's Gmail ID. See the separate feature release procedure for the pending additive migrations.
 
-### 3.3 Email Sync Flow (Automatic — Phase 2)
+## Background delivery and concurrency
 
-```
-Gmail → Google Pub/Sub → Webhook (Next.js API Route)
-     → Same processing pipeline as above
-     → Push notification to client (WebSocket or polling)
-```
+Google Pub/Sub delivers incoming Gmail changes to `/api/webhooks/gmail`. Cron-job.org job **8265126** calls `https://www.wheresmyoffer.in/api/cron/sync` daily at **00:00 Asia/Kolkata** for the safety net, deadline notifications, cleanup and expiring Gmail-watch renewal.
 
----
+User syncs must acquire the existing concurrency lock and cleanly skip a still-active run. Shared ingestion has its own coordination. Mutation leases prevent stale workers from writing after ownership changes. Progress and cursors persist in the database; page reloads must not start an unchecked competing sync. Calendar and notification outboxes retain their dedupe, candidate-confirmed and retry semantics.
 
-## 4. Tech Stack
+## Database and egress boundaries
 
-### Frontend
+The metadata-only audit found 29 public application tables and two compatibility views. Tables remain in use through application queries or database functions. In particular, roster lookup indexes, sync progress, account/session credentials, canonical source links and delivery outboxes are active architecture, not disposable generated scaffolding.
 
-| Technology       | Version  | Purpose                        |
-|------------------|----------|--------------------------------|
-| Next.js          | 15+      | React framework, App Router    |
-| React            | 19+      | UI library                     |
-| TypeScript       | 5.x      | Type safety                    |
-| Tailwind CSS     | 4.x      | Styling framework              |
-| shadcn/ui        | latest   | Component library (Radix-based)|
-| Lucide Icons     | latest   | Icon set                       |
-| date-fns         | latest   | Date formatting/manipulation   |
-| Recharts         | latest   | Charts/analytics (later)       |
-| Zustand          | latest   | Client state management        |
+Compact projections and batched reads limit response bytes. Notification catch-up is scoped to affected drives and batches recency reads. Rendering must not fetch whole mail bodies or scan all-user history. The current 24–48 hour egress observation is left undisturbed by this local cleanup.
 
-### Backend — Next.js API Layer
+No database object is removed merely because it is empty or absent from a literal `.from()` search: RPCs, triggers, compatibility views, dynamic SQL and external consumers also matter. See [the audit](codebase-cleanup-audit.md) for retained objects and verification limits.
 
-| Technology         | Purpose                              |
-|--------------------|--------------------------------------|
-| Next.js API Routes | REST endpoints                       |
-| Server Actions     | Form submissions, mutations          |
-| googleapis         | Gmail API client                     |
-| @supabase/supabase-js | Database client                  |
-| jose               | JWT handling                         |
-| crypto (Node)      | Token encryption                     |
+## Validation and release
 
-### Backend — In-Node Document & Ingestion Engine
- 
-| Technology       | Purpose                              |
-|------------------|--------------------------------------|
-| Next.js API / Workers | Server-side execution           |
-| xlsx (SheetJS)   | In-memory XLSX/CSV parsing           |
-| googleapis       | Gmail API client                     |
-| google-generativeai | Gemini API (optional AI fallback) |
-| jose             | Token encryption / JWT               |
+TypeScript, the maintained Vitest suite, a fresh production build, the route manifest and public/auth-redirect HTTP smoke checks cover this restructuring. Existing lint debt is reported separately. Signed-in Google account routing still requires the feature release's real-browser acceptance check.
 
-### Database & Storage
-
-| Technology       | Purpose                              |
-|------------------|--------------------------------------|
-| Supabase         | Managed PostgreSQL + Storage         |
-| Supabase Auth    | OAuth token management (optional)    |
-| Supabase Storage | Attachment/JD file storage           |
-
-### Deployment
-
-| Service          | Component                            |
-|------------------|--------------------------------------|
-| Vercel           | Next.js frontend + API routes        |
-| Railway / Render | FastAPI microservice                  |
-| Supabase Cloud   | Database + Storage                   |
-
----
-
-## 5. Folder Structure
-
-```
-job-tracker/
-├── .env.local                    # Environment variables (gitignored)
-├── .env.example                  # Template for environment variables
-├── next.config.ts                # Next.js configuration
-├── tailwind.config.ts            # Tailwind CSS configuration
-├── tsconfig.json                 # TypeScript configuration
-├── package.json
-│
-├── src/
-│   ├── app/                      # Next.js App Router
-│   │   ├── layout.tsx            # Root layout (fonts, providers, theme)
-│   │   ├── page.tsx              # Landing / Auth page
-│   │   ├── globals.css           # Global styles + Tailwind imports
-│   │   │
-│   │   ├── (auth)/               # Auth route group
-│   │   │   ├── login/page.tsx
-│   │   │   └── callback/page.tsx # OAuth callback handler
-│   │   │
-│   │   ├── (dashboard)/          # Dashboard route group (protected)
-│   │   │   ├── layout.tsx        # Dashboard shell (sidebar, topbar)
-│   │   │   ├── page.tsx          # Main dashboard
-│   │   │   ├── companies/
-│   │   │   │   ├── page.tsx      # All companies list
-│   │   │   │   └── [id]/
-│   │   │   │       └── page.tsx  # Company detail + timeline
-│   │   │   ├── calendar/
-│   │   │   │   └── page.tsx      # Calendar view
-│   │   │   ├── search/
-│   │   │   │   └── page.tsx      # Search & filter
-│   │   │   └── settings/
-│   │   │       └── page.tsx      # Accounts, Neo ID, preferences
-│   │   │
-│   │   └── api/                  # API Routes
-│   │       ├── auth/
-│   │       │   ├── google/route.ts       # Initiate OAuth
-│   │       │   ├── callback/route.ts     # Handle OAuth callback
-│   │       │   └── disconnect/route.ts   # Revoke account
-│   │       ├── sync/
-│   │       │   ├── route.ts              # Trigger manual sync
-│   │       │   └── status/route.ts       # Sync progress
-│   │       ├── companies/
-│   │       │   ├── route.ts              # List/create companies
-│   │       │   └── [id]/route.ts         # Get/update company
-│   │       ├── applications/
-│   │       │   └── [id]/route.ts         # Update application
-│   │       ├── events/
-│   │       │   └── route.ts              # List events
-│   │       └── documents/
-│   │           └── [id]/route.ts         # Download document
-│   │
-│   ├── components/               # React components
-│   │   ├── ui/                   # shadcn/ui components (auto-generated)
-│   │   ├── dashboard/
-│   │   │   ├── stats-cards.tsx
-│   │   │   ├── upcoming-events.tsx
-│   │   │   ├── company-table.tsx
-│   │   │   └── sync-button.tsx
-│   │   ├── company/
-│   │   │   ├── company-header.tsx
-│   │   │   ├── company-timeline.tsx
-│   │   │   ├── company-details.tsx
-│   │   │   └── source-evidence.tsx
-│   │   ├── calendar/
-│   │   │   └── event-calendar.tsx
-│   │   ├── layout/
-│   │   │   ├── sidebar.tsx
-│   │   │   ├── topbar.tsx
-│   │   │   └── mobile-nav.tsx
-│   │   └── shared/
-│   │       ├── status-badge.tsx
-│   │       ├── neo-id-badge.tsx
-│   │       ├── loading-skeleton.tsx
-│   │       └── empty-state.tsx
-│   │
-│   ├── lib/                      # Core utilities
-│   │   ├── supabase/
-│   │   │   ├── client.ts         # Browser Supabase client
-│   │   │   ├── server.ts         # Server Supabase client
-│   │   │   └── admin.ts          # Service-role client (for sync)
-│   │   ├── gmail/
-│   │   │   ├── client.ts         # Gmail API wrapper
-│   │   │   ├── queries.ts        # Search queries for placement emails
-│   │   │   └── parser.ts         # Email body parser
-│   │   ├── sync/
-│   │   │   ├── orchestrator.ts   # Main sync coordinator
-│   │   │   ├── classifier.ts     # Email classification engine
-│   │   │   ├── company-detector.ts # Company name extraction
-│   │   │   ├── event-extractor.ts  # Date/time/venue extraction
-│   │   │   └── status-engine.ts    # Canonical status resolution
-│   │   ├── crypto/
-│   │   │   └── tokens.ts         # Token encryption/decryption
-│   │   └── utils.ts              # General helpers
-│   │
-│   ├── hooks/                    # Custom React hooks
-│   │   ├── use-sync.ts
-│   │   ├── use-companies.ts
-│   │   └── use-events.ts
-│   │
-│   ├── types/                    # TypeScript type definitions
-│   │   ├── database.ts           # Supabase generated types
-│   │   ├── gmail.ts              # Gmail API types
-│   │   ├── company.ts
-│   │   ├── event.ts
-│   │   └── sync.ts
-│   │
-│   └── constants/                # App constants
-│       ├── statuses.ts           # Application status enum
-│       ├── event-types.ts        # Event type enum
-│       └── email-rules.ts        # Classification rules/keywords
-│
-├── supabase/                     # Supabase project config
-│   ├── migrations/               # SQL migration files
-│   │   ├── 001_create_users.sql
-│   │   ├── 002_create_gmail_accounts.sql
-│   │   ├── 003_create_companies.sql
-│   │   ├── 004_create_applications.sql
-│   │   ├── 005_create_emails.sql
-│   │   ├── 006_create_attachments.sql
-│   │   ├── 007_create_candidate_matches.sql
-│   │   ├── 008_create_events.sql
-│   │   ├── 009_create_documents.sql
-│   │   └── 010_create_rls_policies.sql
-│   └── seed.sql                  # Optional seed data
-│
-├── parser-service/               # FastAPI microservice
-│   ├── main.py                   # FastAPI app entry point
-│   ├── requirements.txt
-│   ├── Dockerfile
-│   ├── routers/
-│   │   ├── xlsx.py               # XLSX parsing endpoints
-│   │   ├── pdf.py                # PDF parsing endpoints
-│   │   └── docx.py               # DOCX parsing endpoints
-│   ├── services/
-│   │   ├── xlsx_parser.py        # XLSX processing logic
-│   │   ├── pdf_parser.py         # PDF text extraction + JD parsing
-│   │   ├── docx_parser.py        # DOCX text extraction
-│   │   ├── neo_id_matcher.py     # Neo ID search across all formats
-│   │   └── ai_extractor.py       # Gemini API fallback
-│   ├── models/
-│   │   ├── requests.py           # Pydantic request models
-│   │   └── responses.py          # Pydantic response models
-│   └── utils/
-│       └── file_utils.py         # File download/hash utilities
-│
-├── docs/                         # Project documentation
-│   ├── prd.md
-│   ├── architecture.md           # This file
-│   ├── rules.md
-│   ├── phases.md
-│   ├── design.md
-│   └── memory.md
-│
-└── public/                       # Static assets
-    ├── logo.svg
-    └── og-image.png
-```
-
----
-
-## 6. Database Schema (Supabase PostgreSQL)
-
-> Detailed schema is in `prd.md` Section 10. Key additions for architecture:
-
-### Indexes
-
-```sql
--- Fast email lookup
-CREATE INDEX idx_emails_gmail_message_id ON emails(gmail_message_id);
-CREATE INDEX idx_emails_classification ON emails(classification);
-
--- Fast company queries
-CREATE INDEX idx_companies_status ON companies(status);
-CREATE INDEX idx_companies_name ON companies(name);
-
--- Fast application lookups
-CREATE INDEX idx_applications_user_company ON applications(user_id, company_id);
-CREATE INDEX idx_applications_status ON applications(status);
-
--- Fast event queries (upcoming events)
-CREATE INDEX idx_events_start_time ON events(start_time);
-CREATE INDEX idx_events_company ON events(company_id);
-
--- Fast Neo ID matching
-CREATE INDEX idx_candidate_matches_neo_id ON candidate_matches(neo_id);
-```
-
-### Row Level Security (RLS)
-
-Every table will have RLS enabled. Users can only access their own data:
-
-```sql
-CREATE POLICY "Users can only view own applications"
-  ON applications FOR SELECT
-  USING (user_id = auth.uid());
-```
-
----
-
-## 7. API Design
-
-### Next.js API Routes
-
-| Method | Route                        | Purpose                      |
-|--------|------------------------------|------------------------------|
-| GET    | `/api/auth/google`           | Initiate OAuth flow          |
-| GET    | `/api/auth/callback`         | Handle OAuth callback        |
-| POST   | `/api/auth/disconnect`       | Revoke Gmail account         |
-| POST   | `/api/sync`                  | Trigger manual sync          |
-| GET    | `/api/sync/status`           | Get sync progress            |
-| GET    | `/api/companies`             | List companies (with filters)|
-| GET    | `/api/companies/[id]`        | Company detail + timeline    |
-| PATCH  | `/api/companies/[id]`        | Manual override              |
-| PATCH  | `/api/applications/[id]`     | Update application status    |
-| GET    | `/api/events`                | List upcoming events         |
-| GET    | `/api/documents/[id]`        | Download document/attachment |
-| GET    | `/api/dashboard/stats`       | Dashboard summary stats      |
-
-### FastAPI Microservice
-
-| Method | Route                        | Purpose                          |
-|--------|------------------------------|----------------------------------|
-| POST   | `/parse/xlsx`                | Parse XLSX, search for Neo ID    |
-| POST   | `/parse/pdf`                 | Extract text from PDF            |
-| POST   | `/parse/docx`                | Extract text from DOCX           |
-| POST   | `/parse/jd`                  | Extract structured JD fields     |
-| POST   | `/match/neo-id`              | Search Neo ID in parsed content  |
-| POST   | `/classify/email`            | AI-assisted email classification |
-| GET    | `/health`                    | Health check                     |
-
----
-
-## 8. Authentication & Security
-
-### OAuth Flow
-
-```
-1. User clicks "Connect Gmail"
-2. Redirect to Google OAuth consent screen
-   - Scopes: gmail.readonly, userinfo.email, userinfo.profile
-3. Google redirects to /api/auth/callback with authorization code
-4. Server exchanges code for access_token + refresh_token
-5. Encrypt tokens with AES-256-GCM using server-side key
-6. Store encrypted tokens in gmail_accounts table
-7. Set HTTP-only session cookie
-```
-
-### Token Management
-
-- Access tokens expire in ~1 hour → auto-refresh using refresh_token
-- Refresh tokens stored encrypted in Supabase
-- Token decryption only happens server-side
-- Failed refresh → prompt user to re-authenticate
-
----
-
-## 9. Environment Variables
-
-```env
-# Supabase
-NEXT_PUBLIC_SUPABASE_URL=
-NEXT_PUBLIC_SUPABASE_ANON_KEY=
-SUPABASE_SERVICE_ROLE_KEY=
-
-# Google OAuth
-GOOGLE_CLIENT_ID=
-GOOGLE_CLIENT_SECRET=
-GOOGLE_REDIRECT_URI=
-
-# Encryption
-TOKEN_ENCRYPTION_KEY=          # 32-byte hex key for AES-256
-
-# FastAPI Parser Service
-PARSER_SERVICE_URL=            # URL of the FastAPI microservice
-PARSER_SERVICE_API_KEY=        # Shared secret for service-to-service auth
-
-# Gemini (Optional)
-GEMINI_API_KEY=
-
-# App
-NEXT_PUBLIC_APP_URL=
-```
-
----
-
-## 10. Deployment Architecture
-
-```
-                    ┌──────────────┐
-                    │   Vercel     │
-                    │  (Next.js)   │
-                    │              │
-                    │ • Frontend   │
-                    │ • API Routes │
-                    │ • OAuth      │
-                    │ • Gmail API  │
-                    └──────┬───────┘
-                           │
-              ┌────────────┼────────────┐
-              ▼                         ▼
-     ┌──────────────┐         ┌──────────────┐
-     │   Railway    │         │   Supabase   │
-     │  (FastAPI)   │         │   Cloud      │
-     │              │         │              │
-     │ • Doc Parser │         │ • PostgreSQL │
-     │ • Neo Match  │         │ • Storage    │
-     │ • AI Extract │         │ • RLS        │
-     └──────────────┘         └──────────────┘
-```
-
-### Vercel Configuration
-
-- **Framework**: Next.js (auto-detected)
-- **Build Command**: `next build`
-- **Node.js Version**: 20.x
-- **Environment Variables**: All secrets configured in Vercel dashboard
-
-### Railway Configuration
-
-- **Dockerfile deployment**
-- **Internal networking** for service-to-service communication
-- **Auto-scaling** based on request volume
-- **Health check** endpoint: `/health`
-
----
-
-## 11. Key Architectural Decisions
-
-### Why Hybrid (Next.js + FastAPI)?
-
-- **Next.js** excels at UI rendering, OAuth flows, and lightweight API routes
-- **FastAPI (Python)** has superior libraries for document processing (`openpyxl`, `pdfplumber`, `python-docx`, `pandas`)
-- Keeps the Next.js deployment lightweight on Vercel (no heavy Python deps)
-- Allows independent scaling of the parser service
-
-### Why Supabase?
-
-- Managed PostgreSQL with zero ops overhead
-- Built-in Row Level Security
-- Object storage for attachments
-- Free tier is generous for a personal project
-- Real-time subscriptions (useful for future push notifications)
-
-### Why Server-Side Gmail API?
-
-- Tokens never exposed to the client
-- Rate limiting handled server-side
-- Attachment downloads happen server-to-server
-- Better security posture
-
----
-
-## 12. Performance Considerations
-
-- **Email Sync**: Paginated Gmail API queries (max 100 per request)
-- **Attachment Processing**: Async queue pattern — sync endpoint returns immediately, processing happens in background
-- **Dashboard Queries**: Materialized views or denormalized summary table for stats
-- **Caching**: React Query / SWR for client-side caching with stale-while-revalidate
-- **Neo ID Search**: Pre-indexed in candidate_matches table, not re-parsed on every dashboard load
+Production writes, migrations, deployment, OAuth flows and historical reprocessing are separate authorized actions. Use [production cutover actions](production-cutover-actions.md) and [email/venue release actions](email-and-venue-release.md), retaining the current region, secrets, cron configuration and cursors unless that procedure explicitly changes them.

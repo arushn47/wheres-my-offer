@@ -5,8 +5,7 @@ import { normalizeDriveNumber } from '@/lib/drive-number';
 import {
   getDriveRegistrationDateBoundary,
   isCircularAllowedByScheduledDate,
-  parseScheduledDate,
-} from '@/lib/sync/drive-temporal-boundary';
+} from '@/lib/sync/identity/drive-temporal-boundary';
 
 export const dynamic = 'force-dynamic';
 

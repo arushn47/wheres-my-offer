@@ -1,6 +1,6 @@
 import { requireAdmin } from '@/lib/auth/admin';
 import { redirect } from 'next/navigation';
-import DashboardClient from './dashboard-client';
+import DashboardClient from './_components/dashboard-client';
 
 export const dynamic = 'force-dynamic';
 

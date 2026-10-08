@@ -2,11 +2,13 @@ import type { Metadata } from 'next';
 import { Suspense } from 'react';
 import { requireSession } from '@/lib/auth';
 import { createAdminClient } from '@/lib/supabase/admin';
-import CompaniesClient, { type CompanyWithDetails } from './companies-client';
+import { readDriveVenues } from '@/lib/drive-venue-data';
+import { knownCampus, resolveDriveVenue } from '@/lib/drive-venues';
+import CompaniesClient, { type CompanyWithDetails } from './_components/companies-client';
 
 import { detectCampus } from '@/lib/utils';
-import { summarizeRoundDecisions } from '@/lib/sync/round-status';
-import { getRoundStatusDisplay } from '@/lib/sync/status-display';
+import { summarizeRoundDecisions } from '@/lib/sync/recruitment/round-status';
+import { getRoundStatusDisplay } from '@/lib/sync/recruitment/status-display';
 import { readDriveActivity, readRoundStatusRows } from '@/lib/sync/dashboard-readers';
 
 export const metadata: Metadata = {
@@ -264,6 +266,9 @@ export default async function CompaniesPage() {
     }
   }
 
+  const venueMap = await readDriveVenues(supabase, entities.map(e => e.drive?.id || e.app?.placement_drive_id).filter((id): id is string => Boolean(id)));
+  const venueCampus = knownCampus(collegeAccount?.email);
+
   // Assemble full details based on Entities
   const formattedCompanies: CompanyWithDetails[] = entities.map((ent) => {
     const { drive, app, entityId } = ent;
@@ -299,6 +304,7 @@ export default async function CompaniesPage() {
       id: comp?.id || companyId || entityId, 
       appId: app ? app.id : undefined,
       driveId: drive ? drive.id : undefined,
+      venue: resolveDriveVenue(venueMap.get(targetDriveId), venueCampus),
       name: comp?.name || ent.company?.name || 'Unknown Company',
       legal_name: null,
       aliases: comp?.aliases || ent.company?.aliases || null,

@@ -107,7 +107,7 @@ export function detectBranch(emailOrReg?: string | null): string | null {
   return branches[code] || code;
 }
 
-import { cleanLocationString, KNOWN_CITIES } from './sync/locations';
+import { cleanLocationString, KNOWN_CITIES } from './sync/extraction/locations';
 
 export { cleanLocationString, KNOWN_CITIES };
 

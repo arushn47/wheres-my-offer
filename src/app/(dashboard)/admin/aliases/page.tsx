@@ -1,6 +1,6 @@
 import { requireAdmin } from '@/lib/auth/admin';
 import { redirect } from 'next/navigation';
-import AliasesClient from './aliases-client';
+import AliasesClient from './_components/aliases-client';
 
 export const dynamic = 'force-dynamic';
 

@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { requireAdmin } from '@/lib/auth/admin';
-import { backfillCanonicalEmails } from '@/lib/sync/canonical-backfill';
+import { backfillCanonicalEmails } from '@/lib/sync/canonical/canonical-backfill';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 300;

@@ -2,15 +2,12 @@
 
 import { useState } from 'react';
 import {
-  RefreshCw,
   Loader2,
   CheckCircle2,
   AlertCircle,
   Sparkles,
   ChevronDown,
   ChevronUp,
-  Users,
-  Layers,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 

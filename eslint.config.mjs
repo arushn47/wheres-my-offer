@@ -12,6 +12,11 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Local recovery archives and one-off diagnostics are not application source.
+    "backups/**",
+    "scratch/**",
+    "scripts/**",
+    "supabase/.temp/**",
   ]),
 ]);
 

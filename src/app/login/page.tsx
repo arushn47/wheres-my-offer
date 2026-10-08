@@ -1,7 +1,7 @@
 import type { Metadata } from 'next';
 import { getSession } from '@/lib/auth';
 import { redirect } from 'next/navigation';
-import LoginClient from './login-client';
+import LoginClient from './_components/login-client';
 
 export const metadata: Metadata = {
   title: "Login — Where's My Offer? | NeoPAT Tracker & Campus Placement Radar",

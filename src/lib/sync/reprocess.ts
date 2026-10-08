@@ -1,41 +1,39 @@
-import { buildExtractionProvenance } from './extraction-provenance';
-import { loadUserCandidateIdentity } from '@/lib/sync/user-identity';
+import { buildExtractionProvenance } from './extraction/extraction-provenance';
+import { loadUserCandidateIdentity } from '@/lib/sync/identity/user-identity';
 import { isCompanySubjectMatch as matchesCompanySubject, loadRecalculationScope, loadSelectedCanonicalBodies, type RecalculationCircularMetadata } from './recalculation-scope';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { withQueryMetrics } from '@/lib/supabase/query-metrics';
 import {
   classifyEmail,
   cleanCompanyName,
-  extractCompanyName,
   normalizeCompanyName,
   isInvalidCompanyName,
   extractCompanyAliases,
-} from '@/lib/sync/classifier';
-import { cleanRoleTitle, extractDriveNumber, extractEvents, extractJobDetails, extractLatestTravelRequirement, extractTravelRequirement } from '@/lib/sync/events';
+} from '@/lib/sync/classification/classifier';
+import { cleanRoleTitle, extractDriveNumber, extractJobDetails, extractLatestTravelRequirement, extractTravelRequirement } from '@/lib/sync/extraction/events';
 import { isFuzzyCompanyMatch } from '@/lib/sync/engine';
-import { recoverTruncatedEmailBodies } from '@/lib/sync/email-body-recovery';
+import { recoverTruncatedEmailBodies } from '@/lib/sync/extraction/email-body-recovery';
 import { refreshTravelModeNote } from '@/lib/utils';
-import { isShortlistMatchEvidence } from '@/lib/sync/participation-evidence';
+import { isShortlistMatchEvidence } from '@/lib/sync/recruitment/participation-evidence';
 import {
   buildCircularCatalog,
   loadAllDriveResolutions,
   resolveDriveByTimingCorrelation,
-} from '@/lib/sync/drive-correlator';
-import { pickRegistrationDeadline } from '@/lib/sync/events';
-import { classifyShortlistEmail, extractExplicitOrdinal, parseRecruitmentProcess, buildAnnouncedProcessToken, extractAnnouncedRoundsFromEmails } from '@/lib/sync/round-identity';
+} from '@/lib/sync/identity/drive-correlator';
+import { pickRegistrationDeadline } from '@/lib/sync/extraction/events';
+import { classifyShortlistEmail, extractExplicitOrdinal, parseRecruitmentProcess, buildAnnouncedProcessToken, extractAnnouncedRoundsFromEmails } from '@/lib/sync/recruitment/round-identity';
 import { normalizeDriveNumber } from '@/lib/drive-number';
 import { withUserMutationLease, assertMutationLease } from '@/lib/sync/mutation-lease';
-import { getEvidenceMessageText, isQuotedReply } from '@/lib/sync/body';
-import { calculateDriveRoundVerdicts, commitDriveRoundVerdicts, reconcileDriveEvents, dispatchCalendarRemovals, dispatchRoundNotificationOutbox } from '@/lib/sync/round-verdict-service';
-import { statusForRoundVerdict, roundEventNumbers } from '@/lib/sync/round-verdict';
-import { extractScopedEvents } from '@/lib/sync/scoped-events';
-import { isOpenPptInvitation } from '@/lib/sync/placement-evidence';
-import { getCurrentRoundDecision, resolveRecruitmentStatus, isRoundEventEligible } from '@/lib/sync/round-status';
+import { getEvidenceMessageText, isQuotedReply } from '@/lib/sync/extraction/body';
+import { calculateDriveRoundVerdicts, commitDriveRoundVerdicts, reconcileDriveEvents, dispatchCalendarRemovals, dispatchRoundNotificationOutbox } from '@/lib/sync/recruitment/round-verdict-service';
+import { statusForRoundVerdict, roundEventNumbers } from '@/lib/sync/recruitment/round-verdict';
+import { extractScopedEvents } from '@/lib/sync/extraction/scoped-events';
+import { isOpenPptInvitation } from '@/lib/sync/recruitment/placement-evidence';
+import { getCurrentRoundDecision, resolveRecruitmentStatus, isRoundEventEligible } from '@/lib/sync/recruitment/round-status';
 import {
   getStartOfRegistrationDate,
   isCircularAllowedByScheduledDate,
-  parseScheduledDate,
-} from '@/lib/sync/drive-temporal-boundary';
+} from '@/lib/sync/identity/drive-temporal-boundary';
 
 
 
@@ -738,7 +736,7 @@ async function recalculateApplicationStatusesUnlocked(
           if (alreadyMatched) continue;
 
           // Check direct Neo ID or Reg No match in email body
-          const { checkNeoIdMatch } = await import('@/lib/sync/status-engine');
+          const { checkNeoIdMatch } = await import('@/lib/sync/recruitment/status-engine');
           const bodyMatch = checkNeoIdMatch(emailText, userNeoId, userEmail, candidateIdentity.name, candidateIdentity);
           if (bodyMatch.matched) {
             matchedEmailIds.add(email.id);
@@ -773,7 +771,7 @@ async function recalculateApplicationStatusesUnlocked(
         }
 
         if (!options?.skipGSheetScan) {
-          const { extractGoogleSheetUrls, scanGoogleSheetForCandidate } = await import('@/lib/sync/gsheet-parser');
+          const { extractGoogleSheetUrls, scanGoogleSheetForCandidate } = await import('@/lib/sync/attachments/gsheet-parser');
 
           for (const email of companyEmails) {
             if (isQuotedReply(email.subject || '')) continue;
@@ -797,7 +795,7 @@ async function recalculateApplicationStatusesUnlocked(
               const gMatch = await scanGoogleSheetForCandidate(gUrl, userEmail, userNeoId, candidateIdentity.name, candidateIdentity);
               const collegeRef = email.college_email_id || email.canonical_email_id;
               if (collegeRef) {
-                const { persistSheetSnapshot } = await import('./sheet-snapshots');
+                const { persistSheetSnapshot } = await import('./attachments/sheet-snapshots');
                 await persistSheetSnapshot(supabase, collegeRef, gUrl, gMatch);
               }
               if (gMatch && gMatch.matched) {
@@ -3255,7 +3253,7 @@ async function performReprocessUnlocked(
   // Reuse parsed canonical College attachments for only this user's evidenced
   // drives. Never rescan an individual College Gmail inbox during user reprocess.
   try {
-    const { scanSharedCollegeCandidateMatches } = await import('@/lib/sync/attachment-scanner');
+    const { scanSharedCollegeCandidateMatches } = await import('@/lib/sync/attachments/attachment-scanner');
     await scanSharedCollegeCandidateMatches(supabase, userId);
   } catch (scanErr) {
     console.warn('[performReprocess] Shared shortlist scan non-critical error:', scanErr);

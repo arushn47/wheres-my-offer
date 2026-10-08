@@ -7,7 +7,7 @@ import {
   getDriveRegistrationDateBoundary,
   isEmailAllowedByDriveBoundary,
   formatIstDate,
-} from '@/lib/sync/drive-temporal-boundary';
+} from '@/lib/sync/identity/drive-temporal-boundary';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 300;

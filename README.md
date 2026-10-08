@@ -1,36 +1,75 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Where's My Offer
 
-## Getting Started
+A Next.js 16 App Router application for tracking placement drives from personal NeoPAT mail and shared college circulars. It uses React 19, TypeScript, Tailwind CSS, Supabase, Google OAuth/Gmail and Google Pub/Sub.
 
-First, run the development server:
+## Development
 
-```bash
+Use Node.js 24 and the committed npm lockfile:
+
+```sh
+npm ci
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Configure `.env.local` with the intended development database, Google OAuth credentials, token encryption key and application URL. Keep credentials out of Git. The local environment and Production are independent; verify the target project before running any database or sync tool. Do not reuse live database credentials for destructive tests.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Structure
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```text
+src/
+  app/                    Routes, layouts, API handlers and route-local _components/
+  components/             Shared UI grouped by purpose
+  context/                Shared React providers
+  hooks/                  Shared client hooks
+  lib/
+    auth/                 Session and account access
+    gmail/                Gmail integration and original-message resolution
+    supabase/             Database clients and query measurements
+    calendar/             Calendar delivery and event helpers
+    notifications/        Notification delivery and outbox
+    sync/
+      classification/     Email classification and gated AI fallback
+      extraction/         Body, document, event and venue extraction
+      attachments/        Rosters, spreadsheets and candidate matching
+      canonical/          Shared college ingestion and archive access
+      identity/           Drive and candidate identity resolution
+      recruitment/        Existing status, rounds and outcome rules
+      progress/           Persisted progress and shared-status reads
+      engine.ts           User sync orchestration
+      reprocess.ts        Explicit reprocessing orchestration
+    migration/            Compatibility and migration helpers
+    crypto/               Credential encryption
+    cutover/              Maintenance write fence
+  types/                  Shared types without runtime behavior
+public/                   Static assets and service worker
+tools/                    Maintained operational entry points
+supabase/migrations/      Versioned database migrations
+docs/                     Architecture, release procedures and audit notes
+```
 
-## Learn More
+Tests stay beside the code they exercise. Use `@/` for imports from `src`; do not create forwarding modules solely to hide a file move. `_components` directories are private to their route and do not introduce URLs. Shared components belong in `src/components` when multiple routes use them.
 
-To learn more about Next.js, take a look at the following resources:
+## Checks
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```sh
+npm run typecheck
+npm test
+npm run test:tools
+npm run build
+npm run lint
+node tools/audit-codebase.mjs
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+Vitest discovers maintained `src/**/*.test.ts` tests; operational-tool tests use Node's separate test runner. Database integration tests skip unless their explicit isolated-test prerequisites are provided. The cleanup audit records existing lint debt separately from build/type failures. Ignored recovery backups and one-off local diagnostics are not lint or test targets.
 
-## Deploy on Vercel
+## Production operations
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+Google Pub/Sub is the primary incoming-mail trigger. Cron-job.org job **8265126** calls `/api/cron/sync` daily at **00:00 Asia/Kolkata** as the safety net and Gmail-watch renewal mechanism. Keep user concurrency locks, mutation leases, persistent progress, cursors and delivery outboxes intact.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Code restructuring does not authorize database migrations, historical reprocessing, environment changes or deployment. Use the relevant release procedure explicitly:
+
+- [Current architecture](docs/architecture.md)
+- [Code and database cleanup audit](docs/codebase-cleanup-audit.md)
+- [Production cutover actions](docs/production-cutover-actions.md)
+- [Original email and Drive Mode release](docs/email-and-venue-release.md)
+- [Agent architecture rules](AGENTS.md)

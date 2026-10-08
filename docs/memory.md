@@ -2,6 +2,17 @@
 
 > This file tracks the project's progress, decisions, and context so the AI doesn't lose track across sessions. Update this after every significant change.
 
+## Current context — 8 October 2026
+
+- Current runtime is Next.js 16.3 / React 19 with Node document processing. The earlier FastAPI/Railway plans and file inventories below are historical.
+- Production uses Mumbai Supabase and Vercel `bom1`. Local environment files are independent and may target different projects; verify the target before operational work.
+- Pub/Sub is the primary delivery path. Cron-job.org job 8265126 remains active daily at 00:00 Asia/Kolkata at `https://www.wheresmyoffer.in/api/cron/sync`, including Gmail-watch renewal. Preserve locks, leases, persisted progress, cursors and outboxes.
+- Locally restructured route clients into `_components` and grouped existing sync modules by responsibility. Removed confirmed-unused scaffolding/helpers/imports and unused Recharts/Zustand dependencies. No active recruitment logic or production state changed.
+- Metadata-only audit: 29 public application tables and two compatibility views; none dropped. Tables remain referenced by code or database functions. See [cleanup audit](codebase-cleanup-audit.md) and [current architecture](architecture.md).
+- The user ended the egress observation hold on 8 October and authorized cleanup and pushing the pending original-email, explicit drive-specific venue and folder-structure updates. Assistant measurement automation is paused; production cron remains active. Additive migrations v44/v45 and reviewed historical venue updates remain separate actions, not part of the Git push. See [release actions](email-and-venue-release.md).
+
+The remaining phase/status tables and file paths below describe earlier milestones, not the current release inventory.
+
 ---
 
 ## Current Phase
@@ -136,7 +147,7 @@
 - **User**: VIT Bhopal student (`arush.23bce10472@vitbhopal.ac.in`)
 - **Neo ID**: Configured per user in Settings (e.g. 6-12 alphanumeric characters)
 - **Primary use case**: Track campus placement drives from NeoPAT portal and VIT placement emails
-- **External Cron Job (CRITICAL)**: Configured on [cron-job.org](https://console.cron-job.org/jobs/8265126) running `GET https://neopat-tracker.vercel.app/api/cron/sync` **every 15 minutes** (`*/15 * * * *`). Sync MUST be concurrency-locked per user so background cron never collides with manual or ongoing initial syncs.
+- **External Cron Job (CRITICAL)**: Configured on [cron-job.org](https://console.cron-job.org/jobs/8265126) running `GET https://www.wheresmyoffer.in/api/cron/sync` **daily at 00:00 Asia/Kolkata** (`0 0 * * *`). Sync MUST be concurrency-locked per user so background cron never collides with manual or ongoing initial syncs.
 - **Project location**: `d:\CODING\Web Development\Projects\Fullstack\NeoTrack`
 - **OS**: Windows
 - **Package manager**: npm
