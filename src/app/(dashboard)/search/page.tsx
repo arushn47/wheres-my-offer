@@ -138,6 +138,7 @@ export default async function SearchPage() {
         notes,
         driveMode,
         driveModeDetail: venue.detail,
+        driveModeRequiresTravel: venue.requiresTravel,
         status: eff.effectiveStatus,
         statusLabel: eff.statusSubtitle,
         isMultiDrive,

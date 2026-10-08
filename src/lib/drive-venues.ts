@@ -8,7 +8,7 @@ export interface VenueEntry {
   quote: string;
 }
 export interface RecruitmentVenues { version: 1; entries: Array<VenueEntry & { sourceId: string; receivedAt: string }> }
-export interface DriveVenueDisplay { label: string; detail?: string }
+export interface DriveVenueDisplay { label: string; detail?: string; requiresTravel?: boolean }
 
 const campuses = ['Bhopal', 'Vellore', 'Chennai', 'AP'] as const;
 export function knownCampus(email?: string | null): string | undefined {
@@ -17,15 +17,26 @@ export function knownCampus(email?: string | null): string | undefined {
     : ['chennai.vit.ac.in', 'chennai.vitstudent.ac.in'].includes(domain || '') ? 'VIT Chennai' : ['vitap.ac.in', 'vitapstudent.ac.in'].includes(domain || '') ? 'VIT AP' : undefined;
 }
 function campusIn(text: string): string | undefined {
+  // These buildings belong to Vellore even when a circular omits the campus name.
+  if (/\b(?:SJT|PRP)\s*[-–]?\s*(?:\d{1,4}\b|\b)|\bPearl\s+Research\s+Park\b/i.test(text)) return 'VIT Vellore';
+  if (/\bSarojini\s+Naidu\s+gallery\b|\b(?:Dr\.?\s*)?Channa\s+Reddy\b/i.test(text)) return 'VIT Vellore';
   const match = text.match(/\bVIT\s*[-,]?\s*(Bhopal|Vellore|Chennai|AP|Amaravati)\b|\b(Bhopal|Vellore|Chennai|AP)\s+(?:LC|labs?|campus)\b/i);
   const name = match?.[1] || match?.[2];
   return name ? `VIT ${campuses.find(c => c.toLowerCase() === name.toLowerCase()) || 'AP'}` : undefined;
+}
+function venueCampus(entry: VenueEntry): string | undefined {
+  if (entry.kind === 'campus') return campusIn(entry.name);
+  if (entry.kind !== 'place') return;
+  return campusIn(entry.name) || (/\bVellore\b/i.test(entry.name) && /\b(?:gallery|auditorium|CDC|LC)\b/i.test(entry.name) ? 'VIT Vellore' : undefined)
+    || (/^(?:VIT\s+)?(?:Bhopal|Vellore|Chennai|AP)\s+campus\s*[:–-]/i.test(entry.quote)
+    ? campusIn(entry.quote) : undefined);
 }
 function stageIn(text: string): string | undefined {
   if (/\b(?:PPT|pre[ -]?placement talk)\b.{0,25}\bfollowed by\b/i.test(text)) return 'PPT';
   const stages = [
     [/\binterviews?|technical round|managerial round|HR round/i, 'Interviews'],
     [/\bgame(?:\s+(?:based|round))?\b/i, 'Game round'],
+    [/\bGD\b|\bgroup discussion\b/i, 'Group discussion'],
     [/\b(?:test|assessment)(?:\s*(?:round)?\s*([12]))?\b/i, 'Test'],
     [/\bPPT\b|pre[ -]?placement talk/i, 'PPT'],
   ] as const;
@@ -34,29 +45,62 @@ function stageIn(text: string): string | undefined {
     if (match) return name === 'Test' && match[1] ? `Test ${match[1]}` : name;
   }
 }
+function audiencePrefix(line: string) {
+  const token = '(?:VIT\\s+)?(?:Bhopal|Vellore|Chennai|AP|Amaravati|Amravati)(?:\\s+campus(?:es)?)?';
+  const match = line.match(new RegExp(`^(?:[-•,]\\s*)?(?:For\\s+)?(${token}(?:\\s*(?:,?\\s*and|&|,)\\s*${token})*)(?:\\s+(?:students|candidates|shortlist(?:ed)?(?:\\s+candidates)?))?(?=\\s*(?:[:;,–()\\-]|$|(?:the|it|in|virtual|will|shall|can|must|should|are|interviews?|tests?|PPT|GD)\\b))`, 'i'));
+  return match ? { prefix: match[0], names: [...match[1].matchAll(/\b(Bhopal|Vellore|Chennai|AP|Amaravati|Amravati)\b/gi)].map(m =>
+    `VIT ${campuses.find(c => c.toLowerCase() === m[1].toLowerCase()) || 'AP'}`) } : undefined;
+}
 
 /** Input is the current circular, with quoted reply history removed by the existing body helper. */
 export function extractRecruitmentVenues(subject: string, body: string): VenueEntry[] {
   const entries: VenueEntry[] = [];
   const subjectStage = stageIn(subject) || (/\bonline\b.*\bscheduled\b/i.test(subject) && /\bassessment\b/i.test(body) ? 'Test' : undefined);
   let sectionStage = subjectStage;
+  let sectionAudiences: string[] = [];
   // Sentence-local extraction prevents a Work Location/office footer from supplying a venue.
   // Gmail plain text wraps prose at ~78 columns; restore continued clauses, not table headings.
-  const unwrapped = body.replace(/\b(in|at|from|the|our|respective|VIT)\s*\r?\n\s*/g, '$1 ')
-    .replace(/([^\n.!?:])\r?\n(?=[a-z])/g, '$1 ');
-  const clauses = unwrapped.replace(/,\s*(?=(?:VIT\s+)?(?:Bhopal|Vellore|Chennai|AP)(?:\s*(?:&|and)\s*(?:VIT\s+)?(?:Bhopal|Vellore|Chennai|AP))?\s+(?:campus\s+)?(?:students|candidates|campus)\s+(?:will|must|should|need|are)\b)/gi, '\n');
+  const unwrapped = body.replace(/[*_]/g, '').replace(/\b(in|at|from|the|our|respective|VIT)\s*\r?\n\s*/g, '$1 ')
+    .replace(/([^\n.!?:])\r?\n[ \t]*(?=[a-z])/g, '$1 ')
+    .replace(/\b(Bhopal|AP)\s*\r?\n\s*,\s*(AP|Bhopal)\b/gi, '$1, $2');
+  const clauses = unwrapped.replace(/,\s*(?=(?:VIT\s+)?(?:Bhopal|Vellore|Chennai|AP)(?:\s*(?:&|and)\s*(?:VIT\s+)?(?:Bhopal|Vellore|Chennai|AP))?\s+(?:campus\s+)?(?:students|candidates|campus)\s+(?:will|must|should|need|are)\b)/gi, '\n')
+    .replace(/\s*\/\s*(?=(?:For\s+)?(?:VIT\s+)?(?:Bhopal|AP)\b)/gi, '\n')
+    .replace(/\(\s*(?=(?:VIT\s+)?(?:Bhopal|AP)\b)/gi, '\n')
+    .replace(/\)\s*&\s*(?=(?:VIT\s+)?(?:Bhopal|AP)\b)/gi, ')\n')
+    .replace(/\s+and\s+(?=students\s+from\s+(?:VIT\s+)?(?:Vellore|AP|Chennai)\b)/gi, '\n');
   const lines = `${subject}\n${clauses}`.split(/\r?\n|;\s*|(?<=[.!?])\s+(?=[A-Z*])/).map(s => s.replace(/[*_]/g, '').trim()).filter(Boolean);
   for (let index = 0; index < lines.length; index++) {
-    let line = lines[index];
+    let line = lines[index].replace(/\bVIT\s*[-–]\s*/gi, 'VIT ');
+    if (/^Note\s*:\s*(?:VIT\s+)?(?:Bhopal|AP)\b/i.test(line)) line = line.replace(/^Note\s*:\s*/i, '');
     if (/^(?:regards|warm regards|best regards)\b/i.test(line)) break;
     if (/^(?:job|work)\s*location\s*:/i.test(line)) continue;
     if (/\b(?:mock|practice|training|guidance)\b/i.test(line)) continue;
     if (/\b(?:suspended|blacklisted|disqualified)\b/i.test(line)) continue;
     if (/\bplaced students\b|\b(?:volunteer|to help|help with|assist with)\b/i.test(line)) continue;
-    if (line.length < 90 && /^(?:interview process|test details|assessment details|PPT details)/i.test(line)) sectionStage = stageIn(line);
+    // Compact campus venue lists can omit verbs entirely (American Express).
+    const localCampusList = line.match(/((?:(?:VIT\s+)?(?:Bhopal|Vellore|Chennai|AP)\s*[,/&]?\s*)+)\brespective\s+(?:campus\s+)?(?:CDC\s+)?labs?\b/i);
+    if (localCampusList) {
+      const stage=stageIn(line) || subjectStage || stageIn(body) || 'Recruitment';
+      for(const match of localCampusList[1].matchAll(/\b(Bhopal|Vellore|Chennai|AP)\b/gi)) entries.push({stage,kind:'respective',name:'Respective campus',audience:`VIT ${campuses.find(c=>c.toLowerCase()===match[1].toLowerCase())}`,quote:line.slice(0,220)});
+      const hostRoom=line.match(/\bVellore\s+students\s+(PRP\s*\d+|SJT\s*\d+)/i);
+      if(hostRoom) entries.push({stage,kind:'place',name:hostRoom[1],audience:'VIT Vellore',quote:line.slice(0,220)});
+      continue;
+    }
+    if (line.length < 90 && /^(?:interview process|(?:(?:physical|technical|management|HR)\s+)?interviews?\b|test details|assessment details|PPT details)/i.test(line)) sectionStage = stageIn(line);
     // A labeled table cell may put its value on the next line.
     if (/^(?:(?:test|interview|PPT|assessment)\s+)?venue\s*[:\-]?$/i.test(line)) line += ` ${lines[index + 1] || ''}`;
     const stage = stageIn(line) || sectionStage || 'Recruitment';
+    const audienceList = audiencePrefix(line);
+    if (audienceList && /^\s*:/.test(line.slice(audienceList.prefix.length))) sectionAudiences = audienceList.names;
+    if (audienceList && /^[:\s]*$/.test(line.slice(audienceList.prefix.length))) {
+      sectionAudiences = audienceList.names;
+      continue;
+    }
+    if (/^(?:Important\s+)?Note\s*:|^Important\s+Instruction\b|^All\s+(?:the\s+)?students\b/i.test(line)) sectionAudiences = [];
+    const audienceMatch = line.match(/\b(?:students|candidates)\s+(?:of|from)\s+(VIT\s+(?:Bhopal|Vellore|Chennai|AP))\b/i);
+    const audiences = audienceList?.names || (audienceMatch ? [campusIn(audienceMatch[1])!] : sectionAudiences);
+    const audience = audiences[0];
+    const audienceRemote = audiences.length > 0 && /\b(?:virtual(?:ly)?|remote(?:ly)?)\b/i.test(line);
     // Campus venue tables are attendance evidence when the circular names a round.
     const campusCell = sectionStage && line.match(/^(?:VIT\s+)?(Bhopal|Vellore|Chennai|AP)\s+campus\s*[:–-]\s*(.+)$/i);
     if (campusCell && /\b(?:PRP|SJT|CDC|AB\d|L\d{3,4})\b/i.test(campusCell[2])) {
@@ -64,26 +108,24 @@ export function extractRecruitmentVenues(subject: string, body: string): VenueEn
       continue;
     }
     const reportingRoom = /\breport\s+(?:to|at)\s+(?:the\s+)?(?:LC|PRP|SJT|CDC)\b/i.test(line);
-    const recruitment = stage !== 'Recruitment' || /\b(?:recruitment|placement drive|selection process)\b/i.test(line) || reportingRoom;
-    const attendance = /\b(?:held|conducted|scheduled|attend|report|appear|take place|will have|will be having)\b/i.test(line);
+    const recruitment = stage !== 'Recruitment' || /\b(?:recruitment|placement drive|selection process|(?:the|this)\s+drive|drive\s+(?:will|shall))\b/i.test(line) || reportingRoom || audienceRemote;
+    const attendance = /\b(?:held|conducted|scheduled|attend|report|appear|travel|take|will have|will be having)\b|\b(?:will|shall)\s+be\b|\b(?:is|are)\s+(?:virtual|remote)\b/i.test(line);
     const venueLabel = /(?:^|\b)(?:(?:test|interview|PPT|assessment)\s+)?venue\s*[:\-@]/i.test(line);
-    const datedVenue = /^\s*(?:online\s+)?(?:test|assessment|interviews?|PPT)\s*:\s*[^\n@]{0,60}@/i.test(line);
-    if (!recruitment || (!attendance && !venueLabel && !datedVenue && !/\b(?:test|assessment).{0,25}(?:at|from)\s+(?:own|home)\s+location/i.test(line))) continue;
+    const datedVenue = /^\s*(?:(?:online|physical)\s+)?(?:test|assessment|interviews?|PPT)(?:\s*&\s*Online\s+Test|\s+Date)?\s*:\s*[^\n@]{0,90}@/i.test(line);
+    const tableVenue = /^(?:Online\s+)?(?:Test|Assessment|PPT)\b.{0,150}\bAt\s+(?:the\s+)?respective\s+campus(?:es)?\b/i.test(line);
+    if (!recruitment || (!attendance && !audienceRemote && !venueLabel && !datedVenue && !tableVenue && !/\b(?:test|assessment).{0,25}(?:at|from)\s+(?:own|home)\s+location/i.test(line))) continue;
     if (/\b(?:not|no longer|cancelled|canceled)\b|\b(?:may|might|could)\s+(?:be|take)\b/i.test(line)) continue;
     // Registration instructions are not attendance evidence, even if the subject mentions a test.
     if (/\b(?:registration|register|deadline|job location|work location)\b/i.test(line) && !stageIn(line)) continue;
-    const audienceMatch = line.match(/\b(VIT\s+(?:Bhopal|Vellore|Chennai|AP))\s+(?:students|candidates)\b|\b(?:students|candidates)\s+(?:of|from)\s+(VIT\s+(?:Bhopal|Vellore|Chennai|AP))\b/i);
-    const audienceList = line.match(/^(?:For\s+)?((?:VIT\s+)?(?:Bhopal|Vellore|Chennai|AP)(?:\s*(?:&|and)\s*(?:VIT\s+)?(?:Bhopal|Vellore|Chennai|AP))*)\s+(?:campus\s+)?(?:students|candidates|shortlist|campus)\b/i);
-    const audiences = audienceList ? [...audienceList[1].matchAll(/\b(Bhopal|Vellore|Chennai|AP)\b/gi)].map(m=>`VIT ${campuses.find(c=>c.toLowerCase()===m[1].toLowerCase())}`) : [];
-    const audience = audiences[0] || (audienceMatch ? campusIn(audienceMatch[1] || audienceMatch[2]) : undefined);
     // Compound campus exceptions without a clear audience are not a universal instruction.
     if (/\bothers\b|\bexcept\b/i.test(line)) continue;
     if (!audience && /\bphysical\b.*\bvirtual\b|\bvirtual\b.*\bphysical\b/i.test(line)) continue;
     if (/\bother campus\b.*\bvirtual(?:ly)?\b/i.test(line) && !audience) continue;
     const base = { stage, quote: line.slice(0, 220), ...(audience ? { audience } : {}) };
-    const venueText = line.match(/\bvenue\s*[:\-@]\s*(.+)/i)?.[1]
+    const venueText = line.match(/^(?:(?:test|interview|PPT|assessment)\s+)?venue\s*[:\-@]\s*(.+)/i)?.[1]
       || [...line.matchAll(/@\s*([^@]+)/g)].at(-1)?.[1]
-      || line.match(/\b(?:held|conducted|scheduled|attend|report|appear|take place|having)\b.{0,100}?\b(?:at|in|from|to)\s+(?!\d)(.+)/i)?.[1];
+      || (tableVenue ? line.match(/\bAt\s+((?:the\s+)?respective\s+campus(?:es)?\b.*)/i)?.[1] : undefined)
+      || line.match(/\b(?:held|conducted|scheduled|attend|report|appear|travel|take(?: place)?|having)\b.{0,100}?\b(?:at|in|from|to)\s+(?!\d)(.+)/i)?.[1];
     // Only the attendance clause supplies a campus, never an audience or nearby job city.
     const campus = venueText ? campusIn(venueText) : undefined;
     const office = venueText?.match(/^(?:person\s+at\s+)?(?:the\s+)?([A-Za-z][A-Za-z0-9 &.-]{0,65}?)\s+office\b/i);
@@ -92,28 +134,56 @@ export function extractRecruitmentVenues(subject: string, body: string): VenueEn
     else if (venueText && /\brespective\s+(?:campus|campuses|college)\b/i.test(venueText)) entry = { ...base, kind: 'respective', name: 'Respective campus' };
     else if (venueText && /\brespective\s+(?:campus\s+)?(?:CDC\s*(?:offices?|venues?|labs?)?|labs?)\b/i.test(venueText)) entry = { ...base, kind: 'respective', name: 'Respective campus' };
     else if (venueText && /^(?:the\s+)?campus(?:\s+labs?)?\b/i.test(venueText)) entry = { ...base, kind: 'respective', name: 'Respective campus' };
-    else if (campus) entry = { ...base, kind: 'campus', name: campus };
+    else if (audienceRemote && /\b(?:only\s+(?:in|at)|from)\s+(?:the\s+)?CDC\s+office\b/i.test(line) && !campus) entry = { ...base, kind: 'respective', name: 'Respective campus' };
+    else if (campus) {
+      // Keep named rooms in the details while resolving their campus in the badge.
+      entry = /\b(?:SJT|PRP)\s*[-–]?\s*\d|\bPearl\s+Research\s+Park\b/i.test(venueText || '')
+        ? { ...base, kind: 'place', name: venueText!.replace(/[.,]$/, '').slice(0, 90) }
+        : { ...base, kind: 'campus', name: campus };
+    }
     else if (office && !/\bCDC\b/i.test(office[1])) {
       const city = office[1].match(/\b(Chennai|Bangalore|Bengaluru|Hyderabad|Mumbai|Pune|Delhi|Gurugram|Gurgaon|Noida|Kolkata|Bhopal|Vellore|Amaravati)\b/i)?.[1]
         || venueText!.slice((office.index || 0) + office[0].length).match(/^\s*[,–-]?\s*(?:in|at)?\s*(Chennai|Bangalore|Bengaluru|Hyderabad|Mumbai|Pune|Delhi|Gurugram|Gurgaon|Noida|Kolkata)\b/i)?.[1];
       entry = { ...base, kind: 'office', name: `${office[1].trim()} office`, ...(city ? { city: city[0].toUpperCase() + city.slice(1).toLowerCase() } : {}) };
+    } else if (venueText && /^(?:the\s+)?LC\s*\d*\b/i.test(venueText)) {
+      entry = { ...base, kind: 'respective', name: venueText.replace(/\s+(?:with|only|for)\b.*$/i, '').slice(0,90) };
+    } else if (venueText && /^(?:the\s+)?CDC\s+office\b/i.test(venueText)) {
+      entry = { ...base, kind: 'campus', name: 'VIT Vellore' };
     } else if (venueText && /\b(?:auditorium|gallery|hall|hotel|centre|center|PRP|SJT|LC|CDC|Channa)\s*\d*\b/i.test(venueText)) {
       entry = { ...base, kind: 'place', name: venueText.replace(/^[-\s]+/, '').replace(/\s*[-–]\s*(?:Report immediately|Batch\b|.*Shortlist\b).*$/i, '').replace(/\s+(?:only|on time|with your|for the interviews|at\s+\d|by\s+\d|if you)\b.*$/i,'').replace(/[.,]$/, '').slice(0, 90) };
     }
     // "Online test" describes the platform, not permission to attend remotely.
     // Explicit home/virtual attendance is required, and physical venues take priority.
-    else if (/\b(?:virtual|remote|own locations?|home location|(?:held|conducted|attend)\s+online)\b/i.test(line)
-      && !/\b(?:labs?|LC|PRP|SJT|CDC|Channa|in person|in-person|office|auditorium|gallery|campus)\b/i.test(audienceList ? line.slice(audienceList[0].length) : line)) entry = { ...base, kind: 'online', name: 'Online' };
+    else if (/\b(?:virtual(?:ly)?|remote(?:ly)?|own locations?|home location|(?:held|conducted|attend)\s+online)\b/i.test(line)
+      && !/\b(?:labs?|LC|PRP|SJT|CDC|Channa|in person|in-person|office|auditorium|gallery|campus)\b/i.test(audienceList ? line.slice(audienceList.prefix.length) : line)) entry = { ...base, kind: 'online', name: 'Online' };
     if (entry) entries.push(...(audiences.length>1 ? audiences.map(a=>({...entry!,audience:a})) : [entry]));
+  }
+  // A campus team's separate venue arrangements mean attendance at that campus,
+  // even when its room number has not been announced yet.
+  const localArrangements = lines.find(line=>/\bother\s+campus(?:es)?\b[^\n]{0,180}\b(?:venues?|campus team|CDC office)\b[^\n]{0,100}\b(?:inform|update|share|communicat|announc)/i.test(line)
+    || /\bother\s+campus(?:es)?\b[^\n]{0,100}\bvenues?\b[^\n]{0,100}\b(?:informed|shared|updated)\b[^\n]{0,80}\b(?:campus|respective|team)\b/i.test(line)
+    || /\bvenues?\s+for\s+(?:the\s+)?other\s+campus(?:es)?\b[^\n]{0,100}\b(?:informed|shared|updated)\b[^\n]{0,80}\b(?:campus|campuses|respective|team)\b/i.test(line)
+    || /\bother\s+campus(?:es)?\b[^\n]{0,80}\b(?:report|attend)\b[^\n]{0,60}\brespective\s+campus\b/i.test(line)
+    || /\bother\s+campus(?:es)?\b[^\n]{0,60}\bcheck\s+with\s+your\s+campus\b[^\n]{0,60}\bvenue\b/i.test(line));
+  if (localArrangements) {
+    const host = entries.map(venueCampus).find(Boolean);
+    const stages = new Set(entries.filter(e=>venueCampus(e)===host).map(e=>e.stage));
+    if (host) for (const campus of campuses.map(c=>`VIT ${c}`)) {
+      if (campus !== host) for (const stage of stages) {
+        if (!entries.some(e=>e.audience===campus && e.stage===stage)) entries.push({stage,kind:'respective',name:'Respective campus',audience:campus,quote:localArrangements.slice(0,220)});
+      }
+    }
   }
   // Conflicting instructions for one stage/audience stay unknown rather than guessing.
   const grouped = new Map<string, VenueEntry[]>();
-  const campusRouting = /\bother campus\b|\b(?:Bhopal|AP)\b[^\n]{0,100}\bvirtual\b/i.test(clauses);
+  const campusRouting = entries.some(entry => entry.kind==='respective' || entry.audience && entry.kind==='online')
+    || Boolean(localArrangements) || /\b(?:Bhopal|AP)\b[^\n]{0,100}\bvirtual(?:ly)?\b/i.test(clauses);
   for (const original of entries) {
     // A circular that explicitly routes other campuses separately does not make
     // the headline campus venue a universal attendance instruction.
-    const entry = campusRouting && !original.audience && original.kind === 'campus'
-      ? { ...original, audience: original.name } : original;
+    const physicalCampus = venueCampus(original);
+    const entry = campusRouting && !original.audience && physicalCampus
+      ? { ...original, audience: physicalCampus } : original;
     const key = `${entry.stage}:${entry.audience || ''}`;
     grouped.set(key, [...(grouped.get(key) || []), entry]);
   }
@@ -127,7 +197,7 @@ export function extractRecruitmentVenues(subject: string, body: string): VenueEn
     if (respective && group.every(e=>['respective','place','campus'].includes(e.kind))) return respective;
     const specific = group.filter(e=>!(e.kind==='place' && /^(?:the\s+)?CDC\s+labs?$/i.test(e.name)));
     if (specific.length && specific.length < group.length) group = specific;
-    const unique = new Set(group.map(e => `${e.kind}:${e.name}:${e.city || ''}`));
+    const unique = new Set(group.map(e => venueCampus(e) || `${e.kind}:${e.name}:${e.city || ''}`));
     return unique.size === 1 ? group[0] : { ...group[0], kind: 'unknown' as const, name: '' };
   }).slice(0, 12);
 }
@@ -135,24 +205,44 @@ export function extractRecruitmentVenues(subject: string, body: string): VenueEn
 export function resolveDriveVenue(value: unknown, userCampus?: string): DriveVenueDisplay {
   const projection = value as RecruitmentVenues | null;
   if (projection?.version !== 1 || !Array.isArray(projection.entries)) return { label: 'To be announced' };
-  const applicable = projection.entries.filter(e => e && typeof e.stage === 'string' && typeof e.name === 'string' && (!e.audience || e.audience === userCampus));
+  const valid = projection.entries.filter(e => e && typeof e.stage === 'string' && typeof e.name === 'string');
+  const applicable = valid.filter(e => {
+    if (e.audience) return e.audience === userCampus;
+    const campus = venueCampus(e);
+    if (!campus || !userCampus || campus === userCampus) return true;
+    // A bare "report immediately" reminder repeats the host-campus headline;
+    // it does not revoke the earlier circular's campus-specific arrangements.
+    const headlineOnly = !/\b(?:all|every)\s+(?:the\s+)?(?:shortlisted\s+)?(?:students|candidates|campus(?:es)?)\b/i.test(e.quote);
+    if (!headlineOnly) return true;
+    const hostScoped = valid.some(other=>other.stage===e.stage && other.audience===campus && venueCampus(other)===campus);
+    const interviewException = e.stage==='Recruitment' && /next round of (?:the )?selection process/i.test(e.quote)
+      && valid.some(other=>other.stage==='Interviews' && other.audience===userCampus && ['online','respective'].includes(other.kind));
+    return !hostScoped && !interviewException;
+  });
   // A later generic selection round can add a physical venue after an online PPT.
   const scopedStages = new Set(applicable.filter(e=>e.audience===userCampus && e.audience).map(e=>e.stage));
   const entries = applicable.filter(e => e.kind !== 'unknown' && (e.audience || !scopedStages.has(e.stage)));
   const locations = new Map<string, string[]>();
   const attendanceLocations = new Set<string>();
+  const labLocations = new Set<string>();
   for (const entry of entries) {
     // This kind requires explicit remote attendance, not just an online test platform.
     const label = entry.kind === 'online' ? 'Own location' : entry.kind === 'office' ? `Company Office${entry.city ? ` · ${entry.city}` : ''}`
-      : entry.kind === 'campus' || entry.kind === 'place' ? entry.name : entry.kind === 'respective' ? userCampus : undefined;
+      : entry.kind === 'campus' || entry.kind === 'place' ? venueCampus(entry) || entry.name : entry.kind === 'respective' ? userCampus : undefined;
     if (!label) continue;
     if (entry.kind !== 'online') attendanceLocations.add(label);
-    const detail = `${entry.stage}: ${entry.kind === 'respective' || entry.kind === 'online' ? label : entry.name}`;
+    if (entry.kind === 'respective' || /\b(?:LC|L\d{3,4}|labs?|lab complex)\b/i.test(`${entry.name} ${entry.quote}`)) labLocations.add(label);
+    const detail = `${entry.stage}: ${entry.kind === 'respective' && entry.name !== 'Respective campus' ? entry.name : entry.kind === 'respective' || entry.kind === 'online' ? label : entry.name}`;
     locations.set(label, [...(locations.get(label) || []), detail]);
   }
   if (!locations.size) return { label: 'To be announced' };
-  // The badge answers whether campus/office attendance is required. A remote
-  // round must not hide a confirmed travel requirement behind "Multiple locations".
-  const headlineLocations = attendanceLocations.size ? attendanceLocations : new Set(locations.keys());
-  return { label: headlineLocations.size > 1 ? 'Multiple locations' : [...headlineLocations][0], detail: [...new Set([...locations.values()].flat())].join('; ').slice(0, 220) };
+  // Show one actual destination, prioritizing required travel and later rounds.
+  // The details retain every applicable round; never use an aggregate location label.
+  const away = [...attendanceLocations].filter(label => userCampus && label !== userCampus);
+  const candidates = new Set(away.length ? away : attendanceLocations.size ? attendanceLocations : locations.keys());
+  const priority = (details: string[]) => Math.min(...details.map(detail =>
+    /^Interviews:/.test(detail) ? 0 : /^Recruitment:/.test(detail) ? 1 : /^Test/.test(detail) ? 2 : /^Game/.test(detail) ? 3 : 4));
+  const headline = [...candidates].sort((a, b) => priority(locations.get(a)!) - priority(locations.get(b)!) || a.localeCompare(b))[0];
+  return { label: headline === 'VIT Bhopal' && userCampus === 'VIT Bhopal' && labLocations.has(headline) ? 'Bhopal LC' : headline, detail: [...new Set([...locations.values()].flat())].join('; ').slice(0, 220),
+    ...(userCampus ? { requiresTravel: away.length > 0 } : {}) };
 }

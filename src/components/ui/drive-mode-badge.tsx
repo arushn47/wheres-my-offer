@@ -1,7 +1,7 @@
-import { Globe, Building2, MapPin, HelpCircle } from 'lucide-react';
+import { Globe, Building2, Plane, HelpCircle } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
-export function getDriveModeBadgeConfig(driveMode: string) {
+export function getDriveModeBadgeConfig(driveMode: string, requiresTravel = false) {
   const isOnline = driveMode === 'Online' || driveMode === 'Own location';
   const isCampus = driveMode.startsWith('VIT ');
 
@@ -11,6 +11,14 @@ export function getDriveModeBadgeConfig(driveMode: string) {
       textCls: 'text-emerald-300',
       icon: Globe,
       tooltip: `Recruitment venue: ${driveMode}`,
+    };
+  }
+  if (requiresTravel && driveMode !== 'To be announced') {
+    return {
+      cls: 'border-amber-500/30 bg-amber-500/10 text-amber-300',
+      textCls: 'text-amber-300',
+      icon: Plane,
+      tooltip: `Travel required: ${driveMode}`,
     };
   }
   if (isCampus) {
@@ -32,7 +40,7 @@ export function getDriveModeBadgeConfig(driveMode: string) {
   return {
     cls: 'border-cyan-500/30 bg-cyan-500/15 text-cyan-300',
     textCls: 'text-cyan-300',
-    icon: driveMode === 'Multiple locations' ? MapPin : Building2,
+    icon: Building2,
     tooltip: `Recruitment venue: ${driveMode}`,
   };
 }
@@ -40,14 +48,16 @@ export function getDriveModeBadgeConfig(driveMode: string) {
 export function DriveModeBadge({
   driveMode,
   detail,
+  requiresTravel,
   className,
 }: {
   driveMode?: string | null;
   detail?: string;
+  requiresTravel?: boolean;
   className?: string;
 }) {
   if (!driveMode) return null;
-  const config = getDriveModeBadgeConfig(driveMode);
+  const config = getDriveModeBadgeConfig(driveMode, requiresTravel);
   const Icon = config.icon;
 
   return (
@@ -57,7 +67,7 @@ export function DriveModeBadge({
         config.cls,
         className
       )}
-      title={detail || config.tooltip}
+      title={detail ? `${config.tooltip}. ${detail}` : config.tooltip}
     >
       <Icon className="h-3 w-3 shrink-0" />
       <span>{driveMode}</span>

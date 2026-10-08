@@ -715,7 +715,7 @@ export default function CompaniesClient({
                         </span>
                       );
                     })()}
-                    <DriveModeBadge driveMode={driveMode} detail={c.venue?.detail} />
+                    <DriveModeBadge driveMode={driveMode} detail={c.venue?.detail} requiresTravel={c.venue?.requiresTravel} />
                     {(() => {
                       const isManual = Boolean(c.application?.manual_override && c.application?.last_updated);
                       const displayDate = isManual

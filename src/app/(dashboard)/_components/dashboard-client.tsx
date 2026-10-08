@@ -41,6 +41,7 @@ export interface ActiveApplicationItem {
   notes?: string | null;
   driveMode?: string | null;
   driveModeDetail?: string;
+  driveModeRequiresTravel?: boolean;
 }
 
 interface DashboardClientProps {
@@ -558,7 +559,7 @@ export default function DashboardClient({
                       );
                     })()}
                     {/* Travel Mode Badge */}
-                    <DriveModeBadge driveMode={driveMode} detail={c.driveModeDetail} />
+                    <DriveModeBadge driveMode={driveMode} detail={c.driveModeDetail} requiresTravel={c.driveModeRequiresTravel} />
                     <span className="ml-auto font-mono text-[10px] text-zinc-600 shrink-0 transition-colors duration-200 group-hover:text-emerald-400">
                       Open drive details ↗
                     </span>

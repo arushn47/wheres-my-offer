@@ -2,7 +2,9 @@ import { createHash } from 'node:crypto';
 import { extractRecruitmentVenues, resolveDriveVenue } from '../src/lib/drive-venues.ts';
 import { getEvidenceMessageText } from '../src/lib/sync/extraction/body.ts';
 
-export const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+export const digest = value => createHash('sha256').update(JSON.stringify(value, (_key, item) =>
+  item && typeof item === 'object' && !Array.isArray(item)
+    ? Object.fromEntries(Object.keys(item).sort().map(key=>[key,item[key]])) : item)).digest('hex');
 export function driveNumbers(drive) {
   return [...new Set([drive.drive_number, drive.normalized_drive_number,
     drive.normalized_drive_number?.match(/[0-9]+$/)?.[0]].filter(Boolean).map(n=>n.trim().toLowerCase()))];
@@ -40,6 +42,8 @@ export function latestVenueUpdates(previous, updates) {
   }
   return [...groups.values()];
 }
+const projectionDigest = projection => digest({...projection,entries:projection.entries.map(entry=>
+  ({...entry,receivedAt:new Date(entry.receivedAt).toISOString()}))});
 export function buildBatchReview(drives, sources, rejectedSourceIds = new Set()) {
   return drives.map(drive=>{
     const exact = sources.filter(s=>sourceBelongsToDrive(drive,s));
@@ -70,6 +74,6 @@ export function buildBatchReview(drives, sources, rejectedSourceIds = new Set())
     const proposed = mergeProjection(drive.recruitment_venues,updates);
     return {driveId:drive.id,driveNumber:drive.drive_number,name:drive.company_name,sourceCount:exact.length,
       before:resolveDriveVenue(drive.recruitment_venues,'VIT Bhopal'),after:resolveDriveVenue(proposed,'VIT Bhopal'),
-      updates,changed:updates.length>0 && digest(drive.recruitment_venues)!==digest(proposed)};
+      updates,changed:updates.length>0 && projectionDigest(mergeProjection(drive.recruitment_venues,[]))!==projectionDigest(proposed)};
   });
 }

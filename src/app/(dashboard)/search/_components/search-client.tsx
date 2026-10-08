@@ -34,6 +34,7 @@ export interface SearchCompanyItem {
   notes: string | null;
   driveMode: string;
   driveModeDetail?: string;
+  driveModeRequiresTravel?: boolean;
   status: string;
   statusLabel?: string;
   isMultiDrive?: boolean;
@@ -338,7 +339,7 @@ export default function SearchClient({ data }: SearchClientProps) {
                       </span>
                     )}
                     <div className="ml-auto shrink-0">
-                      <DriveModeBadge driveMode={c.driveMode} detail={c.driveModeDetail} />
+                      <DriveModeBadge driveMode={c.driveMode} detail={c.driveModeDetail} requiresTravel={c.driveModeRequiresTravel} />
                     </div>
                   </div>
                 </Link>

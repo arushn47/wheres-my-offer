@@ -61,3 +61,9 @@ test('invalidates a same-source parser result that no longer qualifies without r
   assert.equal(review.after.label,'To be announced');
   assert.equal(review.updates[0].entries[0].kind,'unknown');
 });
+test('unchanged database JSON key ordering and timestamp formatting do not trigger a backfill',()=>{
+  const entry={receivedAt:'2026-10-07T12:23:05+00:00',sourceId:'anchor',name:'Chargebee Chennai office',kind:'office',stage:'Interviews',city:'Chennai',quote:source.body_text};
+  const review=buildBatchReview([{...drive,recruitment_venues:{entries:[entry],version:1}}],[source])[0];
+  assert.equal(review.after.label,'Company Office · Chennai');
+  assert.equal(review.changed,false);
+});

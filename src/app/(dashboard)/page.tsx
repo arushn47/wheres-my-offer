@@ -364,6 +364,7 @@ export default async function DashboardPage() {
       notes: a.notes,
       driveMode: venue.label,
       driveModeDetail: venue.detail,
+      driveModeRequiresTravel: venue.requiresTravel,
       lastUpdated: a.manual_override ? a.last_updated : (a.status_source_email_at || a.applied_at || a.last_updated),
     };
   });
