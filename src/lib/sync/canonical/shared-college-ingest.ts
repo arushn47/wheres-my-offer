@@ -6,7 +6,8 @@ import { createGmailClient, fetchMessageDetail, type GmailAccount, type ParsedAt
 import { CANONICAL_IDENTITY_VERSION, CANONICAL_PARSER_VERSION, canonicalBodyFromEmail, computeCanonicalContentKey, computeCanonicalMetadataKey, isApprovedCanonicalSender, isGatedCollegeSender, normalizeRfcMessageId } from '@/lib/sync/canonical/canonical-email';
 import { scoreCollegeMessageRelevance } from '@/lib/sync/classification/college-relevance';
 import { classifyEmail, isFuzzyCompanyMatch } from '@/lib/sync/classification/classifier';
-import { extractAllDriveNumbers, extractEvents, extractJobDetails } from '@/lib/sync/extraction/events';
+import { cleanRoleTitle, extractAllDriveNumbers, extractEvents, extractJobDetails } from '@/lib/sync/extraction/events';
+import { cleanLocationString } from '@/lib/sync/extraction/locations';
 import { processEmailForEventsAndStatus } from '@/lib/sync/recruitment/status-engine';
 import { hasSharedDriveFanOutEvidence, isShortlistMatchEvidence } from '@/lib/sync/recruitment/participation-evidence';
 import { normalizeDriveNumber } from '@/lib/drive-number';
@@ -17,8 +18,8 @@ import {
   TRANSIENT_ATTACHMENT_ERROR,
 } from '@/lib/sync/attachments/attachment-status';
 import { isPdfAttachment, mergePdfJobDetails, parsePdfAttachment } from '@/lib/sync/extraction/pdf-parser';
-import { getDriveRegistrationDateBoundary, isEmailAllowedByDriveBoundary } from '@/lib/sync/identity/drive-temporal-boundary';
 import { persistSharedCircularVenues } from './shared-college-venues';
+import { isRegistrationAnnouncement, isRegistrationPair, selectRegistrationDrive } from '../identity/registration-pair';
 
 interface SharedDriveRow {
   id: string;
@@ -52,9 +53,9 @@ function decodeBase64Url(data: string): Buffer {
   return Buffer.from(data.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
 }
 
-async function findDriveForCircular(
+async function findDriveCandidateForCircular(
   supabase: ReturnType<typeof createAdminClient>,
-  params: { text: string; parsedCompanyName: string | null; parsedDriveNumbers: string[] }
+  params: { text: string; parsedCompanyName: string | null; parsedDriveNumbers: string[]; subject?: string; classification?: string; receivedAt?: string }
 ) {
   for (const rawNumber of params.parsedDriveNumbers) {
     const number = rawNumber.toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -88,6 +89,15 @@ async function findDriveForCircular(
     if (aliases.some((a) => a.toLowerCase().trim() === name || isFuzzyCompanyMatch(a, params.parsedCompanyName!))) return true;
     return false;
   });
+  if (byCompany.length && isRegistrationAnnouncement(params)) {
+    const { data: personal, error } = await supabase.from('personal_emails')
+      .select('id,placement_drive_id,sender,subject,classification,received_at').in('placement_drive_id', byCompany.map(drive => drive.id));
+    if (error) throw error;
+    return selectRegistrationDrive(byCompany, personal || [], {
+      id: '', subject: params.subject, classification: params.classification,
+      parsed_drive_numbers: params.parsedDriveNumbers, received_at: params.receivedAt,
+    }) || null;
+  }
   if (byCompany.length === 1) return byCompany[0];
 
   if (byCompany.length > 1) {
@@ -128,6 +138,19 @@ async function findDriveForCircular(
   return null;
 }
 
+async function findDriveForCircular(
+  supabase: ReturnType<typeof createAdminClient>,
+  params: Parameters<typeof findDriveCandidateForCircular>[1] & { subject: string; classification: string; receivedAt: string },
+) {
+  const drive = await findDriveCandidateForCircular(supabase, params);
+  if (!drive || !isRegistrationAnnouncement(params)) return drive;
+  const { data: personal, error } = await supabase.from('personal_emails')
+    .select('id,placement_drive_id,sender,subject,classification,received_at').eq('placement_drive_id', drive.id);
+  if (error) throw error;
+  const circular = { id: '', ...params, parsed_drive_numbers: params.parsedDriveNumbers, received_at: params.receivedAt };
+  return personal?.some(email => isRegistrationPair(drive, email, circular)) ? drive : null;
+}
+
 async function scanSharedAttachment(
   gmail: gmail_v1.Gmail,
   parsedEmail: Awaited<ReturnType<typeof fetchMessageDetail>>,
@@ -159,7 +182,7 @@ export async function ingestSharedCollegeCircular(params: {
   account: GmailAccount;
   gmailMessageId: string;
   gmail?: gmail_v1.Gmail;
-}): Promise<{ canonicalId: string | null; appliedUsers: number; skippedUsers: number; attachmentErrors: number }> {
+}): Promise<{ canonicalId: string | null; appliedUsers: number; skippedUsers: number; attachmentErrors: number; deferredUsers?: number }> {
   const supabase = createAdminClient();
   const gmail = params.gmail || (await createGmailClient(params.account)).gmail;
   const parsedEmail = await fetchMessageDetail(gmail, params.gmailMessageId);
@@ -193,7 +216,7 @@ export async function ingestSharedCollegeCircular(params: {
   const classification = classifyEmail(parsedEmail);
   const normalizedMessageId = normalizeRfcMessageId(parsedEmail.messageId);
   const contentKey = computeCanonicalContentKey(parsedEmail.senderEmail, parsedEmail.subject, bodyText);
-  const jobDetails = mergePdfJobDetails(extractJobDetails(bodyText), parsedEmail.attachments);
+  let jobDetails = mergePdfJobDetails(extractJobDetails(bodyText), parsedEmail.attachments);
   const events = extractEvents(parsedEmail);
   const payload = {
     content_key: contentKey,
@@ -393,44 +416,36 @@ export async function ingestSharedCollegeCircular(params: {
   )) {
     const pdfMergedJobDetails = mergePdfJobDetails(extractJobDetails(bodyText), parsedEmail.attachments);
     if (JSON.stringify(pdfMergedJobDetails) !== JSON.stringify(jobDetails)) {
-      await supabase
+      const { error } = await supabase
         .from('college_emails')
         .update({ parsed_job_details: pdfMergedJobDetails, updated_at: new Date().toISOString() })
         .eq('id', canonicalId);
+      if (error) throw error;
     }
+    jobDetails = pdfMergedJobDetails;
   }
 
   const drive = await findDriveForCircular(supabase, {
     text: `${parsedEmail.subject}\n${bodyText}`,
     parsedCompanyName: classification.companyName || null,
     parsedDriveNumbers: extractAllDriveNumbers(`${parsedEmail.subject}\n${bodyText}`),
+    subject: parsedEmail.subject,
+    classification: classification.classification,
+    receivedAt: parsedEmail.receivedAt.toISOString(),
   });
   if (!drive) return { canonicalId, appliedUsers: 0, skippedUsers: 0, attachmentErrors };
 
-  // Check the original anchor before existing registration updates can replace it.
-  // This runs once per shared circular, independently of individual user fan-out.
-  const venueCompany = Array.isArray(drive.companies) ? drive.companies[0] : drive.companies;
-  await persistSharedCircularVenues(supabase, drive, {
-    id: canonicalId, numbers: payload.parsed_drive_numbers,
-    classification: payload.classification, companyName: payload.parsed_company_name,
-  }, venueCompany || null, parsedEmail);
-
-  // If this circular is a registration circular within the drive's registration boundary,
-  // link this canonical circular as source_college_email_id and backfill any missing location/role/ctc/stipend
+  // The matched personal announcement authorizes this registration source,
+  // including a college circular received just before midnight the previous day.
   const driveUpdates: Record<string, any> = {};
-  const isRegistration = classification.classification === 'registration' || /registration/i.test(parsedEmail.subject);
+  const isRegistration = isRegistrationAnnouncement({ classification: classification.classification, subject: parsedEmail.subject });
   if (isRegistration) {
-    const boundary = await getDriveRegistrationDateBoundary(supabase, [drive.id]);
-    if (isEmailAllowedByDriveBoundary(parsedEmail.receivedAt, boundary.minAllowedDate)) {
-      if (!drive.source_college_email_id || classification.classification === 'registration') {
-        driveUpdates.source_college_email_id = canonicalId;
-      }
-    }
+    driveUpdates.source_college_email_id = canonicalId;
   }
-  if (jobDetails.location && !drive.location) {
+  if (jobDetails.location && cleanLocationString(drive.location) === 'Not Specified') {
     driveUpdates.location = jobDetails.location;
   }
-  if (jobDetails.role && !drive.role) {
+  if (jobDetails.role && !cleanRoleTitle(drive.role)) {
     driveUpdates.role = jobDetails.role;
   }
   if (jobDetails.ctc && !drive.ctc) {
@@ -440,17 +455,26 @@ export async function ingestSharedCollegeCircular(params: {
     driveUpdates.stipend = jobDetails.stipend;
   }
   if (Object.keys(driveUpdates).length > 0) {
-    await supabase.from('placement_drives').update(driveUpdates).eq('id', drive.id);
+    const { error } = await supabase.from('placement_drives').update(driveUpdates).eq('id', drive.id);
+    if (error) throw error;
   }
+  // Registration assignment above has already required the personal pair.
+  // Persist after linking the anchor so unnumbered circulars pass the exact-source RPC.
+  const venueCompany = Array.isArray(drive.companies) ? drive.companies[0] : drive.companies;
+  await persistSharedCircularVenues(supabase, { ...drive, ...driveUpdates }, {
+    id: canonicalId, numbers: payload.parsed_drive_numbers,
+    classification: payload.classification, companyName: payload.parsed_company_name,
+  }, venueCompany || null, parsedEmail);
 
   const { data: eligibleReceipts, error: receiptError } = await supabase
     .from('personal_emails')
-    .select('user_id')
+    .select('id,user_id,placement_drive_id,sender,subject,classification,received_at')
     .eq('placement_drive_id', drive.id);
   if (receiptError) throw receiptError;
   const userIds = Array.from(new Set((eligibleReceipts || []).map((receipt) => receipt.user_id)));
   let appliedUsers = 0;
   let skippedUsers = 0;
+  let deferredUsers = 0;
   const { data: userMatches } = await supabase
     .from('candidate_matches')
     .select('user_id,match_type,matched_value,matched_round_type')
@@ -490,10 +514,14 @@ export async function ingestSharedCollegeCircular(params: {
       if (!(error instanceof MutationBusyError)) throw error;
       const { error: queueError } = await supabase.from('pending_drive_recalculations').upsert({user_id:args[1],placement_drive_id:drive.id,source_received_at:new Date(parsedEmail.receivedAt).toISOString()}, {onConflict:'user_id,placement_drive_id'});
       if (queueError) throw queueError;
-      skippedUsers++; return false;
+      skippedUsers++; deferredUsers++; return false;
     }
   };
   for (const targetUserId of eligibleUserIds) {
+    if (isRegistration && !(eligibleReceipts || []).some(email => email.user_id === targetUserId && isRegistrationPair(drive, email, {
+      id: canonicalId, subject: parsedEmail.subject, classification: classification.classification,
+      parsed_drive_numbers: payload.parsed_drive_numbers, received_at: parsedEmail.receivedAt.toISOString(),
+    }))) { skippedUsers++; continue; }
     const user = (users || []).find((candidate) => candidate.id === targetUserId);
     if (!user) {
       const { data: shortlistUser } = await supabase.from('users').select('id,neo_id,email').eq('id', targetUserId).maybeSingle();
@@ -518,7 +546,7 @@ export async function ingestSharedCollegeCircular(params: {
     if (await applyToUser(supabase, targetUserId, companyId, parsedEmail, canonicalId, user.neo_id, user.email, drive.id, gmail, 'drive')) appliedUsers++;
   }
 
-  return { canonicalId, appliedUsers, skippedUsers, attachmentErrors };
+  return { canonicalId, appliedUsers, skippedUsers, attachmentErrors, deferredUsers };
 }
 
 /** Apply already-cached shared circulars to this user's evidenced drives. */
@@ -526,7 +554,7 @@ export async function fanOutSharedCollegeArchiveToUser(userId: string): Promise<
   const supabase = createAdminClient();
   const [appsResult, personalResult, matchesResult, drivesResult, companiesResult, userResult] = await Promise.all([
     supabase.from('applications').select('placement_drive_id,manual_override,status').eq('user_id', userId),
-    supabase.from('personal_emails').select('placement_drive_id').eq('user_id', userId).not('placement_drive_id', 'is', null),
+    supabase.from('personal_emails').select('id,placement_drive_id,sender,subject,classification,received_at').eq('user_id', userId).not('placement_drive_id', 'is', null),
     supabase.from('candidate_matches').select('placement_drive_id,match_type,matched_value,matched_round_type').eq('user_id', userId),
     supabase.from('placement_drives').select('id,company_id,drive_number,normalized_drive_number,source_college_email_id,recruitment_venues'),
     supabase.from('companies').select('id,name,aliases'),
@@ -565,6 +593,7 @@ export async function fanOutSharedCollegeArchiveToUser(userId: string): Promise<
     const company = companyMap.get(drive.company_id);
     if (!company) continue;
     for (const circular of circulars) {
+      if (isRegistrationAnnouncement(circular) && !(personalResult.data || []).some(email => isRegistrationPair(drive, email, circular))) continue;
       const direct = drive.source_college_email_id === circular.id;
       const driveNumbers = (circular.parsed_drive_numbers || []).map((number: string) => normalizeDriveNumber(number));
       const normalizedDriveNumber = normalizeDriveNumber(drive.normalized_drive_number || drive.drive_number || '');
@@ -647,6 +676,7 @@ export async function fanOutSharedCollegeArchiveToUser(userId: string): Promise<
     const company = companyMap.get(drive.company_id);
     if (!company) continue;
     for (const circular of circulars) {
+      if (isRegistrationAnnouncement(circular) && !(personalResult.data || []).some(email => isRegistrationPair(drive, email, circular))) continue;
       const direct = drive.source_college_email_id === circular.id;
       const driveNumbers = (circular.parsed_drive_numbers || []).map((number: string) => normalizeDriveNumber(number));
       const normalizedDriveNumber = normalizeDriveNumber(drive.normalized_drive_number || drive.drive_number || '');
@@ -695,15 +725,12 @@ export async function fanOutSharedCollegeArchiveToUser(userId: string): Promise<
           skipped++;
           continue;
         }
-        // A personal announcement can create the drive after its college
-        // circular was ingested. Seed only missing projections from bodies
-        // this existing fan-out already loaded; no additional archive fetch.
-        if (!drive.recruitment_venues?.entries?.length) {
-          await persistSharedCircularVenues(supabase, drive, {
-            id: circular.id, numbers: circular.parsed_drive_numbers || [],
-            classification: circular.classification, companyName: circular.parsed_company_name,
-          }, company, parsedEmail);
-        }
+        // Reuse the already-loaded body for exact venue updates; the merge is
+        // idempotent and preserves newer instructions even during archive replay.
+        await persistSharedCircularVenues(supabase, drive, {
+          id: circular.id, numbers: circular.parsed_drive_numbers || [],
+          classification: circular.classification, companyName: circular.parsed_company_name,
+        }, company, parsedEmail);
         await processEmailForEventsAndStatus(supabase, userId, drive.company_id, parsedEmail, circular.id, user.neo_id, user.email, drive.id, undefined, 'drive');
         applied++;
       } catch (error) {

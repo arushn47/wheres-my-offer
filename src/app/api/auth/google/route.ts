@@ -2,6 +2,7 @@ import { google } from 'googleapis';
 import { NextResponse } from 'next/server';
 import { getOAuthRedirectUri } from '@/lib/auth';
 import { randomBytes } from 'node:crypto';
+import { CodeChallengeMethod } from 'google-auth-library';
 
 /**
  * GET /api/auth/google
@@ -29,6 +30,7 @@ export async function GET(request: Request) {
     'https://www.googleapis.com/auth/gmail.readonly',
     'https://www.googleapis.com/auth/calendar.events.owned',
   ];
+  const { codeVerifier, codeChallenge } = await oauth2Client.generateCodeVerifierAsync();
 
   const authUrl = oauth2Client.generateAuthUrl({
     access_type: 'offline',
@@ -36,9 +38,14 @@ export async function GET(request: Request) {
     prompt: 'consent',
     state,
     include_granted_scopes: true,
+    code_challenge: codeChallenge,
+    code_challenge_method: CodeChallengeMethod.S256,
   });
 
   const response = NextResponse.redirect(authUrl);
+  response.cookies.set('oauth_code_verifier', codeVerifier, {
+    httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'lax', maxAge: 10 * 60, path: '/api/auth/callback',
+  });
   response.cookies.set('oauth_state', state, {
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production',

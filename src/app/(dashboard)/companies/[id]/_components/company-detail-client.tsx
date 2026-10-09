@@ -26,11 +26,12 @@ import {
 } from '@/lib/sync/recruitment/status-display';
 import { getCurrentRoundDecision, usesAutomaticRoundStatus, type RoundStatusDecision } from '@/lib/sync/recruitment/round-status';
 
-import type { DriveVenueDisplay } from '@/lib/drive-venues';
+import type { DriveModeDisplay } from '@/lib/drive-venues';
 import { DriveModeDetails } from '@/components/ui/drive-mode-details';
+import { DriveVenueRounds } from '@/components/ui/drive-venue-rounds';
 
 export interface CompanyDetail {
-  venue?: DriveVenueDisplay;
+  venue?: DriveModeDisplay;
   id: string;
   name: string;
   legalName: string | null;
@@ -423,7 +424,7 @@ export default function CompanyDetailClient({
   const displayLocation = cleanLocationString(company.application?.location);
 
   // Display-only projection for the selected drive; recruitment/status notes remain unchanged.
-  const driveModeDisplay = company.venue?.label || 'To be announced';
+  const driveModeDisplay = company.venue?.label || 'TBA';
 
   // Role display: only show real, meaningful roles. Fallback to Campus Placement Drive if missing/generic.
   const displayRole = cleanRoleTitle(company.application?.role) || 'Campus Placement Drive';
@@ -762,7 +763,7 @@ export default function CompanyDetailClient({
 
           <div data-testid="ctc-drive-mode" className="rounded-xl border border-zinc-800 bg-zinc-900/50 px-3.5 py-3">
             <div className="font-mono text-[9px] uppercase tracking-widest text-zinc-500">Drive Mode</div>
-            <DriveModeDetails label={driveModeDisplay} detail={company.venue?.detail} requiresTravel={company.venue?.requiresTravel} />
+            <DriveModeDetails label={driveModeDisplay} requiresTravel={company.venue?.requiresTravel} />
           </div>
 
           <div data-testid="ctc-location" className="group relative rounded-xl border border-zinc-800 bg-zinc-900/50 px-3.5 py-3 hover:border-zinc-700 transition-colors">
@@ -784,6 +785,8 @@ export default function CompanyDetailClient({
             )}
           </div>
         </div>
+
+        <DriveVenueRounds rounds={company.venue?.rounds || []} />
 
         {/* Eligibility Criteria */}
         {eligibilityList.length > 0 && (

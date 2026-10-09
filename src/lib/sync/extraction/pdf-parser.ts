@@ -1,4 +1,11 @@
-import { extractJobDetails } from '@/lib/sync/extraction/events';
+import { cleanRoleTitle, extractJobDetails } from '@/lib/sync/extraction/events';
+import { cleanLocationString } from './locations';
+
+export interface CachedPdfAttachment {
+  filename?: string | null;
+  parseStatus?: string | null;
+  extractedRows?: unknown;
+}
 
 /**
  * PDF attachment parsing for the shared College archive.
@@ -82,11 +89,7 @@ export async function parsePdfAttachment(bytes: Buffer): Promise<PdfParseResult>
  */
 export function mergePdfJobDetails<T extends object>(
   bodyDetails: T,
-  attachments: Array<{
-    filename?: string | null;
-    parseStatus?: string | null;
-    extractedRows?: unknown;
-  } | undefined> | undefined
+  attachments: Array<CachedPdfAttachment | undefined> | undefined
 ): T {
   if (!attachments?.length) return bodyDetails;
 
@@ -107,6 +110,8 @@ export function mergePdfJobDetails<T extends object>(
   if (!pdfText.trim()) return bodyDetails;
 
   const merged: Record<string, unknown> = { ...(bodyDetails as Record<string, unknown>) };
+  if (typeof merged.role === 'string') merged.role = cleanRoleTitle(merged.role);
+  if (typeof merged.location === 'string' && cleanLocationString(merged.location) === 'Not Specified') merged.location = null;
   const pdfDetails = extractJobDetails(pdfText.slice(0, MAX_PDF_TEXT_CHARS));
   for (const field of ['role', 'ctc', 'stipend', 'location', 'eligibility', 'cgpaRequirement', 'backlogRequirement'] as const) {
     if (!merged[field] && pdfDetails[field]) {

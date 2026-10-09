@@ -1,4 +1,5 @@
 import { google, gmail_v1 } from 'googleapis';
+import { describeError } from '@/lib/error-diagnostics';
 import { decrypt } from '@/lib/crypto/tokens';
 import { createAdminClient } from '@/lib/supabase/admin';
 
@@ -171,7 +172,7 @@ export async function createGmailClient(
     } catch (err) {
       console.error(
         `Failed to refresh token for ${account.email}:`,
-        err
+        describeError(err)
       );
       // Mark account as disconnected
       const supabase = createAdminClient();

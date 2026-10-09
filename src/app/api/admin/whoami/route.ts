@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getSession } from '@/lib/auth';
+import { requireAdmin } from '@/lib/auth/admin';
 
 export const dynamic = 'force-dynamic';
 
@@ -9,12 +9,11 @@ export const dynamic = 'force-dynamic';
  * It returns only the UUID from the already-validated HTTP-only session cookie.
  */
 export async function GET() {
-  const session = await getSession();
-  if (!session?.userId) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  try {
+    const session = await requireAdmin();
+    return NextResponse.json({ userId: session.userId }, { headers: { 'Cache-Control': 'no-store' } });
+  } catch (error) {
+    const status = (error as { status?: number }).status || 403;
+    return NextResponse.json({ error: 'Unauthorized' }, { status });
   }
-
-  return NextResponse.json({ userId: session.userId }, {
-    headers: { 'Cache-Control': 'no-store' },
-  });
 }

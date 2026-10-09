@@ -3,6 +3,9 @@ import { cleanEventTitle, cleanRoleTitle, extractJobDetails, extractEvents } fro
 import { isTrustedPlacementSender } from '../engine';
 
 describe('cleanRoleTitle', () => {
+  it.each(['Refer', 'Refer JD', 'Refer JD’s', 'Designation: Refer JD', 'See JD', 'Check the JD'])('rejects JD pointers before they become role fragments: %s', raw => {
+    expect(cleanRoleTitle(raw)).toBeNull();
+  });
   it('cleans role prefixes like "Designation : " or "Job Role : "', () => {
     expect(cleanRoleTitle('Designation : Intern')).toBe('Intern');
     expect(cleanRoleTitle('Job Role : Associate Software Engineer')).toBe('Associate Software Engineer');
@@ -88,6 +91,9 @@ describe('cleanRoleTitle', () => {
 });
 
 describe('extractJobDetails role extraction', () => {
+  it('leaves a Refer JD designation empty so the UI uses Campus Placement Drive', () => {
+    expect(extractJobDetails('Job location: Pan India\nDesignation: Refer JD').role).toBeNull();
+  });
   it('extracts American Express ETS - Software Engineering without capturing prose', () => {
     const text = `
 Website: https://www.americanexpress.com/en-in/

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/lib/auth';
+import { notificationPreferencesInput } from '@/lib/security/input';
 import {
   getNotificationPreferences,
   updateNotificationPreferences,
@@ -35,8 +36,9 @@ export async function PATCH(req: NextRequest) {
   }
 
   try {
-    const body = await req.json();
-    const updated = await updateNotificationPreferences(session.userId, body);
+    const parsed = notificationPreferencesInput.safeParse(await req.json().catch(() => null));
+    if (!parsed.success) return NextResponse.json({ error: 'Invalid notification preferences' }, { status: 400 });
+    const updated = await updateNotificationPreferences(session.userId, parsed.data);
     return NextResponse.json({ preferences: updated });
   } catch (err) {
     console.error('[API Notification Prefs] Update error:', err);

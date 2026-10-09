@@ -1,13 +1,14 @@
 import type { createAdminClient } from '@/lib/supabase/admin';
+import { optimizedReadEnabled, allowLegacyReadFallback } from '@/lib/supabase/read-policy';
 type Admin=ReturnType<typeof createAdminClient>;
 export interface PageProgress {gmail_account_id:string;page_index:number;message_count:number|null;next_offset:number|null}
 export interface SharedProgress {
  gmail_account_id:string;is_syncing:boolean;phase:string;initial_scan_complete:boolean;next_page_token:string|null;
  pending_message_count:number;pending_offset:number;updated_at:string;lease_expires_at:string|null;last_error:string|null;
 }
-const missingMigration=(error:{code?:string})=>['PGRST202','42883'].includes(error.code||'');
+const missingMigration=allowLegacyReadFallback;
 export async function readPersonalPageProgress(admin:Admin,userId:string,accountIds:string[]):Promise<PageProgress[]|null>{
- if(process.env.COMPACT_SYNC_PROGRESS_ENABLED==='true'){
+ if(optimizedReadEnabled('COMPACT_SYNC_PROGRESS_ENABLED')){
    const {data,error}=await admin.rpc('get_user_sync_page_progress',{p_user_id:userId,p_account_ids:accountIds});
    if(!error)return data as PageProgress[]|null;
    if(!missingMigration(error))throw error;
@@ -19,7 +20,7 @@ export async function readPersonalPageProgress(admin:Admin,userId:string,account
    message_count:Array.isArray(page.message_ids)?page.message_ids.length:null}))||null;
 }
 export async function readSharedProgress(admin:Admin):Promise<SharedProgress|null>{
- if(process.env.COMPACT_SYNC_PROGRESS_ENABLED==='true'){
+ if(optimizedReadEnabled('COMPACT_SYNC_PROGRESS_ENABLED')){
    const {data,error}=await admin.rpc('get_shared_college_progress');
    if(!error)return (data as SharedProgress[]|null)?.[0]||null;
    if(!missingMigration(error))throw error;

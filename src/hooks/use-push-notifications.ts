@@ -41,13 +41,13 @@ export function usePushNotifications() {
         .then(async (registration) => {
           try {
             const subscription = await registration.pushManager.getSubscription();
-            setIsSubscribed(!!subscription);
+            setIsSubscribed(false);
 
             // Sync subscription with backend database only if active
             if (subscription) {
               const subJson = subscription.toJSON();
               if (subJson.endpoint && subJson.keys?.p256dh && subJson.keys?.auth) {
-                fetch('/api/notifications/subscribe', {
+                const response = await fetch('/api/notifications/subscribe', {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
                   body: JSON.stringify({
@@ -56,11 +56,14 @@ export function usePushNotifications() {
                     auth: subJson.keys.auth,
                     userAgent: navigator.userAgent,
                   }),
-                }).catch(console.error);
+                });
+                if (!response.ok) throw new Error('This browser subscription could not be saved. Enable notifications again to retry.');
+                setIsSubscribed(true);
               }
             }
           } catch (err) {
             console.warn('[Push Hook] Failed to inspect push subscription:', err);
+            setError(err instanceof Error ? err.message : 'Unable to verify browser notifications.');
           } finally {
             setIsChecking(false);
           }
@@ -83,6 +86,8 @@ export function usePushNotifications() {
         })
         .catch((err) => {
           console.error('[SW] Service Worker registration failed:', err);
+          setIsChecking(false);
+          setError('Unable to register browser notifications. Reload and try again.');
         });
     }
   }, []);
@@ -141,6 +146,7 @@ export function usePushNotifications() {
           p256dh: subscriptionJson.keys.p256dh,
           auth: subscriptionJson.keys.auth,
           userAgent: navigator.userAgent,
+          enablePush: true,
         }),
       });
 
@@ -184,11 +190,12 @@ export function usePushNotifications() {
 
       if (subscription) {
         // Remove from backend
-        await fetch('/api/notifications/unsubscribe', {
+        const response = await fetch('/api/notifications/unsubscribe', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ endpoint: subscription.endpoint }),
         });
+        if (!response.ok) throw new Error('Failed to remove the subscription on the server');
 
         // Unsubscribe locally in browser
         await subscription.unsubscribe();

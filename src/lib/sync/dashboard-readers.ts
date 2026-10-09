@@ -1,4 +1,5 @@
 import type { createAdminClient } from '@/lib/supabase/admin';
+import { optimizedReadEnabled, allowLegacyReadFallback } from '@/lib/supabase/read-policy';
 import type { RoundStatusDecision } from './recruitment/round-status';
 
 type Admin = ReturnType<typeof createAdminClient>;
@@ -8,11 +9,11 @@ export interface RoundStatusRow {
   verdict: RoundStatusDecision & { evaluations?: Array<{ emailId: string; state: string }> };
 }
 export interface DriveActivity { placement_drive_id: string | null; received_at: string | null }
-const missingMigration = (error: { code?: string }) => ['PGRST202', '42883'].includes(error.code || '');
+const missingMigration = allowLegacyReadFallback;
 
 /** Search has always used a 500-code-unit snippet, never the full email body. */
 export async function readRecentCollegeSearchRows(admin: Admin) {
-  if (process.env.COMPACT_DASHBOARD_READS_ENABLED === 'true') {
+  if (optimizedReadEnabled('COMPACT_DASHBOARD_READS_ENABLED')) {
     const { data, error } = await admin.rpc('get_recent_college_search_rows');
     if (!error) return data || [];
     if (!missingMigration(error)) throw error;
@@ -27,7 +28,7 @@ export async function readRecentCollegeSearchRows(admin: Admin) {
 /** All historical rounds remain available to the existing participation resolver. */
 export async function readRoundStatusRows(admin: Admin, userId: string, driveIds?: string[], includeEvaluations = false): Promise<RoundStatusRow[]> {
   if (driveIds?.length === 0) return [];
-  const compact = process.env.COMPACT_DASHBOARD_READS_ENABLED === 'true';
+  const compact = optimizedReadEnabled('COMPACT_DASHBOARD_READS_ENABLED');
   const rows: RoundStatusRow[] = [];
   for (let from = 0; ; from += 1000) {
     let result;
@@ -57,7 +58,7 @@ async function readLegacyRoundRows(admin: Admin, userId: string, driveIds?: stri
 
 /** No cross-user cache: every request is explicitly scoped to its authenticated user. */
 export async function readDriveActivity(admin: Admin, userId: string): Promise<DriveActivity[]> {
-  if (process.env.COMPACT_DASHBOARD_READS_ENABLED === 'true') {
+  if (optimizedReadEnabled('COMPACT_DASHBOARD_READS_ENABLED')) {
     const rows: DriveActivity[] = [];
     let missing = false;
     for (let from = 0; ; from += 1000) {

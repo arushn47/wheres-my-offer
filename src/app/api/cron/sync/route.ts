@@ -64,7 +64,7 @@ async function executeBackgroundSync(userIds: string[], includeSharedCollege = f
       do {
         sharedResult = await runSharedCollegeSync({ limit: 100, globalDeadline });
         batches++;
-        if (sharedResult.alreadyRunning || sharedResult.failed > 0 || !sharedResult.hasMore) break;
+        if (sharedResult.alreadyRunning || sharedResult.userWorkPending || sharedResult.failed > 0 || !sharedResult.hasMore) break;
       } while (batches < 20 && Date.now() < globalDeadline - 5000);
       console.log('[Cron Sync] Shared College inbox sync:', { batches, ...sharedResult });
     } catch (error) {

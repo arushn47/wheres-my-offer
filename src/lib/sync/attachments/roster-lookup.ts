@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { createAdminClient } from '@/lib/supabase/admin';
+import { optimizedReadEnabled, allowLegacyReadFallback } from '@/lib/supabase/read-policy';
 import type { CachedRosterInput } from './shortlist-verification';
 import { isNonShortlistRoster, isPositiveRosterRow, normalizeIdentityToken } from './roster-policy';
 
@@ -45,11 +46,11 @@ export async function publishRosterLookup(supabase:Admin, source:{kind:'attachme
 
 /** Returns null only when rollout is disabled or the additive migration is absent. */
 export async function loadCandidateRosters(supabase:Admin,emailIds:string[],tokens:string[]):Promise<CandidateRoster[]|null> {
-  if(process.env.ROSTER_LOOKUP_ENABLED!=='true')return null;
+  if(!optimizedReadEnabled('ROSTER_LOOKUP_ENABLED'))return null;
   const result:CandidateRoster[]=[];
   for(let offset=0;offset<emailIds.length;offset+=100){
     const {data,error}=await supabase.rpc('lookup_candidate_rosters',{p_email_ids:emailIds.slice(offset,offset+100),p_token_hashes:[...new Set(tokens.filter(token=>normalizeIdentityToken(token)).map(identityTokenHash))],p_policy:ROSTER_LOOKUP_POLICY_VERSION});
-    if(error){if(['PGRST202','42883'].includes(error.code))return null;throw error;}
+    if(error){if(allowLegacyReadFallback(error))return null;throw error;}
     for(const original of (data || []) as LookupRow[]){
       let row=original;
       let rawRows:CachedRosterInput['extractedRows'];
@@ -77,7 +78,7 @@ export async function loadCandidateRosters(supabase:Admin,emailIds:string[],toke
 
 /** Populate the optional cache while ingestion still has the canonical rows in memory. */
 export async function cacheStoredRoster(supabase:Admin, source:{kind:'attachment'|'sheet';emailId:string;attachmentId?:string;contentHash?:string;filename:string;rows:CachedRosterInput['extractedRows'];parseStatus:string|null}) {
-  if(process.env.ROSTER_LOOKUP_ENABLED!=='true')return;
+  if(!optimizedReadEnabled('ROSTER_LOOKUP_ENABLED'))return;
   try {
     const query=source.kind==='attachment'
       ? supabase.from('college_attachments').select('id,roster_revision').eq('college_email_id',source.emailId).eq('attachment_id',source.attachmentId!)

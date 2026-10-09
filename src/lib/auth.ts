@@ -1,12 +1,7 @@
 import { cookies } from 'next/headers';
-import * as jose from 'jose';
-
-export interface SessionPayload {
-  userId: string;
-  email: string;
-  name: string | null;
-  avatar: string | null;
-}
+import { verifySessionToken } from '@/lib/security/session';
+import type { SessionPayload } from '@/lib/security/session';
+export type { SessionPayload } from '@/lib/security/session';
 
 /**
  * Gets the current user session from the HTTP-only cookie.
@@ -18,19 +13,7 @@ export async function getSession(): Promise<SessionPayload | null> {
 
   if (!token) return null;
 
-  try {
-    const secret = new TextEncoder().encode(process.env.TOKEN_ENCRYPTION_KEY);
-    const { payload } = await jose.jwtVerify(token, secret);
-
-    return {
-      userId: payload.userId as string,
-      email: payload.email as string,
-      name: (payload.name as string) || null,
-      avatar: (payload.avatar as string) || null,
-    };
-  } catch {
-    return null;
-  }
+  return verifySessionToken(token);
 }
 
 /**
@@ -54,14 +37,8 @@ export async function requireSession(): Promise<SessionPayload> {
  */
 export function getBaseUrl(request: Request): string {
   const url = new URL(request.url);
-  const rawHost = request.headers.get('x-forwarded-host') || request.headers.get('host') || url.host;
-  const rawProto = request.headers.get('x-forwarded-proto') || (url.protocol.replace(':', '')) || 'https';
-  
-  // Clean up if forwarded headers contain multiple comma-separated values
-  const host = rawHost.split(',')[0].trim();
-  const proto = rawProto.split(',')[0].trim();
-  
-  return `${proto}://${host}`;
+  if (process.env.NODE_ENV !== 'production' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) return url.origin;
+  return 'https://www.wheresmyoffer.in';
 }
 
 /**

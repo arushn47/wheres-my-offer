@@ -9,6 +9,9 @@ export interface VenueEntry {
 }
 export interface RecruitmentVenues { version: 1; entries: Array<VenueEntry & { sourceId: string; receivedAt: string }> }
 export interface DriveVenueDisplay { label: string; detail?: string; requiresTravel?: boolean }
+export type DriveMode = 'Own Location' | 'Home Campus' | 'Other Campus' | 'External Venue' | 'TBA';
+export interface DriveModeRound { stage: string; mode: DriveMode; venue: string; requiresTravel?: boolean }
+export interface DriveModeDisplay { label: DriveMode; shortVenue?: string; detail?: string; requiresTravel?: boolean; rounds: DriveModeRound[] }
 
 const campuses = ['Bhopal', 'Vellore', 'Chennai', 'AP'] as const;
 export function knownCampus(email?: string | null): string | undefined {
@@ -91,6 +94,14 @@ export function extractRecruitmentVenues(subject: string, body: string): VenueEn
     if (line.length < 90 && /^(?:interview process|(?:(?:physical|technical|management|HR)\s+)?interviews?\b|test details|assessment details|PPT details)/i.test(line)) sectionStage = stageIn(line);
     // A labeled table cell may put its value on the next line.
     if (/^(?:(?:test|interview|PPT|assessment)\s+)?venue\s*[:\-]?$/i.test(line)) line += ` ${lines[index + 1] || ''}`;
+    // Registration tables announce the initial drive mode without a dated round.
+    // A virtual visit is explicit Online evidence even when its date is still unknown.
+    const visitCell = line.match(/^Date\s+of\s+Visit\s*:?\s*(.*)$/i);
+    const visitMode = visitCell && (visitCell[1] || lines[index + 1] || '').trim();
+    if (visitMode && /^(?:virtual|online)(?:\s+mode)?[.!]?$/i.test(visitMode)) {
+      entries.push({ stage: 'Recruitment', kind: 'online', name: 'Online', quote: `Date of Visit: ${visitMode}` });
+      continue;
+    }
     const stage = stageIn(line) || sectionStage || 'Recruitment';
     const audienceList = audiencePrefix(line);
     if (audienceList && /^\s*:/.test(line.slice(audienceList.prefix.length))) sectionAudiences = audienceList.names;
@@ -110,12 +121,13 @@ export function extractRecruitmentVenues(subject: string, body: string): VenueEn
       continue;
     }
     const reportingRoom = /\breport\s+(?:to|at)\s+(?:the\s+)?(?:LC|PRP|SJT|CDC)\b/i.test(line);
-    const recruitment = stage !== 'Recruitment' || /\b(?:recruitment|placement drive|selection process|(?:the|this)\s+drive|drive\s+(?:will|shall))\b/i.test(line) || reportingRoom || audienceRemote;
+    const physicalProcessVenue = /\bphysical\s+(?:selection\s+)?process\b.{0,40}\bat\s+VIT\s+(?:Bhopal|Vellore|Chennai|AP)\b/i.test(line);
+    const recruitment = stage !== 'Recruitment' || physicalProcessVenue || /\b(?:recruitment|placement drive|selection process|(?:the|this)\s+drive|drive\s+(?:will|shall))\b/i.test(line) || reportingRoom || audienceRemote;
     const attendance = /\b(?:held|conducted|scheduled|attend|report|appear|travel|take|will have|will be having)\b|\b(?:will|shall)\s+be\b|\b(?:is|are)\s+(?:virtual|remote)\b/i.test(line);
     const venueLabel = /(?:^|\b)(?:(?:test|interview|PPT|assessment)\s+)?venue\s*[:\-@]/i.test(line);
     const datedVenue = /^\s*(?:(?:online|physical)\s+)?(?:test|assessment|interviews?|PPT)(?:\s*(?:&|and|\+)\s*(?:(?:online|physical)\s+)?(?:test|assessment|interviews?|PPT))*(?:\s+Date)?\s*:\s*[^\n@]{0,90}@/i.test(line);
     const tableVenue = /^(?:Online\s+)?(?:Test|Assessment|PPT)\b.{0,150}\bAt\s+(?:the\s+)?respective\s+campus(?:es)?\b/i.test(line);
-    if (!recruitment || (!attendance && !audienceRemote && !venueLabel && !datedVenue && !tableVenue && !/\b(?:test|assessment).{0,25}(?:at|from)\s+(?:own|home)\s+location/i.test(line))) continue;
+    if (!recruitment || (!attendance && !physicalProcessVenue && !audienceRemote && !venueLabel && !datedVenue && !tableVenue && !/\b(?:test|assessment).{0,25}(?:at|from)\s+(?:own|home)\s+location/i.test(line))) continue;
     if (/\b(?:not|no longer|cancelled|canceled)\b|\b(?:may|might|could)\s+(?:be|take)\b/i.test(line)) continue;
     // Registration instructions are not attendance evidence, even if the subject mentions a test.
     if (/\b(?:registration|register|deadline|job location|work location)\b/i.test(line) && !stageIn(line)) continue;
@@ -127,6 +139,7 @@ export function extractRecruitmentVenues(subject: string, body: string): VenueEn
     const venueText = line.match(/^(?:(?:test|interview|PPT|assessment)\s+)?venue\s*[:\-@]\s*(.+)/i)?.[1]
       || [...line.matchAll(/@\s*([^@]+)/g)].at(-1)?.[1]
       || (tableVenue ? line.match(/\bAt\s+((?:the\s+)?respective\s+campus(?:es)?\b.*)/i)?.[1] : undefined)
+      || (physicalProcessVenue ? line.match(/\bat\s+(VIT\s+(?:Bhopal|Vellore|Chennai|AP)\b.*)/i)?.[1] : undefined)
       || line.match(/\b(?:held|conducted|scheduled|attend|report|appear|travel|take(?: place)?|having)\b.{0,100}?\b(?:at|in|from|to)\s+(?!\d)(.+)/i)?.[1];
     // Only the attendance clause supplies a campus, never an audience or nearby job city.
     const campus = venueText ? campusIn(venueText) : undefined;
@@ -156,7 +169,7 @@ export function extractRecruitmentVenues(subject: string, body: string): VenueEn
     }
     // "Online test" describes the platform, not permission to attend remotely.
     // Explicit home/virtual attendance is required, and physical venues take priority.
-    else if (/\b(?:virtual(?:ly)?|remote(?:ly)?|own locations?|home location|(?:held|conducted|attend)\s+online)\b/i.test(line)
+    else if (/\b(?:virtual(?:ly)?|remote(?:ly)?|own locations?|home location|from\s+home|(?:held|conducted|attend)\s+online)\b/i.test(line)
       && !/\b(?:labs?|LC|PRP|SJT|CDC|Channa|in person|in-person|office|auditorium|gallery|campus)\b/i.test(audienceList ? line.slice(audienceList.prefix.length) : line)) entry = { ...base, kind: 'online', name: 'Online' };
     if (entry) {
       const roundLabel = datedVenue ? line.slice(0,line.indexOf(':')) : '';
@@ -211,9 +224,9 @@ export function extractRecruitmentVenues(subject: string, body: string): VenueEn
   }).slice(0, 12);
 }
 
-export function resolveDriveVenue(value: unknown, userCampus?: string): DriveVenueDisplay {
+function applicableVenueEntries(value: unknown, userCampus?: string): VenueEntry[] {
   const projection = value as RecruitmentVenues | null;
-  if (projection?.version !== 1 || !Array.isArray(projection.entries)) return { label: 'To be announced' };
+  if (projection?.version !== 1 || !Array.isArray(projection.entries)) return [];
   const valid = projection.entries.filter(e => e && typeof e.stage === 'string' && typeof e.name === 'string');
   const applicable = valid.filter(e => {
     if (e.audience) return e.audience === userCampus;
@@ -230,13 +243,18 @@ export function resolveDriveVenue(value: unknown, userCampus?: string): DriveVen
   });
   // A later generic selection round can add a physical venue after an online PPT.
   const scopedStages = new Set(applicable.filter(e=>e.audience===userCampus && e.audience).map(e=>e.stage));
-  const entries = applicable.filter(e => e.kind !== 'unknown' && (e.audience || !scopedStages.has(e.stage)));
+  return applicable.filter(e => e.audience || !scopedStages.has(e.stage));
+}
+
+export function resolveDriveVenue(value: unknown, userCampus?: string): DriveVenueDisplay {
+  const entries = applicableVenueEntries(value, userCampus).filter(e => e.kind !== 'unknown');
   const locations = new Map<string, string[]>();
   const attendanceLocations = new Set<string>();
   const labLocations = new Set<string>();
   for (const entry of entries) {
     // This kind requires explicit remote attendance, not just an online test platform.
-    const label = entry.kind === 'online' ? 'Own location' : entry.kind === 'office' ? `Company Office${entry.city ? ` · ${entry.city}` : ''}`
+    // A generic virtual visit establishes the mode; it does not specify an own-location round.
+    const label = entry.kind === 'online' ? /^Date\s+of\s+Visit\s*:/i.test(entry.quote) ? 'Online' : 'Own location' : entry.kind === 'office' ? `Company Office${entry.city ? ` · ${entry.city}` : ''}`
       : entry.kind === 'campus' || entry.kind === 'place' ? venueCampus(entry) || entry.name : entry.kind === 'respective' ? userCampus : undefined;
     if (!label) continue;
     if (entry.kind !== 'online') attendanceLocations.add(label);
@@ -254,4 +272,49 @@ export function resolveDriveVenue(value: unknown, userCampus?: string): DriveVen
   const headline = [...candidates].sort((a, b) => priority(locations.get(a)!) - priority(locations.get(b)!) || a.localeCompare(b))[0];
   return { label: headline === 'VIT Bhopal' && userCampus === 'VIT Bhopal' && labLocations.has(headline) ? 'Bhopal LC' : headline, detail: [...new Set([...locations.values()].flat())].join('; ').slice(0, 220),
     ...(userCampus ? { requiresTravel: away.length > 0 } : {}) };
+}
+
+/** Read-only UI formatting. Keep canonical venues and notification text unchanged. */
+export function resolveDriveMode(value: unknown, userCampus?: string): DriveModeDisplay {
+  const display = resolveDriveVenue(value, userCampus);
+  const entries = applicableVenueEntries(value, userCampus);
+  const resolved = entries.map(entry => {
+    const location = resolveDriveVenue({ version: 1, entries: [entry] }, userCampus);
+    const campus = entry.kind === 'respective' ? userCampus : venueCampus(entry);
+    // User-provided Bhopal room correction, display only. Preserve source text
+    // and do not generalize this alias to other campuses or room numbers.
+    const name = campus === 'VIT Bhopal' ? entry.name.replace(/\bL3103\b/gi, 'LC 103') : entry.name;
+    const respectiveBhopalLab = campus === 'VIT Bhopal' && entry.kind === 'respective'
+      && name === 'Respective campus' && /\blabs?\b/i.test(entry.quote);
+    // The user's home-campus shorthand: omit the redundant Bhopal campus name
+    // on cards, while retaining specific rooms and the source venue in details.
+    const genericBhopalHome = userCampus === 'VIT Bhopal' && campus === userCampus
+      && (name === campus || entry.kind === 'respective' && name === 'Respective campus');
+    let mode: DriveMode = 'TBA';
+    if (location.label !== 'To be announced') {
+      if (entry.kind === 'online') mode = 'Own Location';
+      else if (entry.kind === 'campus' || entry.kind === 'respective' || campus) {
+        if (campus && userCampus) mode = campus === userCampus ? 'Home Campus' : 'Other Campus';
+      } else if (entry.kind === 'office' || entry.kind === 'place') mode = 'External Venue';
+    }
+    // Keep room names and external addresses, rather than the shortened card destination.
+    const venue = location.label === 'To be announced' ? 'TBA'
+      : respectiveBhopalLab ? 'LC'
+      : entry.kind === 'respective' ? name === 'Respective campus' ? userCampus! : `${userCampus} · ${name}`
+      : entry.kind === 'online' ? /\bhome\s+locations?|\bfrom home\b/i.test(entry.quote) ? 'From home'
+        : /\bown\s+locations?\b/i.test(entry.quote) ? 'Own location' : 'Virtual'
+      : `${name}${entry.city && !name.toLowerCase().includes(entry.city.toLowerCase()) ? ` · ${entry.city}` : ''}`;
+    const shortVenue = mode === 'Other Campus' ? campus
+      : mode === 'Home Campus' ? genericBhopalHome ? 'LC' : entry.kind === 'respective' && name === 'Respective campus' ? campus : name
+      : mode === 'External Venue' ? venue : undefined;
+    return { destination: location.label, shortVenue, round: { stage: entry.stage, mode, venue, ...(location.requiresTravel !== undefined ? { requiresTravel: location.requiresTravel } : {}) } };
+  });
+  const rounds = [...new Map(resolved.map(({ round }) => [`${round.stage}:${round.mode}:${round.venue}`, round])).values()];
+  const physical = resolved.filter(({ round }) => ['Home Campus', 'Other Campus', 'External Venue'].includes(round.mode));
+  const primary = physical.find(item => item.destination === display.label) || physical[0];
+  const label: DriveMode = primary ? primary.round.mode
+    : rounds.length && rounds.every(round => round.mode === 'Own Location') ? 'Own Location' : 'TBA';
+  return { label, rounds, ...(primary?.shortVenue ? { shortVenue: primary.shortVenue } : {}),
+    ...(rounds.length ? { detail: rounds.map(round => `${round.stage}: ${round.mode} · ${round.venue}`).join('; ') } : {}),
+    ...(display.requiresTravel !== undefined ? { requiresTravel: display.requiresTravel } : {}) };
 }

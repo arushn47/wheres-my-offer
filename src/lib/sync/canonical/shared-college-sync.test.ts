@@ -29,3 +29,11 @@ it('does no Gmail work when the shared lease is already held',async()=>{
  mocks.rpc.mockResolvedValueOnce({data:false,error:null});
  expect((await runSharedCollegeSync()).alreadyRunning).toBe(true);expect(mocks.gmail).not.toHaveBeenCalled();
 });
+it('retains the message offset until recipients with active user leases can be retried',async()=>{
+ mocks.ingest.mockResolvedValue({canonicalId:'circular',deferredUsers:1});
+ const result=await runSharedCollegeSync();
+ expect(result).toMatchObject({userWorkPending:true,hasMore:true,failed:0});
+ expect(mocks.ingest).toHaveBeenCalledOnce();
+ const checkpoints=mocks.rpc.mock.calls.filter(call=>call[0]==='checkpoint_shared_college_sync');
+ expect(checkpoints.at(-1)?.[1]).toMatchObject({p_pending_message_ids:['first','second'],p_pending_offset:0,p_pending_history_id:'history'});
+});

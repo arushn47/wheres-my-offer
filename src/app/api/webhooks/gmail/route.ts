@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse, after } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { runSync } from '@/lib/sync/engine';
 import { drainPersonalPush } from '@/lib/sync/personal-push';
@@ -139,8 +139,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ message: 'Account not found (acknowledged)' }, { status: 200 });
     }
 
-    // Shared ingestion keeps its existing after() worker. Personal delivery
-    // waits for its durable checkpoint; runSync enforces the per-user lease.
+    // Both inboxes wait for their durable checkpoint before acknowledging.
     const sharedCollegeInbox = (process.env.SHARED_COLLEGE_EMAIL || 'arush.23bce10472@vitbhopal.ac.in').toLowerCase();
     const isSharedCollegeSource =
       account.account_type === 'college' &&
@@ -167,11 +166,20 @@ export async function POST(req: NextRequest) {
         if (isSharedCollegeSource) {
           let result: Awaited<ReturnType<typeof runSharedCollegeSync>>;
           let runs = 0;
+          const globalDeadline = Date.now() + 240_000;
           do {
-            result = await runSharedCollegeSync({ limit: 100 });
+            result = await runSharedCollegeSync({ limit: 100, globalDeadline });
             runs++;
-            if (result.alreadyRunning || result.failed > 0 || !result.hasMore) break;
-          } while (runs < 20);
+            if (result.alreadyRunning || result.userWorkPending || result.failed > 0 || !result.hasMore) break;
+          } while (runs < 20 && Date.now() < globalDeadline - 5000);
+          if (result.alreadyRunning || result.failed > 0 || result.hasMore) throw new Error('Shared College sync has saved work remaining; retry this push');
+          const { data: checkpoint, error: checkpointError } = await supabase.from('gmail_accounts')
+            .select('last_history_id').eq('id', account.id).maybeSingle();
+          if (checkpointError) throw checkpointError;
+          const cursor = checkpoint?.last_history_id || '';
+          if (historyId && (!/^\d+$/.test(cursor) || !/^\d+$/.test(historyId) || BigInt(cursor) < BigInt(historyId))) {
+            throw new Error('Shared College history checkpoint is behind this push; retry');
+          }
           console.log(`[Shared College Ingest] ${emailAddress}:`, { runs, ...result });
         } else if (account.account_type === 'personal') {
           await drainPersonalPush({
@@ -232,18 +240,9 @@ export async function POST(req: NextRequest) {
       }
     };
 
-    // A personal push is not acknowledged until its saved checkpoint covers the
-    // notification. Busy, failed or unfinished work receives a Pub/Sub retry.
-    if (account.account_type === 'personal') {
-      const completed = await processPush();
-      return NextResponse.json({ success: completed, message: completed ? 'Personal sync complete' : 'Sync checkpoint saved; retry' }, { status: completed ? 200 : 503 });
-    }
-    after(async () => { await processPush(); });
-
-    return NextResponse.json({
-      success: true,
-      message: `Sync queued for ${emailAddress}`,
-    }, { status: 200 });
+    // Busy, failed or unfinished work receives a Pub/Sub retry for either inbox.
+    const completed = await processPush();
+    return NextResponse.json({ success: completed, message: completed ? `${isSharedCollegeSource ? 'Shared College' : 'Personal'} sync complete` : 'Sync checkpoint saved; retry' }, { status: completed ? 200 : 503 });
 
   } catch (err) {
     console.error('Error handling Gmail Pub/Sub webhook:', describeError(err));

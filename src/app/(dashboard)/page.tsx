@@ -4,7 +4,7 @@ import { requireSession } from '@/lib/auth';
 import { checkIsAdmin } from '@/lib/auth/admin';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { readDriveVenues } from '@/lib/drive-venue-data';
-import { knownCampus, resolveDriveVenue } from '@/lib/drive-venues';
+import { knownCampus, resolveDriveMode } from '@/lib/drive-venues';
 import { loadRoundStatusSummaries } from '@/lib/sync/recruitment/round-status-data';
 import { resolveRecruitmentStatus } from '@/lib/sync/recruitment/round-status';
 import { detectCampus, detectBranch } from '@/lib/utils';
@@ -347,7 +347,7 @@ export default async function DashboardPage() {
     const drive = driveMap.get(a.placement_drive_id);
     const companyId = drive?.company_id || a.placement_drive_id;
     const companyName = companyById.get(companyId) || (drive as any)?.companies?.name || 'Company';
-    const venue = resolveDriveVenue(venueMap.get(a.placement_drive_id), venueCampus);
+    const venue = resolveDriveMode(venueMap.get(a.placement_drive_id), venueCampus);
 
     return {
       id: a.id,
@@ -363,6 +363,7 @@ export default async function DashboardPage() {
       category: a.category || drive?.category || null,
       notes: a.notes,
       driveMode: venue.label,
+      driveModeVenue: venue.shortVenue,
       driveModeDetail: venue.detail,
       driveModeRequiresTravel: venue.requiresTravel,
       lastUpdated: a.manual_override ? a.last_updated : (a.status_source_email_at || a.applied_at || a.last_updated),

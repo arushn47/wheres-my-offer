@@ -1,6 +1,8 @@
+import 'server-only';
 import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 import { currentMutationLease } from '@/lib/sync/lease-context';
 import { measuredAdminFetch } from './query-metrics';
+import { invalidateCircularRoutingRead } from '@/lib/sync/run-reads';
 
 /**
  * Creates a Supabase admin client using the service role key.
@@ -15,11 +17,16 @@ export function createAdminClient() {
     process.env.SUPABASE_SERVICE_ROLE_KEY!,
     {
       global: {
-        fetch: (input, init) => {
+        fetch: async (input, init) => {
           const lease = currentMutationLease();
           const headers = new Headers(init?.headers);
           if (lease) headers.set('x-sync-run-id', lease.runId);
-          return measuredAdminFetch(input, { ...init, headers });
+          const url = new URL(input instanceof Request ? input.url : String(input));
+          const method = init?.method || (input instanceof Request ? input.method : 'GET');
+          const changesRouting = url.pathname === '/rest/v1/college_emails' && !['GET', 'HEAD'].includes(method.toUpperCase());
+          if (changesRouting) invalidateCircularRoutingRead();
+          try { return await measuredAdminFetch(input, { ...init, headers }); }
+          finally { if (changesRouting) invalidateCircularRoutingRead(); }
         },
       },
       auth: {

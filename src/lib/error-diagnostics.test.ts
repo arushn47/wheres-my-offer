@@ -1,4 +1,4 @@
-import { expect, it } from 'vitest';
+import { expect, it, vi } from 'vitest';
 import { describeError, diagnosticForStorage, diagnosticMessage } from './error-diagnostics';
 
 it('retains plain PostgREST fields instead of coercing the object to a string', () => {
@@ -45,4 +45,13 @@ it('keeps stored diagnostics valid and within the existing 2,000-character limit
   expect(text.length).toBeLessThanOrEqual(2000);
   expect(JSON.parse(text)).toMatchObject({ operation: 'personal_sync', error: { code: '57014' } });
   expect(text).not.toContain('stack');
+});
+
+it('redacts configured credentials, encoded passwords and credentials embedded in URLs', () => {
+  vi.stubEnv('TEST_API_KEY', 'configured-secret-value');
+  try {
+    const text = JSON.stringify(describeError({ message: 'Failed configured-secret-value https://example.test?token=hidden-value', details: 'postgresql://postgres:db-password@database.test/postgres' }));
+    expect(text).not.toMatch(/configured-secret-value|hidden-value|db-password/);
+    expect(text).toContain('[REDACTED]');
+  } finally { vi.unstubAllEnvs(); }
 });

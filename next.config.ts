@@ -1,18 +1,17 @@
 import type { NextConfig } from "next";
 
-// Suppress DEP0169 warning emitted by legacy third-party dependencies (e.g. web-push) on Node 22+
-const originalEmitWarning = process.emitWarning;
-process.emitWarning = (warning: string | Error, ...args: any[]) => {
-  if (
-    (typeof warning === 'string' && warning.includes('url.parse')) ||
-    (typeof warning === 'object' && (warning as { code?: string })?.code === 'DEP0169')
-  ) {
-    return;
-  }
-  return (originalEmitWarning as any).call(process, warning, ...args);
-};
-
 const nextConfig: NextConfig = {
+  poweredByHeader: false,
+  productionBrowserSourceMaps: false,
+  async headers() {
+    return [{ source: '/:path*', headers: [
+      { key: 'X-Content-Type-Options', value: 'nosniff' },
+      { key: 'X-Frame-Options', value: 'DENY' },
+      { key: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' },
+      { key: 'Permissions-Policy', value: 'camera=(), microphone=(), geolocation=(), payment=(), usb=()' },
+      ...(process.env.NODE_ENV === 'production' ? [{ key: 'Strict-Transport-Security', value: 'max-age=31536000; includeSubDomains' }] : []),
+    ] }];
+  },
   // Disable internal Node.js gzip compression to prevent live SSE streams from being piped into Gzip transform streams with dangling drain listeners. Compression is handled at the edge (Vercel).
   compress: false,
   experimental: {

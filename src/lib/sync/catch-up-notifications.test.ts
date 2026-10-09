@@ -21,9 +21,13 @@ function fixture(count = 1): Data {
   return {
     applications: Array.from({length: count}, (_, i) => ({id:'app-'+i,user_id:USER,placement_drive_id:'drive-'+i,status:'applied',role:'Engineer',notes:'online',ctc:'10 LPA',location:'Pune',category:'Dream'})),
     placement_drives: Array.from({length: count}, (_, i) => ({id:'drive-'+i,company_id:'company',drive_name:'Fallback',created_at:iso(-100),source_college_email_id:'college-'+i})),
-    companies: [{id:'company',name:'Company'}], notifications: [], personal_emails: [], college_emails: [], events: [],
+    companies: [{id:'company',name:'Company'}], notifications: [],
+    personal_emails: Array.from({length: count}, (_, i) => announcement('p-'+i, 'drive-'+i, iso(-100))),
+    college_emails: Array.from({length: count}, (_, i) => circular('college-'+i, iso(-100))), events: [], gmail_accounts: [],
   };
 }
+const announcement = (id:string, drive:string, date:string, user=USER): Row => ({id,user_id:user,placement_drive_id:drive,received_at:date,sender:'noreply.cdcinfo@vitstudent.ac.in',subject:"Congratulations! You're Eligible for Company Placement Drive",classification:'registration'});
+const circular = (id:string, date:string): Row => ({id,received_at:date,classification:'registration',subject:'Company Dream Registration',processing_status:'complete'});
 
 // In-memory PostgREST contract: actually filters, sorts, paginates and enforces
 // the 1,000-row default cap; a canned fluent mock would hide scope/paging bugs.
@@ -63,9 +67,8 @@ function database(data: Data, failureTable?: string) {
   }};
 }
 
-// Reference decisions from the former per-drive loop (d7c0422). Deliberately
-// independent of the new batched query/map implementation. Compare payloads,
-// counters, exact source precedence and dedupe behavior, not just call counts.
+// Independent reference for the paired announcement contract and unchanged
+// event replay behavior. Also checks bounded batched reads and pagination.
 function legacyDecisions(data: Data, scope?:string[]) {
   const newDrives: Payload[]=[]; const events: Payload[]=[];
   const keys=new Set(data.notifications.filter(n=>n.user_id===USER).map(n=>n.dedupe_key));
@@ -77,9 +80,9 @@ function legacyDecisions(data: Data, scope?:string[]) {
     const key='new_drive:'+USER+':'+id;
     if(!keys.has(key)) {
       const personal=data.personal_emails.filter(e=>e.user_id===USER && e.placement_drive_id===id && (e.received_at || '')>=iso(-48)).sort((a,b)=>String(b.received_at).localeCompare(String(a.received_at)))[0];
-      const college=personal ? undefined : data.college_emails.find(e=>e.id===drive.source_college_email_id && (e.received_at || '')>=iso(-48));
-      if(personal || college || drive.created_at && NOW-Date.parse(drive.created_at)<=48*3600000) {
-        newDrives.push({userId:USER,placementDriveId:id,companyName,role:app.role||null,ctc:app.ctc||null,stipend:app.stipend||null,location:app.location||null,driveMode:'Online',category:app.category||null,sourceEmailId:personal?.id||college?.id||undefined});
+      const college=data.college_emails.find(e=>e.id===drive.source_college_email_id);
+      if(personal && college && Math.abs(Date.parse(personal.received_at!)-Date.parse(college.received_at!))<=48*3600000) {
+        newDrives.push({userId:USER,placementDriveId:id,companyName,role:app.role||null,ctc:app.ctc||null,stipend:app.stipend||null,location:app.location||null,driveMode:'To be announced',category:app.category||null,sourceEmailId:personal.id});
         keys.add(key);
       }
     }
@@ -110,26 +113,40 @@ async function assertEquivalent(data:Data,scope?:string[]) {
 
 beforeEach(()=>{vi.clearAllMocks();vi.useFakeTimers();vi.setSystemTime(NOW);});
 afterEach(()=>vi.useRealTimers());
-describe('notification catch-up equivalence',()=>{
-  it('preserves inclusive 48h recency, latest personal source, college/creation fallbacks and existing dedupe',async()=>{
+describe('notification catch-up pairing',()=>{
+  it.each(['personal','college'])('waits for the other circular when %s arrives first',async first=>{
+    const data=fixture();data.personal_emails=[];data.college_emails=[];
+    if(first==='personal')data.personal_emails=[announcement('p','drive-0',iso(-1))];
+    else data.college_emails=[circular('college-0',iso(-1))];
+    const db=database(data);
+    await catchUpMissingNotifications(db,USER,['drive-0']);expect(notifyNewDrive).not.toHaveBeenCalled();
+    data.personal_emails=[announcement('p','drive-0',iso(-1))];data.college_emails=[circular('college-0',iso(-1))];
+    await catchUpMissingNotifications(db,USER,['drive-0']);expect(notifyNewDrive).toHaveBeenCalledOnce();
+    data.notifications=[{id:'n',user_id:USER,dedupe_key:'new_drive:user:drive-0',push_delivered_at:iso(0)}];
+    await catchUpMissingNotifications(db,USER,['drive-0']);expect(notifyNewDrive).toHaveBeenCalledOnce();
+  });
+  it('retries an unaccepted push through its existing dedupe row',async()=>{
+    const data=fixture();data.personal_emails=[announcement('p','drive-0',iso(-1))];data.college_emails=[circular('college-0',iso(-1))];
+    data.notifications=[{id:'n',user_id:USER,dedupe_key:'new_drive:user:drive-0',push_delivered_at:null}];
+    await catchUpMissingNotifications(database(data),USER,['drive-0']);expect(notifyNewDrive).toHaveBeenCalledOnce();
+  });
+  it('requires both sources, rejects old personal mail and college/creation-only fallbacks, and preserves dedupe',async()=>{
     const data=fixture(7);
     data.personal_emails=[
-      {id:'older',user_id:USER,placement_drive_id:'drive-0',received_at:iso(-47)},
-      {id:'latest',user_id:USER,placement_drive_id:'drive-0',received_at:iso(-1)},
-      {id:'edge-personal',user_id:USER,placement_drive_id:'drive-1',received_at:iso(-48)},
-      {id:'too-old',user_id:USER,placement_drive_id:'drive-2',received_at:iso(-48.0001)},
-      {id:'other-user',user_id:'other',placement_drive_id:'drive-2',received_at:iso(-1)},
-      {id:'deduped',user_id:USER,placement_drive_id:'drive-6',received_at:iso(-1)},
+      announcement('older','drive-0',iso(-47)), announcement('latest','drive-0',iso(-1)),
+      announcement('edge-personal','drive-1',iso(-48)), announcement('too-old','drive-2',iso(-48.0001)),
+      announcement('other-user','drive-2',iso(-1),'other'), announcement('deduped','drive-6',iso(-1)),
+      announcement('no-college','drive-5',iso(-1)),
     ];
-    data.college_emails=[{id:'college-0',received_at:iso(-1)},{id:'college-3',received_at:iso(-48)},{id:'college-2',received_at:iso(-48.0001)}];
+    data.college_emails=[circular('college-0',iso(-1)),circular('college-1',iso(-48)),circular('college-3',iso(-1)),circular('college-2',iso(-48.0001))];
     data.placement_drives[4].created_at=iso(-48);
     data.placement_drives[5].created_at=iso(-48.0001);
     // Legacy keys can have no placement_drive_id; they must still dedupe.
     data.notifications=[{id:'n',user_id:USER,dedupe_key:'new_drive:user:drive-6'}];
     const db=await assertEquivalent(data);
-    expect(notifyNewDrive).toHaveBeenCalledTimes(4);
+    expect(notifyNewDrive).toHaveBeenCalledTimes(2);
     expect(db.requests.find(r=>r.table==='personal_emails')?.filters).toContainEqual(['in','placement_drive_id',['drive-0','drive-1','drive-2','drive-3','drive-4','drive-5']]);
-    expect(db.requests.find(r=>r.table==='college_emails')?.filters).toContainEqual(['in','id',['college-2','college-3','college-4','college-5']]);
+    expect(db.requests.find(r=>r.table==='college_emails')?.filters).toContainEqual(['in','id',['college-0','college-1','college-2','college-3','college-4','college-5']]);
   });
   it('preserves event window, exact dedupe/venue normalization, statuses and candidate-confirmed flags',async()=>{
     const data=fixture(10);
@@ -149,7 +166,8 @@ describe('notification catch-up equivalence',()=>{
   });
   it('scopes every drive-related read while retaining the whole-user committed outbox dispatch',async()=>{
     const data=fixture(100);
-    data.personal_emails=[{id:'p',user_id:USER,placement_drive_id:'drive-1',received_at:iso(-1)},{id:'unrelated',user_id:USER,placement_drive_id:'drive-2',received_at:iso(-1)}];
+    data.personal_emails=[announcement('p','drive-1',iso(-1)),announcement('unrelated','drive-2',iso(-1))];
+    data.college_emails=[circular('college-1',iso(-1)),circular('college-2',iso(-1))];
     data.events=[{id:'e',user_id:USER,placement_drive_id:'drive-2',event_type:'ppt',start_time:iso(1)}];
     const db=await assertEquivalent(data,['drive-1','drive-1']);
     expect(notifyNewDrive).toHaveBeenCalledTimes(1);
@@ -158,7 +176,7 @@ describe('notification catch-up equivalence',()=>{
   });
   it('does not invent raw shortlist alerts and retains sender return/count behavior',async()=>{
     vi.mocked(notifyNewDrive).mockResolvedValueOnce({inAppCreated:false,pushSent:false,complete:false});
-    const data=fixture();data.placement_drives[0].created_at=iso(-1);
+    const data=fixture();data.personal_emails=[announcement('p','drive-0',iso(-1))];data.college_emails=[circular('college-0',iso(-1))];
     await assertEquivalent(data);
   });
   it('empty incremental scope reads no applications and still dispatches the existing outbox',async()=>{
@@ -178,21 +196,22 @@ describe('notification catch-up equivalence',()=>{
 });
 
 describe('notification catch-up request bounds and pagination',()=>{
-  it.each([1,100])('uses seven reads for %i old, un-notified drives instead of one read per drive',async count=>{
+  it.each([1,100])('uses eight reads for %i old, un-notified drives instead of one read per drive',async count=>{
     const db=await assertEquivalent(fixture(count));
-    expect(db.requests).toHaveLength(7);
+    expect(db.requests).toHaveLength(8);
     for(const table of ['personal_emails','college_emails','events'])expect(db.requests.filter(r=>r.table===table)).toHaveLength(1);
   });
   it('chunks 450 drives into bounded filters rather than N+1 reads',async()=>{
     const db=await assertEquivalent(fixture(450));
-    expect(db.requests).toHaveLength(15);
+    expect(db.requests).toHaveLength(16);
     for(const request of db.requests)for(const [op,,value] of request.filters)if(op==='in')expect((value as string[]).length).toBeLessThanOrEqual(200);
   });
   it('reads beyond PostgREST caps for notifications, events and personal emails',async()=>{
     const data=fixture(3);
     data.notifications=Array.from({length:1001},(_,i)=>({id:String(i).padStart(5,'0'),user_id:USER,dedupe_key:i===1000?'new_drive:user:drive-0':'irrelevant-'+i}));
-    data.personal_emails=Array.from({length:1001},(_,i)=>({id:'p'+String(i).padStart(5,'0'),user_id:USER,placement_drive_id:'drive-1',received_at:iso(-1-i/10000)}));
-    data.personal_emails.push({id:'last-page-other-drive',user_id:USER,placement_drive_id:'drive-2',received_at:iso(-2)});
+    data.personal_emails=Array.from({length:1001},(_,i)=>announcement('p'+String(i).padStart(5,'0'),'drive-1',iso(-1-i/10000)));
+    data.personal_emails.push(announcement('last-page-other-drive','drive-2',iso(-2)));
+    data.college_emails=[circular('college-1',iso(-1)),circular('college-2',iso(-2))];
     data.events=Array.from({length:1001},(_,i)=>({id:'e'+String(i).padStart(5,'0'),user_id:USER,placement_drive_id:'drive-1',event_type:'ppt',start_time:iso(1),venue:'Hall'}));
     const db=await assertEquivalent(data);
     expect(notifyNewDrive).toHaveBeenCalledTimes(2);

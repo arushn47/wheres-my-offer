@@ -6,9 +6,15 @@ function read(value: object, key: string): unknown {
 }
 
 function safeText(value: string, limit = 2000): string {
+  for (const [key, secret] of Object.entries(process.env)) {
+    if (!key.startsWith('NEXT_PUBLIC_') && /SECRET|PASSWORD|DB_PASS|API_KEY|SERVICE_ROLE|ENCRYPTION_KEY|PRIVATE_KEY/i.test(key) && secret && secret.length >= 8) {
+      value = value.split(secret).join('[REDACTED]').split(encodeURIComponent(secret)).join('[REDACTED]');
+    }
+  }
   return value
     .replace(/\bBearer\s+[^\s,;"']+/gi, 'Bearer [REDACTED]')
-    .replace(/\b(access_token|refresh_token|client_secret|api_key|apikey|authorization)\b(["']?\s*[:=]\s*["']?)[^\s&"',;}]+/gi, '$1$2[REDACTED]')
+    .replace(/\b(access_token|refresh_token|client_secret|api_key|apikey|authorization|password|token|secret|key)\b(["']?\s*[:=]\s*["']?)[^\s&"',;}]+/gi, '$1$2[REDACTED]')
+    .replace(/(postgres(?:ql)?:\/\/[^\s:/]+:)[^\s@]+@/gi, '$1[REDACTED]@')
     .slice(0, limit);
 }
 

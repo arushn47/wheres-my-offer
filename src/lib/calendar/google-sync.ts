@@ -1,4 +1,5 @@
 import { withUserMutationLease } from '@/lib/sync/mutation-lease';
+import { describeError } from '@/lib/error-diagnostics';
 import { google } from 'googleapis';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { decrypt } from '@/lib/crypto/tokens';
@@ -136,7 +137,7 @@ export async function pushEventToGoogleCalendar(params: SyncCalendarEventParams)
         // If the event was manually deleted from GCal (404), fall through to insert
         const status = (updateErr as { code?: number })?.code;
         if (status !== 404 && status !== 410) {
-          console.error('Google Calendar update error:', updateErr);
+          console.error('Google Calendar update error:', describeError(updateErr));
           return null;
         }
         // Event no longer exists — fall through to insert a fresh one
@@ -193,7 +194,7 @@ export async function pushEventToGoogleCalendar(params: SyncCalendarEventParams)
 
     return insertRes.data.id || null;
   } catch (err) {
-    console.error('Google Calendar Auto-Sync Error (user may need to reconnect for calendar scope):', err);
+    console.error('Google Calendar Auto-Sync Error (user may need to reconnect for calendar scope):', describeError(err));
     return null;
   }
 }
@@ -228,7 +229,7 @@ export async function deleteEventFromGoogleCalendar(params: {
         const status = (err as { code?: number })?.code;
         // 404/410 means it was already deleted from GCal — still consider it a success
         if (status === 404 || status === 410) return true;
-        console.error('Google Calendar Delete (by ID) Error:', err);
+        console.error('Google Calendar Delete (by ID) Error:', describeError(err));
         return false;
       }
     }
@@ -253,7 +254,7 @@ export async function deleteEventFromGoogleCalendar(params: {
     }
     return false;
   } catch (err) {
-    console.error('Google Calendar Delete Error:', err);
+    console.error('Google Calendar Delete Error:', describeError(err));
     return false;
   }
 }
@@ -459,7 +460,7 @@ async function reconcileUserGoogleCalendarUnlocked(userId: string): Promise<Reco
       allGcalItems.push(...(res.data.items || []));
       pageToken = res.data.nextPageToken;
     } catch (listErr) {
-      console.error('Google Calendar list error during reconcile:', listErr);
+      console.error('Google Calendar list error during reconcile:', describeError(listErr));
       break;
     }
   } while (pageToken);
@@ -588,7 +589,7 @@ async function reconcileUserGoogleCalendarUnlocked(userId: string): Promise<Reco
         }
         updatedCount++;
       } catch (updErr) {
-        console.error(`Failed to update GCal event ${gItem.id}:`, updErr);
+        console.error(`Failed to update GCal event ${gItem.id}:`, describeError(updErr));
       }
     } else {
       // Stale, duplicate, or dead event -> DELETE from GCal!
@@ -600,7 +601,7 @@ async function reconcileUserGoogleCalendarUnlocked(userId: string): Promise<Reco
         });
         deletedCount++;
       } catch (delErr) {
-        console.error(`Failed to delete GCal event ${gItem.id}:`, delErr);
+        console.error(`Failed to delete GCal event ${gItem.id}:`, describeError(delErr));
       }
     }
   }
@@ -648,7 +649,7 @@ async function reconcileUserGoogleCalendarUnlocked(userId: string): Promise<Reco
         insertedCount++;
       }
     } catch (insErr) {
-      console.error(`Failed to insert GCal event for ${ins.companyName}:`, insErr);
+      console.error(`Failed to insert GCal event for ${ins.companyName}:`, describeError(insErr));
     }
   }
 

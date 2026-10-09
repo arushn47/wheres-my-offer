@@ -28,10 +28,10 @@ import {
 } from '@/lib/sync/recruitment/status-display';
 import { type RoundStatusDecision } from '@/lib/sync/recruitment/round-status';
 
-import type { DriveVenueDisplay } from '@/lib/drive-venues';
+import type { DriveModeDisplay } from '@/lib/drive-venues';
 
 export interface CompanyWithDetails {
-  venue?: DriveVenueDisplay;
+  venue?: DriveModeDisplay;
   id: string;
   appId?: string;
   driveId?: string;
@@ -633,7 +633,7 @@ export default function CompaniesClient({
           const hue = getHue(c.name);
           const isMultiDrive = (companyCounts.get(c.name.toLowerCase().trim()) || 0) > 1;
 
-          const driveMode = c.venue?.label || 'To be announced';
+          const driveMode = c.venue?.label || 'TBA';
 
           const stipendFormatted = formatStipend(c.application?.stipend);
           const ctcDisplay = c.application?.ctc
@@ -715,7 +715,7 @@ export default function CompaniesClient({
                         </span>
                       );
                     })()}
-                    <DriveModeBadge driveMode={driveMode} detail={c.venue?.detail} requiresTravel={c.venue?.requiresTravel} />
+                    <DriveModeBadge driveMode={driveMode} shortVenue={c.venue?.shortVenue} detail={c.venue?.detail} requiresTravel={c.venue?.requiresTravel} />
                     {(() => {
                       const isManual = Boolean(c.application?.manual_override && c.application?.last_updated);
                       const displayDate = isManual

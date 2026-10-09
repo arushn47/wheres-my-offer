@@ -1,5 +1,6 @@
 import type { createAdminClient } from '@/lib/supabase/admin';
 import { normalizeIdentityToken } from '../attachments/roster-policy';
+import { reuseRunRead } from '../run-reads';
 
 export interface UserCandidateIdentity {
   userId: string;
@@ -154,7 +155,11 @@ export async function loadUserCandidateIdentity(
   supabase: ReturnType<typeof createAdminClient>,
   userId: string
 ): Promise<UserCandidateIdentity> {
-  const [{ data: userRow }, { data: accounts }] = await Promise.all([
+  return reuseRunRead(userId, 'candidate-identity', () => readUserCandidateIdentity(supabase, userId));
+}
+
+async function readUserCandidateIdentity(supabase: ReturnType<typeof createAdminClient>, userId: string): Promise<UserCandidateIdentity> {
+  const [userResult, accountResult] = await Promise.all([
     supabase
       .from('users')
       .select('id, name, email, neo_id')
@@ -165,6 +170,10 @@ export async function loadUserCandidateIdentity(
       .select('email, account_type')
       .eq('user_id', userId),
   ]);
+  if (userResult.error) throw userResult.error;
+  if (accountResult.error) throw accountResult.error;
+  const userRow = userResult.data;
+  const accounts = accountResult.data;
 
   const emails: string[] = [];
   let collegeEmail: string | null = null;
@@ -205,9 +214,6 @@ export function matchesCandidateRow(
   allowNameOnly = false
 ): { matched: boolean; matchedValue: string } {
   const cleanCells = cells.map((c) => (c ? String(c).trim() : ''));
-  const fullRowText = cleanCells.filter(Boolean).join(' ');
-  const fullRowUpper = fullRowText.toUpperCase();
-  const fullRowLower = fullRowText.toLowerCase();
 
   // 1. Neo ID exact cell or word match
   if (identity.neoId && identity.neoId.length >= 4) {

@@ -3,7 +3,7 @@ import { Suspense } from 'react';
 import { requireSession } from '@/lib/auth';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { readDriveVenues } from '@/lib/drive-venue-data';
-import { knownCampus, resolveDriveVenue } from '@/lib/drive-venues';
+import { knownCampus, resolveDriveMode } from '@/lib/drive-venues';
 import CompaniesClient, { type CompanyWithDetails } from './_components/companies-client';
 
 import { detectCampus } from '@/lib/utils';
@@ -304,7 +304,7 @@ export default async function CompaniesPage() {
       id: comp?.id || companyId || entityId, 
       appId: app ? app.id : undefined,
       driveId: drive ? drive.id : undefined,
-      venue: resolveDriveVenue(venueMap.get(targetDriveId), venueCampus),
+      venue: resolveDriveMode(venueMap.get(targetDriveId), venueCampus),
       name: comp?.name || ent.company?.name || 'Unknown Company',
       legal_name: null,
       aliases: comp?.aliases || ent.company?.aliases || null,

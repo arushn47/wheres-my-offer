@@ -3,6 +3,7 @@ import { cookies } from 'next/headers';
 import { getSession } from '@/lib/auth';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { decrypt } from '@/lib/crypto/tokens';
+import { describeError } from '@/lib/error-diagnostics';
 
 export const dynamic = 'force-dynamic';
 
@@ -60,7 +61,7 @@ export async function DELETE() {
             const { gmail } = await createGmailClient(acc as any);
             await stopGmailWatch(gmail);
           } catch (watchErr) {
-            console.warn(`[Account Deletion] Failed to stop Gmail watch for ${acc.email}:`, watchErr);
+            console.warn(`[Account Deletion] Failed to stop Gmail watch for ${acc.email}:`, describeError(watchErr));
           }
 
           const tokenToRevoke = acc.refresh_token_encrypted
@@ -70,9 +71,10 @@ export async function DELETE() {
             : null;
 
           if (tokenToRevoke) {
-            const revokeResponse = await fetch(`https://oauth2.googleapis.com/revoke?token=${encodeURIComponent(tokenToRevoke)}`, {
+            const revokeResponse = await fetch('https://oauth2.googleapis.com/revoke', {
               method: 'POST',
               headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+              body: new URLSearchParams({ token: tokenToRevoke }),
             });
             if (!revokeResponse.ok) {
               console.warn(
@@ -82,7 +84,7 @@ export async function DELETE() {
           }
         } catch (err) {
           // Revocation failure must not prevent deleting local credentials and user data.
-          console.warn(`[Account Deletion] Failed to revoke Google token for ${acc.email}:`, err);
+          console.warn(`[Account Deletion] Failed to revoke Google token for ${acc.email}:`, describeError(err));
         }
       }
     }
@@ -145,9 +147,9 @@ export async function DELETE() {
       message: 'Account and all associated placement data deleted permanently.',
     });
   } catch (err) {
-    console.error('[Account Deletion Error]:', err);
+    console.error('[Account Deletion Error]:', describeError(err));
     return NextResponse.json(
-      { error: err instanceof Error ? err.message : 'Failed to terminate account cleanly' },
+      { error: 'Failed to terminate account cleanly. Please retry or contact support.' },
       { status: 500 }
     );
   }

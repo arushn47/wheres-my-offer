@@ -1,4 +1,5 @@
 import type { gmail_v1 } from 'googleapis';
+import { describeError } from '@/lib/error-diagnostics';
 
 export interface WatchResponse {
   historyId: string;
@@ -33,7 +34,7 @@ export async function setupGmailWatch(
 
     return null;
   } catch (error) {
-    console.error('Failed to setup Gmail watch:', error);
+    console.error('Failed to setup Gmail watch:', describeError(error));
     return null;
   }
 }
@@ -46,7 +47,7 @@ export async function stopGmailWatch(gmail: gmail_v1.Gmail): Promise<boolean> {
     await gmail.users.stop({ userId: 'me' });
     return true;
   } catch (error) {
-    console.error('Failed to stop Gmail watch:', error);
+    console.error('Failed to stop Gmail watch:', describeError(error));
     return false;
   }
 }
@@ -102,7 +103,7 @@ export async function renewExpiringWatches(
           .eq('id', account.id);
         console.log(`[Watch Renewal] Stopped watch for non-designated college inbox ${account.email}`);
       } catch (err) {
-        console.warn(`[Watch Renewal] Could not stop watch for ${account.email}:`, err);
+        console.warn(`[Watch Renewal] Could not stop watch for ${account.email}:`, describeError(err));
       }
       continue;
     }
@@ -131,7 +132,7 @@ export async function renewExpiringWatches(
         failed++;
       }
     } catch (err) {
-      console.error(`[Watch Renewal] Failed for ${account.email}:`, err);
+      console.error(`[Watch Renewal] Failed for ${account.email}:`, describeError(err));
       failed++;
     }
   }

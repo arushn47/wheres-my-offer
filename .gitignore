@@ -37,6 +37,15 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .eslintcache
+*.log
+
+# Private local audit reports and agent/provider state
+docs/security-audit.md
+docs/supabase-egress-investigation-*.md
+docs/notification-pairing-fix.md
+docs/jd-extraction-fix.md
+.agents/
+.codex/
 
 # vercel
 .vercel
@@ -58,3 +67,4 @@ supabase/.temp/
 !supabase/migrations/migration_v43_compact_dashboard_reads.sql
 !supabase/migrations/migration_v44_drive_venues.sql
 !supabase/migrations/migration_v45_original_email_links.sql
+# Pending security migration remains local until separately reviewed/approved.

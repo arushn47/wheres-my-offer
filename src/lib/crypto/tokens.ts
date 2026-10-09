@@ -1,3 +1,4 @@
+import 'server-only';
 import { createCipheriv, createDecipheriv, randomBytes } from 'crypto';
 
 const ALGORITHM = 'aes-256-gcm';
@@ -6,8 +7,8 @@ const TAG_LENGTH = 16;
 
 function getEncryptionKey(): Buffer {
   const key = process.env.TOKEN_ENCRYPTION_KEY;
-  if (!key) {
-    throw new Error('TOKEN_ENCRYPTION_KEY environment variable is not set');
+  if (!key || !/^[a-f\d]{64}$/i.test(key)) {
+    throw new Error('TOKEN_ENCRYPTION_KEY must be a 32-byte hexadecimal key');
   }
   return Buffer.from(key, 'hex');
 }

@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getSession } from '@/lib/auth';
 import { createAdminClient } from '@/lib/supabase/admin';
+import { applicationStatusInput } from '@/lib/security/input';
 
 export const dynamic = 'force-dynamic';
 
@@ -22,7 +23,9 @@ export async function PATCH(
   }
 
   const { id: companyOrDriveId } = await params;
-  const body = await request.json();
+  const input = applicationStatusInput.safeParse(await request.json().catch(() => null));
+  if (!input.success) return NextResponse.json({ error: { message: 'Invalid status update', code: 'bad_request' } }, { status: 400 });
+  const body = input.data;
   const { status, role, ctc, location, notes, placement_drive_id: requestedDriveId, application_id: requestedApplicationId } = body;
 
   if (!status) {
@@ -61,6 +64,7 @@ export async function PATCH(
     if (!drive) {
       return NextResponse.json({ error: { message: 'Placement drive not found', code: 'drive_not_found' } }, { status: 404 });
     }
+    if (drive.id !== companyOrDriveId && drive.company_id !== companyOrDriveId) return NextResponse.json({ error: { message: 'Drive does not belong to this company', code: 'drive_not_found' } }, { status: 404 });
     targetDriveId = drive.id;
   }
 
@@ -83,27 +87,6 @@ export async function PATCH(
 
       if (drives && drives.length > 0) {
         targetDriveId = drives[0].id;
-      } else {
-        const { data: company } = await supabase
-          .from('companies')
-          .select('id')
-          .eq('id', companyOrDriveId)
-          .maybeSingle();
-        if (!company) {
-          return NextResponse.json({ error: { message: 'Company not found', code: 'company_not_found' } }, { status: 404 });
-        }
-        // Create initial drive globally for this company
-        const { data: newDrive } = await supabase
-          .from('placement_drives')
-          .insert({
-            company_id: companyOrDriveId,
-            identity_state: 'manually_assigned',
-            identity_confidence: 'high',
-            identity_source: 'manual_status_override',
-          })
-          .select('id')
-          .single();
-        targetDriveId = newDrive?.id || null;
       }
     }
   }
@@ -111,6 +94,10 @@ export async function PATCH(
   if (!targetDriveId) {
     return NextResponse.json({ error: { message: 'Could not resolve placement drive for this company', code: 'drive_not_found' } }, { status: 404 });
   }
+
+  const { data: ownedApplication, error: ownershipError } = await supabase.from('applications')
+    .select('id').eq('placement_drive_id', targetDriveId).eq('user_id', session.userId).maybeSingle();
+  if (ownershipError || !ownedApplication || (requestedApplicationId && requestedApplicationId !== ownedApplication.id)) return NextResponse.json({ error: { message: 'Application not found', code: 'application_not_found' } }, { status: 404 });
 
   // Upsert application record with manual override flag
   const applicationPayload = {
@@ -127,38 +114,18 @@ export async function PATCH(
     last_updated: new Date().toISOString(),
   };
 
-  const { data: existingApp } = await supabase
-    .from('applications')
-    .select('id')
-    .eq('user_id', session.userId)
-    .eq('placement_drive_id', targetDriveId)
-    .maybeSingle();
-
-  let application;
-  let error;
-  if (existingApp?.id) {
-    const res = await supabase
+  const { data: application, error } = await supabase
       .from('applications')
       .update(applicationPayload)
-      .eq('id', existingApp.id)
+      .eq('id', ownedApplication.id)
+      .eq('user_id', session.userId)
       .select()
       .single();
-    application = res.data;
-    error = res.error;
-  } else {
-    const res = await supabase
-      .from('applications')
-      .insert(applicationPayload)
-      .select()
-      .single();
-    application = res.data;
-    error = res.error;
-  }
 
   if (error) {
     console.error('Failed to update status:', error);
     return NextResponse.json(
-      { error: { message: error.message, code: 'db_error' } },
+      { error: { message: 'Failed to update application', code: 'db_error' } },
       { status: 500 }
     );
   }

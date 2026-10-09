@@ -78,7 +78,7 @@ export async function POST() {
   } catch (err) {
     console.error('[User Reset Error]:', err);
     return NextResponse.json(
-      { error: err instanceof Error ? err.message : 'Failed to reset candidate data' },
+      { error: 'Failed to reset candidate data. Please retry or contact support.' },
       { status: 500 }
     );
   }

@@ -5,6 +5,26 @@ import { getEvidenceMessageText } from './sync/extraction/body';
 const projection = (entries: VenueEntry[]) => ({ version: 1, entries: entries.map(e => ({ ...e, sourceId: 'canonical-1407', receivedAt: '2026-10-07T12:00:00Z' })) });
 const display = (body: string, subject = 'Chargebee registration', campus?: string) => resolveDriveVenue(projection(extractRecruitmentVenues(subject, body)), campus);
 describe('explicit drive venue display', () => {
+  it.each([
+    ['EXL Service India Pvt Ltd Super Dream Offer Registration - 2027 Batch', 'Name of the Company\nEXL Service India Pvt Ltd\nCategory\nSuper Dream\nDate of Visit:\n\n*Virtual*\n\nEligible Branches\nB. Tech (CSE / IT) related branches only'],
+    ['Ecolab Dream Internship Registration - 2027 Batch', 'Name of the Company\nEcolab\nCategory\nDream Internship\nDate of Visit:\n\nVirtual\n\nEligible Branches\nB. Tech (CSE / IT / Mech / Chemical) related branches only'],
+    ['Registration', 'Date of Visit: Virtual'],
+    ['Registration', 'Date of Visit:\nOnline'],
+  ])('uses the announced virtual visit mode for %s', (subject, body) => {
+    expect(display(body, subject, 'VIT Bhopal')).toMatchObject({ label: 'Online', requiresTravel: false });
+  });
+  it('updates an initially virtual drive when a later circular announces campus attendance', () => {
+    const registration = extractRecruitmentVenues('Ecolab registration', 'Date of Visit:\nVirtual');
+    const followUp = extractRecruitmentVenues('Ecolab interviews', 'All shortlisted students must attend interviews at VIT Vellore.');
+    expect(resolveDriveVenue(projection([...registration, ...followUp]), 'VIT Bhopal')).toMatchObject({ label: 'VIT Vellore', requiresTravel: true });
+  });
+  it.each(['Date of Visit:\nWill be announced later', 'Work Location: Virtual', 'Registration Mode: Online'])('does not invent a drive mode from %s', body => {
+    expect(display(body, 'Registration').label).toBe('To be announced');
+  });
+  it('extracts the physical process venue from the new Responsive registration table', () => {
+    const body = 'Date of Visit:\n26 st Oct PPT 2 pm , TEST - 4 pm physical for vellore students\n29th Oct Physical process - at VIT Vellore\nJob location: Bangalore';
+    expect(display(body, 'Re Registration: RFPIO India Pvt Ltd (DBA Responsive)').label).toBe('VIT Vellore');
+  });
   it('keeps LeadSquared Vellore PPT/interviews separate from the respective-campus test', () => {
     const body='Online Test : 15th October 2026 (2 PM) @ respective campus venues.PPT &\nInterviews : 27th October 2026 from 9 AM onwards @ VIT Vellore campus';
     const entries=extractRecruitmentVenues('LeadSquared : Registration : Super Dream Internship - 2027 Batch',body);

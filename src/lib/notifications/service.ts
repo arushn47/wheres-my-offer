@@ -165,20 +165,24 @@ export async function sendNotification(
     if (claimError) throw claimError;
     if (!claimed) return { inAppCreated, pushSent: false, complete: false };
     const targetLink = link || (placementDriveId ? `/companies/${placementDriveId}` : '/');
-    const pushResult = await sendPushToUser(userId, {
-      ...pushPayload,
-      title,
-      body,
-      tag: dedupeKey,
-      data: {
-        ...pushPayload?.data,
-        url: targetLink,
-        eventId: eventId || undefined,
-        type,
-      },
-    });
-    pushSent = pushResult.sent > 0;
-    await supabase.from('notifications').update({ push_delivered_at: pushSent ? new Date().toISOString() : null, push_claimed_at: null }).eq('id', inserted.id);
+    try {
+      const pushResult = await sendPushToUser(userId, {
+        ...pushPayload,
+        title,
+        body,
+        tag: dedupeKey,
+        data: {
+          ...pushPayload?.data,
+          url: targetLink,
+          eventId: eventId || undefined,
+          type,
+        },
+      });
+      pushSent = pushResult.sent > 0;
+    } finally {
+      const { error } = await supabase.from('notifications').update({ push_delivered_at: pushSent ? new Date().toISOString() : null, push_claimed_at: null }).eq('id', inserted.id);
+      if (error) throw error;
+    }
   }
 
   return { inAppCreated, pushSent, complete: Boolean(inserted?.id) && (!prefs.browserPushEnabled || pushSent) };
@@ -332,8 +336,8 @@ export async function notifyNewDrive(params: {
 
   // Human, concise summary: Role • Mode • Location. No CTC, no robotic walls
   const cleanRole = role && !/^(?:tbd|na|n\/a|not\s+specified)$/i.test(role.trim()) ? role.trim() : null;
-  const cleanMode = driveMode && !/^(?:unknown|tbd|na)$/i.test(driveMode.trim())
-    ? driveMode.charAt(0).toUpperCase() + driveMode.slice(1).toLowerCase()
+  const cleanMode = driveMode && !/^(?:unknown|tbd|na|to be announced)$/i.test(driveMode.trim())
+    ? driveMode.trim()
     : null;
   const cleanLocation = location && !/^(?:not\s+specified|tbd|na|n\/a)$/i.test(location.trim())
     ? location.trim()

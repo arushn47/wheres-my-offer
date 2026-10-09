@@ -24,6 +24,7 @@ import { isInactiveStatus } from '@/lib/stages';
 import { useSync } from '@/context/sync-context';
 import { getVisibleApplicationStatus } from '@/lib/sync/recruitment/status-display';
 import type { DashboardStats } from '@/types/dashboard';
+import type { DriveMode } from '@/lib/drive-venues';
 
 export interface ActiveApplicationItem {
   id: string;
@@ -39,7 +40,8 @@ export interface ActiveApplicationItem {
   location?: string | null;
   category?: string | null;
   notes?: string | null;
-  driveMode?: string | null;
+  driveMode?: DriveMode | null;
+  driveModeVenue?: string;
   driveModeDetail?: string;
   driveModeRequiresTravel?: boolean;
 }
@@ -518,7 +520,7 @@ export default function DashboardClient({
               const category = rawCategory.replace(/\b(internship|offer|placement|drive)\b/gi, '').replace(/\s*\/\s*/g, ' ').replace(/\s+/g, ' ').trim() || rawCategory.trim();
               const initials = c.companyName.slice(0, 2).toUpperCase();
               const hue = getHue(c.companyName);
-              const driveMode = c.driveMode || 'To be announced';
+              const driveMode = c.driveMode || 'TBA';
 
               return (
                 <Link
@@ -568,7 +570,7 @@ export default function DashboardClient({
                       );
                     })()}
                     {/* Travel Mode Badge */}
-                    <DriveModeBadge driveMode={driveMode} detail={c.driveModeDetail} requiresTravel={c.driveModeRequiresTravel} />
+                    <DriveModeBadge driveMode={driveMode} shortVenue={c.driveModeVenue} detail={c.driveModeDetail} requiresTravel={c.driveModeRequiresTravel} />
                     <span className="ml-auto font-mono text-[10px] text-zinc-600 shrink-0 transition-colors duration-200 group-hover:text-emerald-400">
                       Open drive details ↗
                     </span>

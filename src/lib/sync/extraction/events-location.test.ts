@@ -62,6 +62,9 @@ Registration: on or before 30-09-2026
 });
 
 describe('cleanLocationString normalization', () => {
+  it.each(['Refer', 'Refer JD', 'Refer JD’s', 'See attachment'])('rejects stored JD pointers as work locations: %s', raw => {
+    expect(cleanLocationString(raw)).toBe('Not Specified');
+  });
   it('formats parallel cities with "/" and preserves hierarchical localities with ","', () => {
     expect(cleanLocationString('Bangalore | Hyderabad')).toBe('Bangalore / Hyderabad');
     expect(cleanLocationString('Bangalore / Hyderabad / Noida')).toBe('Bangalore / Hyderabad / Noida');

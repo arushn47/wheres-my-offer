@@ -2,7 +2,8 @@ import type { createAdminClient } from '@/lib/supabase/admin';
 import { getEvidenceMessageText, isQuotedReply } from '../extraction/body';
 import { loadUserCandidateIdentity, getStrongIdentityTokens, matchesCandidateText, matchesCandidateRow } from '../identity/user-identity';
 import { resolveRoundVerdicts, statusForRoundVerdict, type RoundEvidence, type RoundVerdict } from './round-verdict';
-import { currentMutationLease, assertMutationLease } from '../mutation-lease';
+import { currentMutationLease } from '../mutation-lease';
+import { coalesceRoundOutbox, noteRoundOutboxCommit, type OutboxDrainResult } from './outbox-dispatch';
 import { sendNotification, type CreateNotificationParams } from '@/lib/notifications/service';
 import { personalPlacementEvidence, hasPublishedShortlistContext, inlineShortlistRoster, isOpenPptInvitation } from './placement-evidence';
 import { loadCandidateRosters } from '../attachments/roster-lookup';
@@ -11,13 +12,13 @@ type Admin = ReturnType<typeof createAdminClient>;
 export interface VerdictEmail {
   id: string; subject?: string | null; body_text?: string | null; body_snippet?: string | null;
   received_at?: string | null; college_email_id?: string | null; canonical_email_id?: string | null;
-  sender?: string | null;
+  sender?: string | null; sender_email?: string | null;
 }
 
 /** Reads only circulars already resolved to this drive by the caller. */
 export async function calculateDriveRoundVerdicts(supabase: Admin, userId: string, driveId: string, emails: VerdictEmail[]): Promise<RoundVerdict[]> {
   const identity = await loadUserCandidateIdentity(supabase, userId);
-  const circulars = emails.filter((email) => email.college_email_id || email.canonical_email_id || (email as any).sender_email || (!email.sender && email.id) ||
+  const circulars = emails.filter((email) => email.college_email_id || email.canonical_email_id || email.sender_email || (!email.sender && email.id) ||
     /noreply\.cdcinfo@vitstudent\.ac\.in/i.test(email.sender || '') && /test\s+link|password|passkey|assessment\s+link|you.*(?:selected|shortlisted)|your.*(?:offer|reject)|congratulations|regret.*inform/i.test(email.body_text || email.body_snippet || ''));
   const ids = Array.from(new Set(circulars.map((email) => email.college_email_id || email.canonical_email_id || email.id)));
   const indexedRosters = await loadCandidateRosters(supabase,ids,getStrongIdentityTokens(identity));
@@ -73,7 +74,8 @@ export async function calculateDriveRoundVerdicts(supabase: Admin, userId: strin
 export async function commitDriveRoundVerdicts(supabase: Admin, userId: string, driveId: string, companyName: string, verdicts: RoundVerdict[], status: string, suppressNotifications = false, events?: Array<Record<string, unknown>>): Promise<void> {
   const lease = currentMutationLease();
   if (!lease || lease.userId !== userId) throw new Error('Round decision commit requires the user lease');
-  await assertMutationLease();
+  // commit_round_verdict validates and locks the lease in the same transaction
+  // as the verdict, status, events and durable outbox. No preflight RPC needed.
   let current = verdicts.at(-1);
   const lastPresentIdx = verdicts.findLastIndex(v => v.eligible && v.state === 'verified_present');
   if (lastPresentIdx >= 0) {
@@ -93,12 +95,13 @@ export async function commitDriveRoundVerdicts(supabase: Admin, userId: string, 
       body: verdict.outcome === 'selected' ? 'Your personal placement email confirms selection.' : 'Your identifier matched the published list for this round.',
       dedupeKey: `round:${userId}:${driveId}:${verdict.roundKey}:${verdict.rosterKey}:present`,
     } : null;
-    const { error } = await supabase.rpc('commit_round_verdict', {
+    const { data: decisionId, error } = await supabase.rpc('commit_round_verdict', {
       p_user_id: userId, p_run_id: lease.runId, p_drive_id: driveId, p_verdict: verdict,
       p_status: isCurrent ? status : statusForRoundVerdict(verdict, 'applied'), p_is_current: isCurrent, p_notification: notification,
       p_events: isCurrent ? events || null : null,
     });
     if (error) throw error;
+    if (decisionId && isCurrent && verdict.eligible) noteRoundOutboxCommit(userId, decisionId, notification?.dedupeKey);
   }
   if (!suppressNotifications) await dispatchRoundNotificationOutbox(supabase, userId);
 }
@@ -123,16 +126,25 @@ export async function dispatchCalendarRemovals(supabase: Admin, userId: string):
 }
 
 export async function dispatchRoundNotificationOutbox(supabase: Admin, userId: string): Promise<void> {
+  return coalesceRoundOutbox(userId, () => drainRoundNotificationOutbox(supabase, userId));
+}
+
+async function drainRoundNotificationOutbox(supabase: Admin, userId: string): Promise<OutboxDrainResult> {
+  const pending = new Set<string>();
+  let retry = false;
   const { data, error } = await supabase.from('decision_notification_outbox')
     .select('id,decision_id,payload,round_verdicts!inner(is_current,verdict)').eq('user_id', userId).is('delivered_at', null);
   if (error) throw error;
   for (const row of data || []) {
     const decision = Array.isArray(row.round_verdicts) ? row.round_verdicts[0] : row.round_verdicts;
-    if (!decision?.is_current || !decision.verdict?.eligible) continue;
+    // Track only incomplete deliveries. Superseded decisions are rechecked if
+    // a later commit makes them current again (below); they never block delivery.
+    if (!decision?.is_current || !decision.verdict?.eligible) { pending.add(row.decision_id); continue; }
     const result = await sendNotification({ ...row.payload, decisionId: row.decision_id } as CreateNotificationParams);
     if (result.complete) {
       const { error } = await supabase.from('decision_notification_outbox').update({ delivered_at: new Date().toISOString() }).eq('id', row.id);
       if (error) throw error;
-    }
+    } else { pending.add(row.decision_id); retry = true; }
   }
+  return { pendingDecisionIds: pending, retry };
 }

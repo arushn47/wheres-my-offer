@@ -1,10 +1,10 @@
 import { expect, it } from 'vitest';
 import { Building2, Globe, HelpCircle, Plane } from 'lucide-react';
 import { getDriveModeBadgeConfig } from './drive-mode-badge';
-import { extractRecruitmentVenues, resolveDriveVenue } from '@/lib/drive-venues';
+import { extractRecruitmentVenues, resolveDriveMode } from '@/lib/drive-venues';
 
 function config(body: string) {
-  const venue = resolveDriveVenue({ version: 1, entries: extractRecruitmentVenues('Test', body) }, 'VIT Bhopal');
+  const venue = resolveDriveMode({ version: 1, entries: extractRecruitmentVenues('Test', body) }, 'VIT Bhopal');
   return getDriveModeBadgeConfig(venue.label, venue.requiresTravel);
 }
 it('uses a plane for physical attendance outside the home campus', () => {

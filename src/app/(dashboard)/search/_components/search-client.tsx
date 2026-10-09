@@ -17,6 +17,7 @@ import { StatusChip } from '@/components/ui/status-chip';
 import { DriveModeBadge } from '@/components/ui/drive-mode-badge';
 import { cleanRoleTitle, cleanEventTitle } from '@/lib/sync/extraction/events';
 import { cleanLocationString } from '@/lib/sync/extraction/locations';
+import type { DriveMode } from '@/lib/drive-venues';
 
 export interface SearchCompanyItem {
   id: string;
@@ -32,7 +33,8 @@ export interface SearchCompanyItem {
   stipend: string | null;
   location: string | null;
   notes: string | null;
-  driveMode: string;
+  driveMode: DriveMode;
+  driveModeVenue?: string;
   driveModeDetail?: string;
   driveModeRequiresTravel?: boolean;
   status: string;
@@ -151,6 +153,7 @@ export default function SearchClient({ data }: SearchClientProps) {
         c.category || '',
         c.location || '',
         c.driveMode || '',
+        c.driveModeDetail || '',
         c.driveNumber || '',
         c.driveName || '',
         c.status,
@@ -339,7 +342,7 @@ export default function SearchClient({ data }: SearchClientProps) {
                       </span>
                     )}
                     <div className="ml-auto shrink-0">
-                      <DriveModeBadge driveMode={c.driveMode} detail={c.driveModeDetail} requiresTravel={c.driveModeRequiresTravel} />
+                      <DriveModeBadge driveMode={c.driveMode} shortVenue={c.driveModeVenue} detail={c.driveModeDetail} requiresTravel={c.driveModeRequiresTravel} />
                     </div>
                   </div>
                 </Link>

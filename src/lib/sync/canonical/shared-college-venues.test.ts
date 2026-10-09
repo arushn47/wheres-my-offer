@@ -25,6 +25,15 @@ it('accepts an exact unnumbered primary anchor', async () => {
   await persistSharedCircularVenues(admin, drive, { ...source, id: 'primary', numbers: [] }, company, email);
   expect(rpc).toHaveBeenCalledOnce();
 });
+it.each(['EXL Service', 'Ecolab'])('persists the virtual visit from the matched %s registration circular', async name => {
+  const { rpc, admin } = setup();
+  await persistSharedCircularVenues(admin, drive, { ...source, id: 'primary', numbers: [], classification: 'registration', companyName: name }, { name, aliases: [] }, {
+    ...email, subject: `${name} Registration`, bodyPlain: 'Date of Visit:\n\n*Virtual*\n\nEligible Branches\nB. Tech',
+  });
+  expect(rpc.mock.calls[0]).toEqual(['merge_drive_recruitment_venues', expect.objectContaining({
+    p_source_id: 'primary', p_entries: [expect.objectContaining({ stage: 'Recruitment', kind: 'online', name: 'Online' })],
+  })]);
+});
 it('rejects company-only matches, pooled numbers, irrelevant mail and contradictory companies', async () => {
   const { rpc, admin } = setup();
   for (const candidate of [

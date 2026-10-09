@@ -3,7 +3,7 @@ import { Suspense } from 'react';
 import { requireSession } from '@/lib/auth';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { readDriveVenues } from '@/lib/drive-venue-data';
-import { knownCampus, resolveDriveVenue } from '@/lib/drive-venues';
+import { knownCampus, resolveDriveMode } from '@/lib/drive-venues';
 import { loadRoundStatusSummaries } from '@/lib/sync/recruitment/round-status-data';
 import { readRecentCollegeSearchRows } from '@/lib/sync/dashboard-readers';
 import { resolveRecruitmentStatus } from '@/lib/sync/recruitment/round-status';
@@ -117,7 +117,7 @@ export default async function SearchPage() {
       );
 
       const notes = app?.notes || null;
-      const venue = resolveDriveVenue(venueMap.get(drive.id), venueCampus);
+      const venue = resolveDriveMode(venueMap.get(drive.id), venueCampus);
       const driveMode = venue.label;
       const compName = comp?.name || drive.drive_name || 'Placement Drive';
       const isMultiDrive = (driveCountMap.get(compName.toLowerCase().trim()) || 0) > 1;
@@ -138,6 +138,7 @@ export default async function SearchPage() {
         notes,
         driveMode,
         driveModeDetail: venue.detail,
+        driveModeVenue: venue.shortVenue,
         driveModeRequiresTravel: venue.requiresTravel,
         status: eff.effectiveStatus,
         statusLabel: eff.statusSubtitle,
@@ -154,7 +155,7 @@ export default async function SearchPage() {
         const app = (applications || []).find((a) => (a as any).company_id === comp.id);
         const rawStatus = app?.status || 'applied';
         const eff = getEffectiveStage(rawStatus, null, [], app?.notes, app?.manual_override);
-        const venue = resolveDriveVenue(null);
+        const venue = resolveDriveMode(null);
         const driveMode = venue.label;
 
         companyItems.push({

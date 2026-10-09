@@ -15,15 +15,14 @@ export interface AdminContext {
 export async function requireAdmin(): Promise<AdminContext> {
   const session = await getSession();
   if (!session?.userId) {
-    const error: any = new Error('Unauthorized: Authentication required');
-    error.status = 401;
+    const error = Object.assign(new Error('Unauthorized: Authentication required'), { status: 401 });
     throw error;
   }
 
   const supabase = createAdminClient();
-  const { data: user } = await supabase
+  const { data: user, error: lookupError } = await supabase
     .from('users')
-    .select('role')
+    .select('role, email')
     .eq('id', session.userId)
     .maybeSingle();
 
@@ -32,12 +31,11 @@ export async function requireAdmin(): Promise<AdminContext> {
     .map((e) => e.trim().toLowerCase())
     .filter(Boolean);
 
-  const isEmailAdmin = Boolean(session.email && adminEmails.includes(session.email.toLowerCase()));
+  const isEmailAdmin = Boolean(!lookupError && user?.email && user.email.toLowerCase() === session.email.toLowerCase() && adminEmails.includes(user.email.toLowerCase()));
   const isRoleAdmin = user?.role === 'admin';
 
-  if (!isRoleAdmin && !isEmailAdmin) {
-    const error: any = new Error('Forbidden: Admin role required');
-    error.status = 403;
+  if (lookupError || (!isRoleAdmin && !isEmailAdmin)) {
+    const error = Object.assign(new Error('Forbidden: Admin role required'), { status: 403 });
     throw error;
   }
 
@@ -53,16 +51,12 @@ export async function checkIsAdmin(userId: string, email?: string | null): Promi
     .map((e) => e.trim().toLowerCase())
     .filter(Boolean);
 
-  if (email && adminEmails.includes(email.toLowerCase())) {
-    return true;
-  }
-
   const supabase = createAdminClient();
-  const { data: user } = await supabase
+  const { data: user, error } = await supabase
     .from('users')
-    .select('role')
+    .select('role, email')
     .eq('id', userId)
     .maybeSingle();
 
-  return user?.role === 'admin';
+  return !error && Boolean(user && (user.role === 'admin' || (email && user.email?.toLowerCase() === email.toLowerCase() && adminEmails.includes(email.toLowerCase()))));
 }

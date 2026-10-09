@@ -1314,13 +1314,15 @@ export function cleanRoleTitle(rawRole: string | null | undefined): string | nul
   role = role.replace(/\s*,\s*etc\.?$/i, '').trim();
 
   // 7. Strip trailing label boundaries or trailing punctuation
+  // Reject pointers before stripping JD; otherwise "Refer JD" becomes "Refer".
+  if (/^(?:refer|see|check|view|below)(?:\s|$)/i.test(role)) return null;
   role = role.replace(/\s*(?:[-–—]\s*)?(?:JD|Location|Eligible|Eligibility|Selection|CTC|Stipend|Process|Note|Registration|Date|Duration|As\s+part|We\s+would)\b.*$/i, '').trim();
   role = role.replace(/[()\[\]{}*,\.\s>\-–—:;_\\/|#?!=+]+$/, '').trim();
 
   if (role.length < 2) return null;
 
   // 8. Single generic header words alone (e.g. "Details", "Skill", "Skills", "Note", "Starting designation")
-  if (/^(?:details|skill|skills|note|notes|role|roles|position|positions|title|profile|job|jobs|description|qualification|qualifications|requirement|requirements|experience|criteria|eligibility|overview|summary|responsibilities|duties|tasks|information|important|mandatory|general|category|type|starting\s+designation|initial\s+designation|tentative\s+designation|proposed\s+designation|starting\s+role|initial\s+role)$/i.test(role)) {
+  if (/^(?:details|skill|skills|note|notes|role|roles|position|positions|title|profile|job|jobs|description|qualification|qualifications|requirement|requirements|expectations|experience|criteria|eligibility|overview|summary|responsibilities|duties|tasks|information|important|mandatory|general|category|type|starting\s+designation|initial\s+designation|tentative\s+designation|proposed\s+designation|starting\s+role|initial\s+role)$/i.test(role)) {
     return null;
   }
 
@@ -1788,6 +1790,8 @@ export function extractJobDetails(text: string): ExtractedJobDetails {
 
   // Role / Designation Extraction:
   // Uses clean text with preserved line breaks so newline-terminated titles extract cleanly
+  const positionTitle = cleanWithLines.match(/\bPosition\s+Title(?:\s*,\s*Responsibility\s+Level)?[ \t]*[:\-–—]?[ \t]*\r?\n[ \t]*([^\r\n]{2,100})/i);
+  if (positionTitle) role = cleanRoleTitle(positionTitle[1]);
   const explicitIstRole = cleanWithLines.match(/\bIS&T\s+((?:SDET|SRE)\s+Intern)\b/i);
   if (explicitIstRole) {
     role = cleanRoleTitle(`IS&T ${explicitIstRole[1]}`);
@@ -1911,6 +1915,7 @@ export function extractJobDetails(text: string): ExtractedJobDetails {
   const validLocations: string[] = [];
   for (const raw of rawCandidateStrings) {
     let rawLoc = raw
+      .replace(/\s*\((?:as\s+per|based\s+on|depending\s+on)\b.*$/i, '')
       .replace(/\s*(?:(?:\d+\.?\s*)?(?:Start\s+Date|Note|Eligibility|Criteria|Requirements?|Registration|CTC|Stipend|Internship\s+Duration|Joining\s+Date|Joining|Graduation\s+Year|Graduation|Batch|Timeline|Internship|Placement|Offer|Process|Website|Warm|Kind|Selection|Designation|Role|Job|JD|Position|Skills|Service|All\s+the|Work\s+Mode|Economy|On\s+Wed|For\s+more|PPO|About|Mandatory|depending\s+on|Fluent\s+English|Communication|You\s+can|Write\s+from|Forwarded|Queries|LC\s*\d|PRP|SJT|Anna|Lab|Hall|Venue|Whether|Academic\s+gap|Gap\s+allowed|Allowed|Backlog|Standing\s+arrear|History\s+of\s+arrear|Students?|Candidates?|Kindly|Please|Below\s+attachment|Refer\s+attachment|Allocated|Will\s+be\s+allocated|---)|[•*]).*$/i, '')
       // Truncate trailing prose sentences, but never mid-way through a company-suffix
       // abbreviation: "Tata Technologies Ltd. Pune/ Bangalore/Thane" must keep its city list

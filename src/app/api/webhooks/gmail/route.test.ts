@@ -102,3 +102,33 @@ it('retries a database account lookup failure instead of treating the account as
   expect(mocks.runSync).not.toHaveBeenCalled();
   expect(mocks.rpc.mock.calls.map(([name]) => name)).toEqual(['claim_gmail_pubsub_message', 'fail_gmail_pubsub_message']);
 });
+
+function sharedAccount(cursor = '123') {
+  vi.stubEnv('SHARED_COLLEGE_EMAIL', 'user@example.test');
+  mocks.query.mockImplementation((table: string) => {
+    const result = { data: table === 'gmail_accounts' ? { id: 'account', user_id: 'user-one', account_type: 'college', last_history_id: cursor } : null, error: null };
+    return { select: vi.fn().mockReturnThis(), eq: vi.fn().mockReturnThis(), maybeSingle: async () => result };
+  });
+}
+it.each([
+  { alreadyRunning: true, failed: 0, hasMore: true },
+  { alreadyRunning: false, failed: 1, hasMore: false },
+  { alreadyRunning: false, failed: 0, hasMore: true, userWorkPending: true },
+])('requests a retry for unfinished shared College ingestion: %j', async result => {
+  sharedAccount(); mocks.shared.mockResolvedValue(result);
+  await background(503);
+  expect(mocks.rpc.mock.calls.map(([name]) => name)).toEqual(['claim_gmail_pubsub_message', 'fail_gmail_pubsub_message']);
+});
+it('waits for all shared College batches before acknowledging', async () => {
+  sharedAccount();
+  mocks.shared.mockResolvedValueOnce({ alreadyRunning: false, failed: 0, hasMore: true }).mockResolvedValueOnce({ alreadyRunning: false, failed: 0, hasMore: false });
+  await background(200);
+  expect(mocks.shared).toHaveBeenCalledTimes(2);
+  expect(mocks.shared).toHaveBeenCalledWith(expect.objectContaining({ globalDeadline: expect.any(Number) }));
+  expect(mocks.rpc.mock.calls.map(([name]) => name)).toEqual(['claim_gmail_pubsub_message', 'complete_gmail_pubsub_message']);
+});
+it('does not acknowledge a shared history cursor behind the incoming push', async () => {
+  sharedAccount('122'); mocks.shared.mockResolvedValue({ alreadyRunning: false, failed: 0, hasMore: false });
+  await background(503);
+  expect(mocks.rpc.mock.calls.map(([name]) => name)).toEqual(['claim_gmail_pubsub_message', 'fail_gmail_pubsub_message']);
+});

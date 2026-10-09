@@ -1080,15 +1080,6 @@ async function processEmailForEventsAndStatusUnlocked(
       regDeadlineEvt.startTime.toISOString();
   }
 
-  // If this is a newly discovered company drive from a recent email, notify the candidate
-  const emailAgeMs = email.receivedAt ? Date.now() - new Date(email.receivedAt).getTime() : 0;
-  const isRecentEmail = emailAgeMs <= 48 * 60 * 60 * 1000;
-  const isDriveDiscoveryEmail =
-    ['registration', 'job_announcement', 'drive_announcement'].includes(emailClass) ||
-    Boolean(regDeadlineEvt) ||
-    Boolean(jobDetails.ctc || jobDetails.role);
-  const isInitialApplication = !existingApp || existingApp.status === 'not_applied';
-
   // Safely persist application
   const { data: existingAppRow } = await supabase
     .from('applications')
@@ -1111,22 +1102,7 @@ async function processEmailForEventsAndStatusUnlocked(
 
   // Positive status and shortlist alerts come from the shared holistic decision commit.
 
-  if (isRecentEmail && isDriveDiscoveryEmail && isInitialApplication && isCollegeBroadcast) {
-    const { notifyNewDrive } = await import('@/lib/notifications/service');
-    const { getDriveMode } = await import('@/lib/utils');
-    const driveMode = getDriveMode(appUpdate.notes as string);
-    await notifyNewDrive({
-      userId,
-      placementDriveId: targetDriveId,
-      companyName: compRecord?.name || 'New Placement Drive',
-      role: (appUpdate.role as string) || jobDetails.role || null,
-      ctc: (appUpdate.ctc as string) || jobDetails.ctc || null,
-      stipend: (appUpdate.stipend as string) || jobDetails.stipend || null,
-      location: (appUpdate.location as string) || resolvedLocation || null,
-      driveMode,
-      category: (appUpdate.category as string) || null,
-      sourceEmailId: emailDbId,
-    });
-  }
+  // New-drive delivery runs after the committed recalculation. Its paired
+  // personal announcement + exact college source gate is shared by both inboxes.
 }
 

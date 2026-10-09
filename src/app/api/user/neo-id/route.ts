@@ -17,7 +17,8 @@ export async function PATCH(request: Request) {
     );
   }
 
-  const body = await request.json();
+  const body = await request.json().catch(() => null);
+  if (!body || !Object.hasOwn(body, 'neo_id') || (body.neo_id !== null && typeof body.neo_id !== 'string')) return NextResponse.json({ error: { message: 'Invalid Neo ID payload', code: 'invalid_neo_id' } }, { status: 400 });
   const { neo_id } = body;
   const rawNeoId = typeof neo_id === 'string' ? neo_id.trim().toUpperCase() : null;
   const normalizedNeoId = rawNeoId || null;
@@ -45,6 +46,7 @@ export async function PATCH(request: Request) {
 
     if (checkError) {
       console.error('[neo-id] Error checking existing Neo ID:', checkError);
+      return NextResponse.json({ error: { message: 'Could not verify Neo ID uniqueness', code: 'db_error' } }, { status: 503 });
     }
 
     if (existingUser) {

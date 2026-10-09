@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getSession } from '@/lib/auth';
 import { createAdminClient } from '@/lib/supabase/admin';
+import { feedbackInput } from '@/lib/security/input';
 
 export async function POST(request: Request) {
   try {
@@ -14,24 +15,9 @@ export async function POST(request: Request) {
     }
 
     const body = await request.json().catch(() => null);
-    if (!body) {
-      return NextResponse.json({ error: 'Invalid JSON payload' }, { status: 400 });
-    }
-
-    const {
-      category = 'general',
-      severity = 'normal',
-      subject = '',
-      message = '',
-      metadata = {},
-    } = body;
-
-    if (!subject.trim() || !message.trim()) {
-      return NextResponse.json(
-        { error: 'Both subject and detailed description are required.' },
-        { status: 400 }
-      );
-    }
+    const parsed = feedbackInput.safeParse(body);
+    if (!parsed.success) return NextResponse.json({ error: 'Invalid feedback. Supply a subject (up to 200 characters) and message (up to 10,000 characters).' }, { status: 400 });
+    const { category, severity, subject, message, metadata } = parsed.data;
 
     // Sanitize and validate category & severity
     const validCategories = ['bug', 'feature', 'sync_issue', 'general'];
@@ -137,7 +123,7 @@ ${escapeHtml(message.trim())}
               <tr>
                 <td style="padding: 6px 0; color: #a1a1aa;">Email:</td>
                 <td style="padding: 6px 0; color: #34d399; font-weight: 500;">
-                  <a href="mailto:${session.email}" style="color: #34d399; text-decoration: none;">${session.email}</a>
+                  <a href="mailto:${escapeHtml(session.email)}" style="color: #34d399; text-decoration: none;">${escapeHtml(session.email)}</a>
                 </td>
               </tr>
               ${neoId ? `
@@ -207,7 +193,7 @@ ${escapeHtml(message.trim())}
 
     // Fallback: If no Resend API key or if it failed, log neatly on server
     if (!emailDispatched) {
-      console.log(`\n========================================\n[FEEDBACK RECEIVED]\nFrom: ${session.name} <${session.email}>\nSubject: ${emailSubject}\nCategory: ${safeCategory} | Severity: ${safeSeverity}\nMessage:\n${message}\nRecipient Target: ${recipientEmail}\n(Add RESEND_API_KEY to .env.local to receive direct inbox emails)\n========================================\n`);
+      console.warn('[Feedback API] Email was not dispatched; report persisted:', savedToDb);
     }
 
     return NextResponse.json({

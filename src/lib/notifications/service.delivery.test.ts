@@ -24,6 +24,13 @@ import { sendNotification } from './service';
 const params={userId:'user',placementDriveId:'drive',type:'shortlist_match' as const,title:'Fixture shortlist',body:'Fixture',dedupeKey:'fixture',decisionId:'decision'};
 beforeEach(()=>{state.rows=[];state.insertFailure=false;state.decisionEligible=true;state.claimed=false;push.mockReset();});
 describe('committed shortlist delivery',()=>{
+ it('releases a push claim when the subscription lookup throws so delivery can retry',async()=>{
+  push.mockRejectedValueOnce(new Error('Subscription lookup unavailable'));
+  await expect(sendNotification(params)).rejects.toThrow('Subscription lookup unavailable');
+  expect(state.claimed).toBe(false);expect(state.rows[0].push_delivered_at).toBeNull();
+  push.mockResolvedValueOnce({sent:1,failed:0});
+  expect((await sendNotification(params)).pushSent).toBe(true);expect(state.rows).toHaveLength(1);
+ });
  it('does not dispatch when the current decision denies eligibility',async()=>{
   state.decisionEligible=false;await sendNotification(params);expect(state.rows).toHaveLength(0);expect(push).not.toHaveBeenCalled();
  });

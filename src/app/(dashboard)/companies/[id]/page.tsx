@@ -3,7 +3,7 @@ import { notFound, redirect } from 'next/navigation';
 import { requireSession } from '@/lib/auth';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { readDriveVenues } from '@/lib/drive-venue-data';
-import { knownCampus, resolveDriveVenue } from '@/lib/drive-venues';
+import { knownCampus, resolveDriveMode } from '@/lib/drive-venues';
 import CompanyDetailClient, { type CompanyDetail } from './_components/company-detail-client';
 import { detectCampus, detectBranch, detectRegNo } from '@/lib/utils';
 import { extractAnnouncedRoundsFromEmails, buildAnnouncedProcessToken } from '@/lib/sync/recruitment/round-identity';
@@ -641,7 +641,7 @@ export default async function CompanyDetailPage(props: {
     for (const scan of decision.verdict.evaluations || []) rosterStates.set(scan.emailId, scan.state);
   }
   const detail: CompanyDetail = {
-    venue: resolveDriveVenue(venueMap.get(placementDriveId || ''), knownCampus(collegeAccount?.email)),
+    venue: resolveDriveMode(venueMap.get(placementDriveId || ''), knownCampus(collegeAccount?.email)),
     id: company.id,
     placementDriveId,
     roundDecisions: displayDecisions,

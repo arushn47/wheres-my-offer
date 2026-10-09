@@ -1,6 +1,11 @@
 import { buildExtractionProvenance } from './extraction/extraction-provenance';
+import { loadCachedPdfAttachments } from './canonical/cached-pdf-attachments';
+import { mergePdfJobDetails, type CachedPdfAttachment } from './extraction/pdf-parser';
+import { isRegistrationAnnouncement, isRegistrationPair, isPersonalNeoPatAnnouncement, selectRegistrationCircular } from './identity/registration-pair';
+import { persistSharedCircularVenues } from './canonical/shared-college-venues';
+import { resolveDriveVenue, knownCampus, type RecruitmentVenues } from '@/lib/drive-venues';
 import { loadUserCandidateIdentity } from '@/lib/sync/identity/user-identity';
-import { isCompanySubjectMatch as matchesCompanySubject, loadRecalculationScope, loadSelectedCanonicalBodies, type RecalculationCircularMetadata } from './recalculation-scope';
+import { isCompanySubjectMatch as matchesCompanySubject, loadRecalculationScope, loadScopedMetadata, loadScopedCircularMetadata, loadSelectedCanonicalBodies, type RecalculationCircularMetadata } from './recalculation-scope';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { withQueryMetrics } from '@/lib/supabase/query-metrics';
 import {
@@ -82,15 +87,9 @@ async function recalculateApplicationStatusesUnlocked(
     message: `Recalculating application stages, CTCs & calendar events for official drivesâ€¦`,
   });
 
-  const { data: userData } = await supabase
-    .from('users')
-    .select('neo_id, email, name')
-    .eq('id', userId)
-    .single();
-
   const candidateIdentity = await loadUserCandidateIdentity(supabase, userId);
-  const userNeoId = candidateIdentity.neoId || userData?.neo_id || null;
-  const userEmail = candidateIdentity.personalEmail || candidateIdentity.emails[0] || userData?.email || '';
+  const userNeoId = candidateIdentity.neoId || null;
+  const userEmail = candidateIdentity.personalEmail || candidateIdentity.emails[0] || '';
 
   if (!userEmail) return { updatedCount: 0, results: [] };
 
@@ -109,7 +108,9 @@ async function recalculateApplicationStatusesUnlocked(
   const rawEmailChunks: any[] = [];
   const pageSize = 1000;
   let page = 0;
-  while (true) {
+  const canonicalBodies = new Map<string, string>();
+  if (sourceScope) rawEmailChunks.push(...await loadScopedMetadata(supabase, 'personal_emails', sourceScope.personalFilters, userId));
+  else while (true) {
     const { data: chunk, error: chunkErr } = await supabase
       .from('personal_emails')
       .select<string>(sourceScope
@@ -133,8 +134,15 @@ async function recalculateApplicationStatusesUnlocked(
   // Preserve the light catalog for identity/link checks, but hydrate only evidence
   // that can be consumed by a selected drive. Never classify unrelated bodies.
   const selectedPersonalEmails = sourceScope ? rawEmailChunks.filter(email => sourceScope.includesPersonal(email)) : rawEmailChunks;
+  const scopedCirculars = sourceScope && !options?.preloadedCollegeEmails
+    ? await loadScopedCircularMetadata(supabase, sourceScope, selectedPersonalEmails.flatMap(email => email.college_email_id ? [email.college_email_id] : [])) : null;
   if (sourceScope) {
-    const bodies = await loadSelectedCanonicalBodies(supabase, selectedPersonalEmails.flatMap(email => email.college_email_id ? [email.college_email_id] : []));
+    // Hydrate the union once: personal receipts commonly point to the same
+    // canonical row as the matching broadcast circular.
+    const bodies = await loadSelectedCanonicalBodies(supabase, [
+      ...selectedPersonalEmails.flatMap(email => email.college_email_id ? [email.college_email_id] : []),
+      ...(scopedCirculars || []).filter(email => sourceScope.includesCircular(email)).map(email => email.id),
+    ], canonicalBodies);
     for (const email of selectedPersonalEmails) {
       if (email.college_email_id && bodies.has(email.college_email_id)) email.college_emails = { body_text: bodies.get(email.college_email_id) };
     }
@@ -184,6 +192,7 @@ async function recalculateApplicationStatusesUnlocked(
     assignment_state?: string | null;
     assignment_source?: string | null;
     has_canonical_body?: boolean;
+    attachments?: CachedPdfAttachment[];
   }> = rawEmailChunks.map((email: any) => {
     const canonical = Array.isArray(email.college_emails)
       ? email.college_emails[0]
@@ -227,6 +236,7 @@ async function recalculateApplicationStatusesUnlocked(
     canonical_email_id?: string | null;
     assignment_source?: string | null;
     has_canonical_body?: boolean;
+    attachments?: CachedPdfAttachment[];
   }> = [];
 
   if (options?.preloadedCollegeEmails) {
@@ -234,7 +244,7 @@ async function recalculateApplicationStatusesUnlocked(
   } else {
     let clgPage = 0;
     while (true) {
-      const { data: cChunk, error: cErr } = await supabase
+      const { data: cChunk, error: cErr } = scopedCirculars ? { data: scopedCirculars, error: null } : await supabase
         .from('college_emails')
         .select<string>(sourceScope
           ? 'id, subject, sender_email, received_at, created_at, classification, parsed_company_name, parsed_drive_numbers'
@@ -251,7 +261,7 @@ async function recalculateApplicationStatusesUnlocked(
       if (!cChunk || cChunk.length === 0) break;
 
       const selectedBodies = sourceScope
-        ? await loadSelectedCanonicalBodies(supabase, cChunk.filter(email => sourceScope.includesCircular(email)).map(email => email.id))
+        ? await loadSelectedCanonicalBodies(supabase, cChunk.filter(email => sourceScope.includesCircular(email)).map(email => email.id), canonicalBodies)
         : null;
 
       for (const ce of cChunk) {
@@ -288,12 +298,21 @@ async function recalculateApplicationStatusesUnlocked(
         });
       }
 
-      if (cChunk.length < pageSize) break;
+      if (scopedCirculars || cChunk.length < pageSize) break;
       clgPage++;
     }
   }
 
   if (allEmails.length === 0 && allCollegeEmails.length === 0) return { updatedCount: 0, results: [] };
+
+  const pdfAttachments = await loadCachedPdfAttachments(supabase, [
+    ...allCollegeEmails.filter(email => !sourceScope || sourceScope.includesCircular(email)).map(email => email.id),
+    ...selectedPersonalEmails.flatMap(email => email.college_email_id ? [email.college_email_id] : []),
+  ]);
+  for (const email of [...allEmails, ...allCollegeEmails]) {
+    const sourceId = email.college_email_id || email.canonical_email_id;
+    if (sourceId) email.attachments = pdfAttachments.get(sourceId);
+  }
 
 
   const [
@@ -308,7 +327,7 @@ async function recalculateApplicationStatusesUnlocked(
       .select('id, name, aliases'),
     supabase
       .from('placement_drives')
-      .select('id, company_id, drive_number, normalized_drive_number, drive_name, role, category, ctc, stipend, location, registration_deadline, eligibility, branches, cgpa_requirement, backlog_requirement, excluded_email_ids, created_at'),
+      .select('id, company_id, drive_number, normalized_drive_number, drive_name, role, category, ctc, stipend, location, registration_deadline, eligibility, branches, cgpa_requirement, backlog_requirement, excluded_email_ids, source_college_email_id, created_at'),
     supabase
       .from('email_drive_links')
       .select('email_id, placement_drive_id'),
@@ -543,6 +562,21 @@ async function recalculateApplicationStatusesUnlocked(
           return true;
         });
         const driveExcluded = driveExclusionsMap.get(drive.id);
+        const announcements = driveEmails.filter(isPersonalNeoPatAnnouncement);
+        const matchingRegistration = selectRegistrationCircular(drive, announcements, allCollegeEmails.filter(ce =>
+          (!driveExcluded || !driveExcluded.has(ce.id)) &&
+          (matchesCompanySubject(ce.subject || '', comp, drive) || Boolean(ce.parsed_company_name && isFuzzyCompanyMatch(comp.name, ce.parsed_company_name)))
+        ));
+        if (matchingRegistration && drive.source_college_email_id !== matchingRegistration.id) {
+          const { error } = await supabase.from('placement_drives').update({ source_college_email_id: matchingRegistration.id }).eq('id', drive.id);
+          if (error) throw error;
+          drive.source_college_email_id = matchingRegistration.id;
+        }
+        // A paired announcement can precede NeoPAT across midnight. Follow-up
+        // rounds still use the existing lower date boundary below.
+        if (matchingRegistration && !driveEmails.some(email => email.id === matchingRegistration.id)) {
+          driveEmails.push(matchingRegistration as typeof driveEmails[number]);
+        }
 
         // 1. Include college email set as source on drive (strictly guarded by registration date boundary)
         if ((drive as any).source_college_email_id) {
@@ -679,11 +713,26 @@ async function recalculateApplicationStatusesUnlocked(
           }
         }
 
+        // Apply the same cycle check even to existing/stale primary anchors and
+        // company-name fallbacks, before they can affect status, deadline or cards.
+        for (let index = driveEmails.length - 1; index >= 0; index--) {
+          const source = driveEmails[index];
+          const circular = collegeEmailById.get(source.id);
+          if (!userPersonalEmailIdSet.has(source.id) && isRegistrationAnnouncement(source) &&
+            (!circular || !announcements.some(personal => isRegistrationPair(drive, personal, circular)))) driveEmails.splice(index, 1);
+        }
         if (driveEmails.length === 0) return;
         await assertMutationLease();
         for (const email of driveEmails) {
           if (!userPersonalEmailIdSet.has(email.id)) {
             email.body_snippet = getEvidenceMessageText({ subject: email.subject || '', bodyPlain: (email as { body_text?: string }).body_text || email.body_snippet || '', bodyHtml: '', bodySnippet: '' });
+            await persistSharedCircularVenues(supabase, drive, {
+              id: email.id, numbers: collegeEmailById.get(email.id)?.parsed_drive_numbers || [],
+              classification: email.classification || null, companyName: collegeEmailById.get(email.id)?.parsed_company_name || null,
+            }, comp, {
+              subject: email.subject || '', bodyPlain: email.body_snippet, bodyHtml: '', bodySnippet: '',
+              receivedAt: new Date(email.received_at!),
+            } as import('@/lib/gmail/client').ParsedEmail);
           }
         }
 
@@ -932,7 +981,7 @@ async function recalculateApplicationStatusesUnlocked(
         });
 
         const mainEmailText = mainCircularEmail ? `${mainCircularEmail.subject || ''}\n${(mainCircularEmail as any).body_text || mainCircularEmail.body_snippet || ''}` : '';
-        const mainJobDetails = extractJobDetails(mainEmailText);
+        const mainJobDetails = mergePdfJobDetails(extractJobDetails(mainEmailText), mainCircularEmail?.attachments);
 
         const combinedEmailText = activeDriveEmails
           .map((e) => `${e.subject || ''}\n${(e as any).body_text || e.body_snippet || ''}`)
@@ -951,7 +1000,7 @@ async function recalculateApplicationStatusesUnlocked(
         };
 
         if (!extractedJob.ctc || !extractedJob.stipend || !extractedJob.location || !extractedJob.role || !extractedJob.eligibility) {
-          const combinedDetails = extractJobDetails(combinedEmailText);
+          const combinedDetails = mergePdfJobDetails(extractJobDetails(combinedEmailText), activeDriveEmails.flatMap(email => email.attachments || []));
           if (!extractedJob.ctc && combinedDetails.ctc) extractedJob.ctc = combinedDetails.ctc;
           if (!extractedJob.stipend && combinedDetails.stipend) extractedJob.stipend = combinedDetails.stipend;
           if (!extractedJob.location && combinedDetails.location) extractedJob.location = combinedDetails.location;
@@ -968,7 +1017,7 @@ async function recalculateApplicationStatusesUnlocked(
         if (!extractedJob.ctc && drive.ctc) extractedJob.ctc = drive.ctc;
         if (!extractedJob.stipend && drive.stipend) extractedJob.stipend = drive.stipend;
         if (!extractedJob.location && drive.location) extractedJob.location = drive.location;
-        if (!extractedJob.role && drive.role) extractedJob.role = drive.role;
+        if (!extractedJob.role && drive.role) extractedJob.role = cleanRoleTitle(drive.role);
         if (!extractedJob.category && drive.category) extractedJob.category = drive.category;
 
         // If critical job details (location, stipend, CTC) are missing because this company
@@ -1891,7 +1940,7 @@ async function recalculateApplicationStatusesUnlocked(
         // (regardless of whether this specific user applied to this drive or not)
         await supabase.from('placement_drives').update({
           extraction_evidence: appPayload.extraction_evidence || undefined,
-          role: finalRole || drive.role || null,
+          role: finalRole || cleanRoleTitle(drive.role) || null,
           category: finalCategory || drive.category || null,
           ctc: finalCtc || drive.ctc || null,
           stipend: finalStipend || drive.stipend || null,
@@ -2166,7 +2215,7 @@ type CatchUpApplication = {
   role?: string | null; ctc?: string | null; stipend?: string | null;
   location?: string | null; notes?: string | null; category?: string | null;
 };
-type CatchUpDrive = { id: string; company_id: string | null; drive_name: string | null; created_at: string | null; source_college_email_id: string | null };
+type CatchUpDrive = { id: string; company_id: string | null; drive_name: string | null; created_at: string | null; source_college_email_id: string | null; drive_number?: string | null; normalized_drive_number?: string | null; recruitment_venues?: RecruitmentVenues | null; excluded_email_ids?: string[] | null };
 type CatchUpEvent = { id: string; placement_drive_id: string; event_type: string; start_time: string; venue: string | null };
 
 async function readCatchUpPages<T>(page: (from: number, to: number) => PromiseLike<{ data: T[] | null; error?: unknown }>): Promise<T[]> {
@@ -2227,7 +2276,7 @@ export async function catchUpMissingNotifications(
 
   // 3. Fetch placement drives & company names
   const placementDrives = await readCatchUpBatches<CatchUpDrive>(driveIds, (ids, from, to) => supabase
-    .from('placement_drives').select('id, drive_name, company_id, created_at, source_college_email_id')
+    .from('placement_drives').select('id, drive_name, company_id, created_at, source_college_email_id, drive_number, normalized_drive_number, recruitment_venues, excluded_email_ids')
     .in('id', ids).order('id').range(from, to));
 
   const drivesMap = new Map(placementDrives.map(d => [d.id, d]));
@@ -2241,24 +2290,25 @@ export async function catchUpMissingNotifications(
   const companyMap = new Map(companies.map(c => [c.id, c.name]));
 
   // 4. Pre-fetch all existing notification dedupe_keys for this user
-  const existingNotifs = await readCatchUpPages<{ dedupe_key: string | null }>((from, to) => supabase
-    .from('notifications').select('dedupe_key').eq('user_id', userId).order('id').range(from, to));
+  const existingNotifs = await readCatchUpPages<{ dedupe_key: string | null; push_delivered_at?: string | null }>((from, to) => supabase
+    .from('notifications').select('dedupe_key,push_delivered_at').eq('user_id', userId).order('id').range(from, to));
 
   const existingDedupeKeys = new Set(
     existingNotifs.map(n => n.dedupe_key).filter(Boolean)
   );
 
-  const missingDriveIds = driveIds.filter(id => !existingDedupeKeys.has(`new_drive:${userId}:${id}`));
-  const personalEmails = await readCatchUpBatches<{ id: string; placement_drive_id: string; received_at: string }>(missingDriveIds, (ids, from, to) => supabase
-    .from('personal_emails').select('id,placement_drive_id,received_at').eq('user_id', userId)
+  const retryableKeys = new Set(existingNotifs.filter(row => row.push_delivered_at === null).map(row => row.dedupe_key));
+  const missingDriveIds = driveIds.filter(id => !existingDedupeKeys.has(`new_drive:${userId}:${id}`) || retryableKeys.has(`new_drive:${userId}:${id}`));
+  const personalEmails = await readCatchUpBatches<import('./identity/registration-pair').RegistrationPersonal>(missingDriveIds, (ids, from, to) => supabase
+    .from('personal_emails').select('id,placement_drive_id,received_at,sender,subject,classification').eq('user_id', userId)
     .in('placement_drive_id', ids).gte('received_at', recentThresholdIso)
     .order('received_at', { ascending: false }).order('id').range(from, to));
   const personalByDrive = new Map<string, (typeof personalEmails)[number]>();
-  for (const email of personalEmails) if (!personalByDrive.has(email.placement_drive_id)) personalByDrive.set(email.placement_drive_id, email);
-  const collegeIds = [...new Set<string>(missingDriveIds.filter(id => !personalByDrive.has(id))
+  for (const email of personalEmails) if (email.placement_drive_id && isPersonalNeoPatAnnouncement(email) && !personalByDrive.has(email.placement_drive_id)) personalByDrive.set(email.placement_drive_id, email);
+  const collegeIds = [...new Set<string>(missingDriveIds
     .map(id => drivesMap.get(id)?.source_college_email_id).filter((id): id is string => Boolean(id)))];
-  const collegeEmails = await readCatchUpBatches<{ id: string; received_at: string }>(collegeIds, (ids, from, to) => supabase
-    .from('college_emails').select('id,received_at').in('id', ids).gte('received_at', recentThresholdIso)
+  const collegeEmails = await readCatchUpBatches<import('./identity/registration-pair').RegistrationCircular>(collegeIds, (ids, from, to) => supabase
+    .from('college_emails').select('id,received_at,subject,classification,parsed_drive_numbers,processing_status').in('id', ids)
     .order('id').range(from, to));
   const collegeById = new Map(collegeEmails.map(email => [email.id, email]));
   const events = await readCatchUpBatches<CatchUpEvent>(driveIds, (ids, from, to) => supabase
@@ -2275,7 +2325,10 @@ export async function catchUpMissingNotifications(
   const { notifyNewDrive, notifyEventScheduled } = await import(
     '@/lib/notifications/service'
   );
-  const { getDriveMode } = await import('@/lib/utils');
+  const { data: collegeAccounts, error: campusError } = await supabase.from('gmail_accounts').select('email')
+    .eq('user_id', userId).eq('account_type', 'college').eq('is_connected', true);
+  if (campusError) throw campusError;
+  const campus = knownCampus(collegeAccounts?.[0]?.email);
 
   // 5. Evaluate each tracked drive for missing notifications
   for (const app of userApps) {
@@ -2288,27 +2341,14 @@ export async function catchUpMissingNotifications(
 
     // A. Check for missing New Drive notification
     const newDriveDedupeKey = `new_drive:${userId}:${driveId}`;
-    if (!existingDedupeKeys.has(newDriveDedupeKey)) {
+    if (!existingDedupeKeys.has(newDriveDedupeKey) || retryableKeys.has(newDriveDedupeKey)) {
       const pEmail = personalByDrive.get(driveId);
-
-      let isRecent = Boolean(pEmail);
-      let sourceEmailId = pEmail?.id;
-
-      if (!isRecent && drive.source_college_email_id) {
-        const cEmail = collegeById.get(drive.source_college_email_id);
-
-        if (cEmail) {
-          isRecent = true;
-          sourceEmailId = cEmail.id;
-        }
-      }
-
-      if (!isRecent && drive.created_at && now - new Date(drive.created_at).getTime() <= maxEmailAgeMs) {
-        isRecent = true;
-      }
-
-      if (isRecent) {
-        const driveMode = getDriveMode(app.notes as string);
+      const cEmail = drive.source_college_email_id ? collegeById.get(drive.source_college_email_id) : undefined;
+      if (pEmail && cEmail && !drive.excluded_email_ids?.includes(cEmail.id) && isRegistrationPair(drive, pEmail, cEmail)) {
+        const excluded = new Set(drive.excluded_email_ids || []);
+        const projection = drive.recruitment_venues?.version === 1 && Array.isArray(drive.recruitment_venues.entries)
+          ? { ...drive.recruitment_venues, entries: drive.recruitment_venues.entries.filter(entry => entry && !excluded.has(entry.sourceId)) } : null;
+        const driveMode = resolveDriveVenue(projection, campus).label;
         await notifyNewDrive({
           userId,
           placementDriveId: driveId,
@@ -2319,7 +2359,7 @@ export async function catchUpMissingNotifications(
           location: app.location || null,
           driveMode,
           category: app.category || null,
-          sourceEmailId,
+          sourceEmailId: pEmail.id,
         });
         existingDedupeKeys.add(newDriveDedupeKey);
         newDrivesNotified++;

@@ -22,11 +22,12 @@ export async function POST(req: NextRequest) {
 
     const supabase = createAdminClient();
 
-    await supabase
+    const { error } = await supabase
       .from('push_subscriptions')
       .delete()
       .eq('user_id', session.userId)
       .eq('endpoint', endpoint);
+    if (error) throw error;
 
     return NextResponse.json({ success: true });
   } catch (err) {

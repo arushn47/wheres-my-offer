@@ -99,13 +99,14 @@ export async function runSharedCollegeSync(options: { limit?: number; globalDead
     p_lease_seconds: 180,
   });
   if (acquireError) throw new Error(`Could not acquire shared College lease: ${acquireError.message}`);
-  if (acquired !== true) return { alreadyRunning: true, inbox: account.email, fetched: 0, ingested: 0, skipped: 0, failed: 0, hasMore: true, fannedOutUsers: 0 };
+  if (acquired !== true) return { alreadyRunning: true, inbox: account.email, fetched: 0, ingested: 0, skipped: 0, failed: 0, hasMore: true, fannedOutUsers: 0, userWorkPending: false };
 
   let ingested = 0;
   let skipped = 0;
   let failed = 0;
   let fetched = 0;
   let hasMore = false;
+  let userWorkPending = false;
   let fanOutNeeded = false;
   try {
     const { gmail } = await createGmailClient(account as GmailAccount);
@@ -243,6 +244,12 @@ export async function runSharedCollegeSync(options: { limit?: number; globalDead
         const result = await ingestSharedCollegeCircular({ account: account as GmailAccount, gmailMessageId: messageId, gmail });
         if (result.canonicalId) ingested++;
         else skipped++;
+        if (result.deferredUsers) {
+          // Preserve this message's offset until its busy recipients can commit
+          // their scoped work. Successful recipients replay through dedupe keys.
+          userWorkPending = true;
+          break;
+        }
       } catch (error) {
         failed++;
         console.error(`[Shared College Sync] Failed message ${messageId}:`, error);
@@ -320,7 +327,7 @@ export async function runSharedCollegeSync(options: { limit?: number; globalDead
     }
 
     await checkpoint(supabase, account.id, runId, state);
-    return { alreadyRunning: false, inbox: account.email, fetched, ingested, skipped, failed, hasMore, fannedOutUsers };
+    return { alreadyRunning: false, inbox: account.email, fetched, ingested, skipped, failed, hasMore, fannedOutUsers, userWorkPending };
   } finally {
     const { error: releaseError } = await supabase.rpc('release_shared_college_sync_lease', {
       p_account_id: account.id,

@@ -1,22 +1,11 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
-import * as jose from 'jose';
+import { randomBytes } from 'node:crypto';
+import { verifySessionToken } from '@/lib/security/session';
+import { contentSecurityPolicy, isAllowedMutation, isPublicPath } from '@/lib/security/request-policy';
+import { apiLimiter, ratePolicy } from '@/lib/security/rate-limit';
+import { bodyWithinLimit } from '@/lib/security/body-limit';
 import { shouldPauseRequest } from '@/lib/cutover/write-pause';
-
-/** Routes that don't require authentication */
-const PUBLIC_ROUTES = [
-  '/login',
-  '/privacy',
-  '/terms',
-  '/feedback',
-  '/support',
-  '/api/auth/google',
-  '/api/auth/callback',
-  '/api/cron',
-  '/api/admin/migration/phase3',
-  '/api/sync/reprocess',
-  '/api/webhooks',
-];
 
 export async function proxy(request: NextRequest) {
   const host = request.headers.get('x-forwarded-host') || request.headers.get('host') || '';
@@ -37,36 +26,41 @@ export async function proxy(request: NextRequest) {
     );
   }
 
-  // Allow public routes and static assets
-  if (
-    PUBLIC_ROUTES.some((route) => pathname.startsWith(route)) ||
-    pathname.startsWith('/_next') ||
-    pathname.startsWith('/favicon') ||
-    pathname.includes('.')
-  ) {
-    return NextResponse.next();
+  const api = pathname.startsWith('/api/');
+  if (api && !isAllowedMutation(request)) {
+    return NextResponse.json({ error: 'Cross-origin request rejected' }, { status: 403 });
   }
-
-  // Check for session cookie
   const sessionToken = request.cookies.get('session')?.value;
-
-  if (!sessionToken) {
-    const loginUrl = new URL('/login', request.url);
-    return NextResponse.redirect(loginUrl);
+  const session = sessionToken ? await verifySessionToken(sessionToken) : null;
+  if (api && !['/api/cron/sync', '/api/webhooks/gmail', '/api/admin/migration/phase3'].includes(pathname)) {
+    const policy = ratePolicy(pathname, request.method);
+    // Vercel replaces this header at the trusted ingress; never trust it locally.
+    const ip = process.env.VERCEL === '1' ? request.headers.get('x-vercel-forwarded-for') || request.headers.get('x-forwarded-for') || 'unknown' : 'local';
+    const limited = apiLimiter.consume(`${session?.userId || ip}:${policy.group}`, policy.limit, policy.windowMs);
+    if (!limited.allowed) return NextResponse.json({ error: 'Too many requests. Please retry shortly.' }, { status: 429, headers: { 'Retry-After': String(limited.retryAfter), 'Cache-Control': 'no-store' } });
   }
-
-  // Verify JWT
-  try {
-    const secret = new TextEncoder().encode(process.env.TOKEN_ENCRYPTION_KEY);
-    await jose.jwtVerify(sessionToken, secret);
-    return NextResponse.next();
-  } catch {
-    // Invalid/expired token — redirect to login
-    const loginUrl = new URL('/login', request.url);
-    const response = NextResponse.redirect(loginUrl);
-    response.cookies.set('session', '', { maxAge: 0, path: '/' });
+  if (!isPublicPath(pathname) && !session) {
+    const response = api
+      ? NextResponse.json({ error: 'Unauthorized' }, { status: 401, headers: { 'Cache-Control': 'no-store' } })
+      : NextResponse.redirect(new URL('/login', request.url));
+    if (sessionToken) response.cookies.set('session', '', { maxAge: 0, path: '/' });
     return response;
   }
+
+  if (api && !['GET', 'HEAD', 'OPTIONS'].includes(request.method) && !(await bodyWithinLimit(request, pathname === '/api/feedback' ? 64 * 1024 : 256 * 1024))) {
+    return NextResponse.json({ error: 'Request body is too large or invalid' }, { status: 413 });
+  }
+
+  const headers = new Headers(request.headers);
+  const nonce = randomBytes(16).toString('base64');
+  const csp = contentSecurityPolicy(nonce, process.env.NODE_ENV !== 'production');
+  // Override caller-supplied values. Next.js uses the request CSP for script nonces.
+  headers.set('x-nonce', nonce);
+  headers.set('Content-Security-Policy', csp);
+  const response = NextResponse.next({ request: { headers } });
+  response.headers.set('Content-Security-Policy', csp);
+  if (api) response.headers.set('Cache-Control', 'private, no-store');
+  return response;
 }
 
 export const config = {

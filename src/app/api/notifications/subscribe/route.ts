@@ -1,12 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/lib/auth';
 import { createAdminClient } from '@/lib/supabase/admin';
+import { updateNotificationPreferences } from '@/lib/notifications/preferences';
 
 interface SubscribePayload {
   endpoint: string;
   p256dh: string;
   auth: string;
   userAgent?: string;
+  enablePush?: boolean;
 }
 
 function isValidPushEndpoint(value: string): boolean {
@@ -40,7 +42,10 @@ export async function POST(req: NextRequest) {
   try {
     const body: SubscribePayload = await req.json();
 
-    if (!body.endpoint || !body.p256dh || !body.auth || !isValidPushEndpoint(body.endpoint)) {
+    if (typeof body.endpoint !== 'string' || typeof body.p256dh !== 'string' || typeof body.auth !== 'string' ||
+        !/^[A-Za-z0-9_-]{80,100}={0,2}$/.test(body.p256dh) || !/^[A-Za-z0-9_-]{20,30}={0,2}$/.test(body.auth) ||
+        (body.userAgent !== undefined && (typeof body.userAgent !== 'string' || body.userAgent.length > 1024)) ||
+        (body.enablePush !== undefined && typeof body.enablePush !== 'boolean') || !isValidPushEndpoint(body.endpoint)) {
       return NextResponse.json({ error: 'Missing required subscription keys' }, { status: 400 });
     }
 
@@ -65,23 +70,9 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Failed to save subscription' }, { status: 500 });
     }
 
-    // Auto-enable browser push in their global settings if it's currently disabled
-    const { data: settings } = await supabase
-      .from('user_settings')
-      .select('notification_preferences')
-      .eq('user_id', session.userId)
-      .single();
-
-    if (settings) {
-      const prefs = settings.notification_preferences || {};
-      if (!prefs.browserPushEnabled) {
-        prefs.browserPushEnabled = true;
-        await supabase
-          .from('user_settings')
-          .update({ notification_preferences: prefs })
-          .eq('user_id', session.userId);
-      }
-    }
+    // Use the same preference table as delivery. Restoring an existing browser
+    // subscription must preserve an intentional global disable.
+    if (body.enablePush === true) await updateNotificationPreferences(session.userId, { browserPushEnabled: true });
 
     return NextResponse.json({ success: true });
   } catch (err) {

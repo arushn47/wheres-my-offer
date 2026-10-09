@@ -4,7 +4,8 @@ import { cookies } from 'next/headers';
 import { encrypt } from '@/lib/crypto/tokens';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { getOAuthRedirectUri, getAppUrl } from '@/lib/auth';
-import * as jose from 'jose';
+import { signSessionToken, verifySessionToken } from '@/lib/security/session';
+import { describeError } from '@/lib/error-diagnostics';
 
 /**
  * GET /api/auth/callback
@@ -37,11 +38,13 @@ export async function GET(request: Request) {
   const cookieStore = await cookies();
   const expectedState = cookieStore.get('oauth_state')?.value;
   const requestedAccountType = cookieStore.get('oauth_account_type')?.value;
-  if (!stateStr || !expectedState || stateStr !== expectedState) {
+  const codeVerifier = cookieStore.get('oauth_code_verifier')?.value;
+  if (!stateStr || !expectedState || stateStr !== expectedState || !codeVerifier) {
     return NextResponse.redirect(`${appUrl}/login?error=invalid_oauth_state`);
   }
   cookieStore.set('oauth_state', '', { maxAge: 0, path: '/api/auth/callback' });
   cookieStore.set('oauth_account_type', '', { maxAge: 0, path: '/api/auth/callback' });
+  cookieStore.set('oauth_code_verifier', '', { maxAge: 0, path: '/api/auth/callback' });
   const accountType = requestedAccountType === 'college' ? 'college' : 'personal';
 
   try {
@@ -52,14 +55,14 @@ export async function GET(request: Request) {
       redirectUri
     );
 
-    const { tokens } = await oauth2Client.getToken(code);
+    const { tokens } = await oauth2Client.getToken({ code, codeVerifier });
     oauth2Client.setCredentials(tokens);
 
     // Get user info
     const oauth2 = google.oauth2({ version: 'v2', auth: oauth2Client });
     const { data: userInfo } = await oauth2.userinfo.get();
 
-    if (!userInfo.email || !userInfo.id) {
+    if (!userInfo.email || !userInfo.id || userInfo.verified_email !== true) {
       return NextResponse.redirect(
         `${appUrl}/login?error=no_email`
       );
@@ -76,15 +79,12 @@ export async function GET(request: Request) {
     let sessionAvatar = userInfo.picture || null;
 
     if (token) {
-      try {
-        const secret = new TextEncoder().encode(process.env.TOKEN_ENCRYPTION_KEY);
-        const { payload } = await jose.jwtVerify(token, secret);
-        existingUserId = payload.userId as string;
-        sessionName = (payload.name as string) || null;
-        sessionEmail = payload.email as string;
-        sessionAvatar = (payload.avatar as string) || null;
-      } catch {
-        // Invalid session, proceed as new login
+      const verified = await verifySessionToken(token);
+      if (verified) {
+        existingUserId = verified.userId;
+        sessionName = verified.name;
+        sessionEmail = verified.email;
+        sessionAvatar = verified.avatar;
       }
     }
 
@@ -138,6 +138,12 @@ export async function GET(request: Request) {
     let userId: string;
 
     if (existingUserId) {
+      // A mailbox used to sign in must never become linked to another identity.
+      const [{ data: owner, error: ownerError }, { data: primaryOwner, error: primaryError }] = await Promise.all([
+        supabase.from('gmail_accounts').select('user_id').eq('google_account_id', userInfo.id).neq('user_id', existingUserId).limit(1).maybeSingle(),
+        supabase.from('users').select('id').eq('google_id', userInfo.id).neq('id', existingUserId).limit(1).maybeSingle(),
+      ]);
+      if (ownerError || primaryError || owner || primaryOwner) return NextResponse.redirect(`${appUrl}/settings?error=account_already_linked`);
       // User is already logged in, link this new Gmail to their existing account
       userId = existingUserId;
     } else {
@@ -242,17 +248,12 @@ export async function GET(request: Request) {
 
     // 3. Create or refresh the session JWT
     if (!existingUserId) {
-      const secret = new TextEncoder().encode(process.env.TOKEN_ENCRYPTION_KEY);
-      const sessionToken = await new jose.SignJWT({
+      const sessionToken = await signSessionToken({
         userId,
         email: sessionEmail,
         name: sessionName,
         avatar: sessionAvatar,
-      })
-        .setProtectedHeader({ alg: 'HS256' })
-        .setIssuedAt()
-        .setExpirationTime('7d')
-        .sign(secret);
+      });
 
       cookieStore.set('session', sessionToken, {
         httpOnly: true,
@@ -273,7 +274,7 @@ export async function GET(request: Request) {
     return NextResponse.redirect(`${appUrl}/`);
 
   } catch (err) {
-    console.error('OAuth callback error:', err);
+    console.error('OAuth callback error:', describeError(err));
     return NextResponse.redirect(
       `${appUrl}/login?error=auth_failed`
     );

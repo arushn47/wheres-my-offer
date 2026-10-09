@@ -1,4 +1,5 @@
 import { type gmail_v1 } from 'googleapis';
+import { describeError } from '@/lib/error-diagnostics';
 
 export interface HistoryResult {
   messageIds: string[];
@@ -105,7 +106,7 @@ export async function getProfileHistoryId(gmail: gmail_v1.Gmail): Promise<string
     const profile = await gmail.users.getProfile({ userId: 'me' });
     return profile.data.historyId || null;
   } catch (err) {
-    console.error('Failed to fetch profile historyId:', err);
+    console.error('Failed to fetch profile historyId:', describeError(err));
     return null;
   }
 }

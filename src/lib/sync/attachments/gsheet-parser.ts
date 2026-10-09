@@ -88,6 +88,10 @@ export async function scanGoogleSheetForCandidate(
   userName?: string | null,
   candidateIdentity?: UserCandidateIdentity
 ): Promise<GSheetMatchResult | null> {
+  try {
+    const source = new URL(pubhtmlUrl);
+    if (source.protocol !== 'https:' || source.hostname !== 'docs.google.com' || source.port || source.username || source.password || !source.pathname.startsWith('/spreadsheets/d/')) return null;
+  } catch { return null; }
   const identity = candidateIdentity || buildCandidateIdentity({
     emails: [userEmail],
     neoId: userNeoId,
@@ -105,7 +109,7 @@ export async function scanGoogleSheetForCandidate(
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 4000);
 
-    const res = await fetch(pubhtmlUrl, { signal: controller.signal });
+    const res = await fetch(pubhtmlUrl, { signal: controller.signal, redirect: 'error' });
     clearTimeout(timeout);
     if (!res.ok) {
       return null;

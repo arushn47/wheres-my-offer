@@ -64,7 +64,11 @@ export async function sendPushToUser(
     .select('id, endpoint, p256dh, auth')
     .eq('user_id', userId);
 
-  if (error || !subscriptions || subscriptions.length === 0) {
+  if (error) {
+    console.error('[Push] Subscription lookup failed:', error.code, error.message);
+    throw error;
+  }
+  if (!subscriptions || subscriptions.length === 0) {
     return { sent: 0, failed: 0 };
   }
 
@@ -96,7 +100,7 @@ export async function sendPushToUser(
       try {
         await webpush.sendNotification(pushSubscription, stringifiedPayload, {
           TTL: 86400, // 24 hours in seconds
-          urgency: 'high', // CRITICAL for Android FCM: wakes phone instantly even in battery saver / doze mode
+          urgency: 'high', // Requests prompt delivery; device/OS notification settings still apply.
         });
         sent++;
       } catch (err: unknown) {
@@ -108,7 +112,7 @@ export async function sendPushToUser(
           console.log(`[Push] Removing expired push subscription: ${sub.id}`);
           expiredIds.push(sub.id);
         } else {
-          console.error(`[Push] Error sending push to subscription ${sub.id}:`, err);
+          console.error(`[Push] Provider rejected subscription ${sub.id}:`, { statusCode, message: (err as Error)?.message });
         }
       }
     })
