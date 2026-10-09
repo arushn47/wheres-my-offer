@@ -302,8 +302,11 @@ export default function NotificationBell({
     }
   };
 
-  const getNotificationIcon = (type: string) => {
-    switch (type) {
+  const getNotificationIcon = (notification: InAppNotification) => {
+    if (notification.type === 'shortlist_match' && notification.title.startsWith('Not Shortlisted:')) {
+      return <X className="w-4 h-4 text-rose-400" />;
+    }
+    switch (notification.type) {
       case 'shortlist_match':
         return <Sparkles className="w-4 h-4 text-emerald-400" />;
       case 'test_scheduled':
@@ -449,7 +452,7 @@ export default function NotificationBell({
                     )}
                   >
                     <div className="w-8 h-8 rounded-lg bg-white/5 border border-white/10 flex items-center justify-center flex-shrink-0 mt-0.5">
-                      {getNotificationIcon(notif.type)}
+                      {getNotificationIcon(notif)}
                     </div>
 
                     <div className="flex-1 min-w-0 space-y-1">

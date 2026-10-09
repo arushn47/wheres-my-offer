@@ -18,6 +18,7 @@ import { StatusChip } from '@/components/ui/status-chip';
 import { DriveModeBadge } from '@/components/ui/drive-mode-badge';
 import { InstallPwaBanner } from '@/components/notifications/install-pwa-banner';
 import { formatStipend, cn } from '@/lib/utils';
+import { formatTotalCtc } from '@/lib/compensation';
 import { cleanLocationString } from '@/lib/sync/extraction/locations';
 import { cleanRoleTitle, cleanEventTitle } from '@/lib/sync/extraction/events';
 import { isInactiveStatus } from '@/lib/stages';
@@ -553,7 +554,7 @@ export default function DashboardClient({
 
                   <div className="mt-3 flex flex-wrap items-center gap-x-3 sm:gap-x-4 gap-y-1 text-[11px] text-zinc-500 min-w-0">
                     <span className="font-tabular font-mono text-xs sm:text-sm font-bold text-zinc-200 shrink-0">
-                      {c.ctc || formatStipend(c.stipend) || 'TBA'}
+                      {formatTotalCtc(c.ctc) || formatStipend(c.stipend) || 'TBA'}
                     </span>
                     {/* Work Location: Neutral/Gray Pin + Text (Only show if specified) */}
                     {(() => {

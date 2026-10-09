@@ -18,6 +18,7 @@ import {
   Calendar,
 } from 'lucide-react';
 import { timeAgo, cn } from '@/lib/utils';
+import { formatTotalCtc } from '@/lib/compensation';
 import { appToast } from '@/components/ui/toast';
 
 interface AdminDrive {
@@ -643,7 +644,7 @@ export default function DrivesClient() {
                           {drive.role && <span className="text-zinc-300 font-medium">{drive.role}</span>}
                           {drive.ctc && (
                             <span className="text-emerald-400 font-mono font-semibold bg-emerald-500/10 border border-emerald-500/20 px-1.5 py-0.5 rounded text-[11px] shrink-0">
-                              {drive.ctc}
+                              {formatTotalCtc(drive.ctc)}
                             </span>
                           )}
                           {drive.location && (

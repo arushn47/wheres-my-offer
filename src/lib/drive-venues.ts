@@ -42,6 +42,9 @@ function stageIn(text: string): string | undefined {
     [/\bGD\b|\bgroup discussion\b/i, 'Group discussion'],
     [/\b(?:test|assessment)(?:\s*(?:round)?\s*([12]))?\b/i, 'Test'],
     [/\bPPT\b|pre[ -]?placement talk/i, 'PPT'],
+    // Keep an explicitly named physical process separate from a later generic
+    // selection round, which may be virtual. Existing storage keys by stage.
+    [/\bphysical\s+(?:selection\s+)?process\b/i, 'Physical Process'],
   ] as const;
   for (const [pattern, name] of stages) {
     const match = text.match(pattern);
@@ -58,7 +61,8 @@ function audiencePrefix(line: string) {
 /** Input is the current circular, with quoted reply history removed by the existing body helper. */
 export function extractRecruitmentVenues(subject: string, body: string): VenueEntry[] {
   const entries: VenueEntry[] = [];
-  const subjectStage = stageIn(subject) || (/\bonline\b.*\bscheduled\b/i.test(subject) && /\bassessment\b/i.test(body) ? 'Test' : undefined);
+  const subjectStage = stageIn(subject) || (/\bonline\b.*\bscheduled\b/i.test(subject) && /\bassessment\b/i.test(body) ? 'Test' : undefined)
+    || (/\bnext\s+round\b/i.test(subject) && /\bduring\s+the\s+interview\b|\binterview\s+process\b/i.test(body) ? 'Interviews' : undefined);
   let sectionStage = subjectStage;
   let sectionAudiences: string[] = [];
   // Sentence-local extraction prevents a Work Location/office footer from supplying a venue.
@@ -102,6 +106,13 @@ export function extractRecruitmentVenues(subject: string, body: string): VenueEn
       entries.push({ stage: 'Recruitment', kind: 'online', name: 'Online', quote: `Date of Visit: ${visitMode}` });
       continue;
     }
+    // An unannounced visit date says nothing about an explicitly named venue.
+    // Consume its split table value so the subject's interview stage cannot
+    // turn "will be informed later" into contradictory venue evidence.
+    if (visitMode && /^(?:will\s+be\s+(?:informed|announced|updated)\s+later|to\s+be\s+(?:announced|confirmed)|TBA|TBD)[.!]?$/i.test(visitMode)) {
+      if (!visitCell![1].trim()) index++;
+      continue;
+    }
     const stage = stageIn(line) || sectionStage || 'Recruitment';
     const audienceList = audiencePrefix(line);
     if (audienceList && /^\s*:/.test(line.slice(audienceList.prefix.length))) sectionAudiences = audienceList.names;
@@ -121,13 +132,20 @@ export function extractRecruitmentVenues(subject: string, body: string): VenueEn
       continue;
     }
     const reportingRoom = /\breport\s+(?:to|at)\s+(?:the\s+)?(?:LC|PRP|SJT|CDC)\b/i.test(line);
-    const physicalProcessVenue = /\bphysical\s+(?:selection\s+)?process\b.{0,40}\bat\s+VIT\s+(?:Bhopal|Vellore|Chennai|AP)\b/i.test(line);
-    const recruitment = stage !== 'Recruitment' || physicalProcessVenue || /\b(?:recruitment|placement drive|selection process|(?:the|this)\s+drive|drive\s+(?:will|shall))\b/i.test(line) || reportingRoom || audienceRemote;
+    const reportingCampus = /\breport\s+(?:to|at)\s+(?:the|your|our)\s+campus\b/i.test(line);
+    const physicalProcessText = line.match(/\bphysical\s+(?:selection\s+)?process\b.{0,40}\bat\s+(.+)/i)?.[1];
+    const physicalProcessVenue = physicalProcessText && campusIn(physicalProcessText) ? physicalProcessText : undefined;
+    const recruitment = stage !== 'Recruitment' || physicalProcessVenue || /\b(?:recruitment|placement drive|selection process|(?:the|this)\s+drive|drive\s+(?:will|shall))\b/i.test(line) || reportingRoom || reportingCampus || audienceRemote;
     const attendance = /\b(?:held|conducted|scheduled|attend|report|appear|travel|take|will have|will be having)\b|\b(?:will|shall)\s+be\b|\b(?:is|are)\s+(?:virtual|remote)\b/i.test(line);
     const venueLabel = /(?:^|\b)(?:(?:test|interview|PPT|assessment)\s+)?venue\s*[:\-@]/i.test(line);
     const datedVenue = /^\s*(?:(?:online|physical)\s+)?(?:test|assessment|interviews?|PPT)(?:\s*(?:&|and|\+)\s*(?:(?:online|physical)\s+)?(?:test|assessment|interviews?|PPT))*(?:\s+Date)?\s*:\s*[^\n@]{0,90}@/i.test(line);
     const tableVenue = /^(?:Online\s+)?(?:Test|Assessment|PPT)\b.{0,150}\bAt\s+(?:the\s+)?respective\s+campus(?:es)?\b/i.test(line);
-    if (!recruitment || (!attendance && !physicalProcessVenue && !audienceRemote && !venueLabel && !datedVenue && !tableVenue && !/\b(?:test|assessment).{0,25}(?:at|from)\s+(?:own|home)\s+location/i.test(line))) continue;
+    // Headlines can state "Physical interview at Vellore campus" without a
+    // scheduling verb. Only a named campus authorizes this compact form.
+    const compactInterviewVenue = line.match(/\binterviews?\s+(?:physical\s+)?(?:at|in|@)\s+(.+)/i)?.[1];
+    const compactCampusInterview = compactInterviewVenue && campusIn(compactInterviewVenue) ? compactInterviewVenue : undefined;
+    const compactVirtualPpt = /\bPPT\s+(?:virtual|remote)(?:\s+mode)?\b/i.test(line);
+    if (!recruitment || (!attendance && !physicalProcessVenue && !compactCampusInterview && !compactVirtualPpt && !audienceRemote && !venueLabel && !datedVenue && !tableVenue && !/\b(?:test|assessment).{0,25}(?:at|from)\s+(?:own|home)\s+location/i.test(line))) continue;
     if (/\b(?:not|no longer|cancelled|canceled)\b|\b(?:may|might|could)\s+(?:be|take)\b/i.test(line)) continue;
     // Registration instructions are not attendance evidence, even if the subject mentions a test.
     if (/\b(?:registration|register|deadline|job location|work location)\b/i.test(line) && !stageIn(line)) continue;
@@ -139,16 +157,19 @@ export function extractRecruitmentVenues(subject: string, body: string): VenueEn
     const venueText = line.match(/^(?:(?:test|interview|PPT|assessment)\s+)?venue\s*[:\-@]\s*(.+)/i)?.[1]
       || [...line.matchAll(/@\s*([^@]+)/g)].at(-1)?.[1]
       || (tableVenue ? line.match(/\bAt\s+((?:the\s+)?respective\s+campus(?:es)?\b.*)/i)?.[1] : undefined)
-      || (physicalProcessVenue ? line.match(/\bat\s+(VIT\s+(?:Bhopal|Vellore|Chennai|AP)\b.*)/i)?.[1] : undefined)
+      || physicalProcessVenue
+      || compactCampusInterview
+      || line.match(/\b(?:held|conducted)\s+in\s+person\s+(?:on|at)\s+((?:your|our|the)\s+campus\b.*)/i)?.[1]
       || line.match(/\b(?:held|conducted|scheduled|attend|report|appear|travel|take(?: place)?|having)\b.{0,100}?\b(?:at|in|from|to)\s+(?!\d)(.+)/i)?.[1];
     // Only the attendance clause supplies a campus, never an audience or nearby job city.
     const campus = venueText ? campusIn(venueText) : undefined;
     const office = venueText?.match(/^(?:person\s+at\s+)?(?:the\s+)?([A-Za-z][A-Za-z0-9 &.-]{0,65}?)\s+office\b/i);
     let entry: VenueEntry | undefined;
     if (/\b(?:TBA|TBD|to be announced|informed later)\b/i.test(line)) entry = { ...base, kind: 'unknown', name: '' };
+    else if (venueText && /^(?:various|respective|different)\s+labs?\s+in\s+(?:the\s+)?college\s+campus(?:es)?\b/i.test(venueText)) entry = { ...base, kind: 'respective', name: 'Respective campus' };
     else if (venueText && /\brespective\s+(?:campus|campuses|college)\b/i.test(venueText)) entry = { ...base, kind: 'respective', name: 'Respective campus' };
     else if (venueText && /\brespective\s+(?:campus\s+)?(?:CDC\s*(?:offices?|venues?|labs?)?|labs?)\b/i.test(venueText)) entry = { ...base, kind: 'respective', name: 'Respective campus' };
-    else if (venueText && /^(?:the\s+)?campus(?:\s+labs?)?\b/i.test(venueText)) entry = { ...base, kind: 'respective', name: 'Respective campus' };
+    else if (venueText && /^(?:(?:the|your|our)\s+)?campus(?:\s+labs?)?\b/i.test(venueText)) entry = { ...base, kind: 'respective', name: 'Respective campus' };
     else if (audienceRemote && /\b(?:only\s+(?:in|at)|from)\s+(?:the\s+)?CDC\s+office\b/i.test(line) && !campus) entry = { ...base, kind: 'respective', name: 'Respective campus' };
     else if (campus) {
       // Keep named rooms in the details while resolving their campus in the badge.

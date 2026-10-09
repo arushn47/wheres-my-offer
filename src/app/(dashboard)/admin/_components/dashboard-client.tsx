@@ -18,6 +18,7 @@ import {
   Mail,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { formatTotalCtc } from '@/lib/compensation';
 import ReprocessProgressToast, { ReprocessProgressState } from '@/components/admin/reprocess-progress-toast';
 import { appToast } from '@/components/ui/toast';
 
@@ -390,7 +391,7 @@ export default function DashboardClient() {
                     {drive.role && <span className="text-zinc-300 font-medium">{drive.role}</span>}
                     {drive.ctc && (
                       <span className="text-emerald-400 font-mono font-semibold bg-emerald-500/10 border border-emerald-500/20 px-1.5 py-0.5 rounded text-[11px] shrink-0">
-                        {drive.ctc}
+                        {formatTotalCtc(drive.ctc)}
                       </span>
                     )}
                   </div>

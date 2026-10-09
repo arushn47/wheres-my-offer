@@ -3,6 +3,10 @@ import { cleanEventTitle, cleanRoleTitle, extractJobDetails, extractEvents } fro
 import { isTrustedPlacementSender } from '../engine';
 
 describe('cleanRoleTitle', () => {
+  it('keeps the confirmed Hitachi title and removes its compensation heading', () => {
+    expect(cleanRoleTitle('Cost to Company upon Absorption as Management Trainee')).toBe('Management Trainee');
+    expect(cleanRoleTitle('Total Cost to Company')).toBeNull();
+  });
   it.each(['Refer', 'Refer JD', 'Refer JD’s', 'Designation: Refer JD', 'See JD', 'Check the JD'])('rejects JD pointers before they become role fragments: %s', raw => {
     expect(cleanRoleTitle(raw)).toBeNull();
   });
@@ -91,6 +95,10 @@ describe('cleanRoleTitle', () => {
 });
 
 describe('extractJobDetails role extraction', () => {
+  it('extracts the confirmed post-internship title from Hitachi absorption wording', () => {
+    expect(extractJobDetails('Internship Duration\n6 Months\nLocation\nChennai\nCost to Company upon Absorption as Management Trainee\n(following successful completion of 6-month internship period)\nFixed Cost\nINR 5,65,500 per annum\nTotal Cost to Company\nINR 6,15,343 per annum').role)
+      .toBe('Management Trainee');
+  });
   it('leaves a Refer JD designation empty so the UI uses Campus Placement Drive', () => {
     expect(extractJobDetails('Job location: Pan India\nDesignation: Refer JD').role).toBeNull();
   });

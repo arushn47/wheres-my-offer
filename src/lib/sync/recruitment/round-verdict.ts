@@ -63,7 +63,7 @@ export function canonicalRosterKey(evidence: RoundEvidence): string {
 }
 
 export function isPartialRoster(text: string): boolean {
-  return /\blist\s*[-:#]?\s*\d{1,2}\b|\bbatch\s*[-:#]?\s*\d{1,2}\b|partial\s+list|supplementary|additional\s+list|more\s+(?:lists?|candidates?)|first\s+list|remaining\s+shortlisted|remaining\s+(?:students|candidates)|other\s+shortlisted/i.test(text);
+  return /\blist\s*[-:#]?\s*\d{1,2}\b|\bbatch\s*[-:#]?\s*\d{1,2}\b|\bset\s*[-:#]\s*\d{1,2}\b|partial\s+list|supplementary|additional\s+(?:(?:selection|shortlist)\s+)?list|\(\s*additional\s*\)|more\s+(?:lists?|candidates?)|first\s+list|remaining\s+shortlisted|remaining\s+(?:students|candidates)|other\s+shortlisted/i.test(text);
 }
 
 /** One round's evidence never grants eligibility to another round. */

@@ -2,7 +2,7 @@ import { currentMutationLease } from '../lease-context';
 
 interface DispatchState {
   generation: number; drained: number; inFlight?: Promise<void>;
-  pendingDecisionIds: Set<string>; committedKeys: Set<string>; retry: boolean;
+  pendingDecisionIds: Set<string>; committedKeys: Map<string, string | null>; retry: boolean;
 }
 const states = new WeakMap<object, DispatchState>();
 function stateFor(userId: string): DispatchState | undefined {
@@ -10,7 +10,7 @@ function stateFor(userId: string): DispatchState | undefined {
   if (!lease || lease.userId !== userId) return undefined;
   let state = states.get(lease);
   if (!state) {
-    state = { generation: 0, drained: -1, pendingDecisionIds: new Set(), committedKeys: new Set(), retry: false };
+    state = { generation: 0, drained: -1, pendingDecisionIds: new Set(), committedKeys: new Map(), retry: false };
     states.set(lease, state);
   }
   return state;
@@ -20,8 +20,8 @@ function stateFor(userId: string): DispatchState | undefined {
 export function noteRoundOutboxCommit(userId: string, decisionId: string | null, dedupeKey?: string): void {
   const state = stateFor(userId);
   if (!state) return;
-  if (dedupeKey && !state.committedKeys.has(dedupeKey) || decisionId && state.pendingDecisionIds.has(decisionId) || !dedupeKey && state.inFlight) state.generation++;
-  if (dedupeKey) state.committedKeys.add(dedupeKey);
+  if (dedupeKey && (!state.committedKeys.has(dedupeKey) || state.committedKeys.get(dedupeKey) !== decisionId) || decisionId && state.pendingDecisionIds.has(decisionId) || !dedupeKey && state.inFlight) state.generation++;
+  if (dedupeKey) state.committedKeys.set(dedupeKey, decisionId);
 }
 
 /** Share a concurrent drain, recover persisted work on the first call, and

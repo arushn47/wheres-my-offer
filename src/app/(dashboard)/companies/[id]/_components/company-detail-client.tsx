@@ -17,6 +17,7 @@ import {
   Info,
 } from 'lucide-react';
 import { cn, timeAgo } from '@/lib/utils';
+import { formatTotalCtc } from '@/lib/compensation';
 import { STATUS_META } from '@/components/ui/status-chip';
 import { StageStepper, getStageIndex, getEffectiveStage, isEliminatedStatus } from '@/components/companies/stage-stepper';
 import { cleanLocationString } from '@/lib/sync/extraction/locations';
@@ -436,7 +437,7 @@ export default function CompanyDetailClient({
 
   // Derive 4 CTC cards like Emergent: Total CTC, Fixed, Bonus, ESOPs
   const rawCtc = company.application?.ctc || '';
-  const cleanCtc = rawCtc.replace(/\*/g, '').trim() || 'TBA';
+  const cleanCtc = formatTotalCtc(rawCtc) || 'TBA';
   const stipend = company.application?.stipend?.replace(/\*/g, '').trim() || null;
   const cleanStipend = useMemo(() => {
     if (!stipend) return null;

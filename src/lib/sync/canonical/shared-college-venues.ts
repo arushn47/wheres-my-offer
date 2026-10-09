@@ -3,6 +3,7 @@ import type { ParsedEmail } from '@/lib/gmail/client';
 import { extractRecruitmentVenues } from '@/lib/drive-venues';
 import { persistDriveVenues } from '@/lib/drive-venue-data';
 import { getEvidenceMessageText } from '../extraction/body';
+import { getCachedPdfText } from '../extraction/pdf-parser';
 
 interface VenueDrive {
   id: string;
@@ -37,6 +38,11 @@ export async function persistSharedCircularVenues(
     )) return;
   }
   const entries = extractRecruitmentVenues(email.subject, getEvidenceMessageText(email));
+  const bodyRounds = new Set(entries.map(entry => `${entry.stage}:${entry.audience || ''}`));
+  // Completed PDFs are already hydrated by shared ingestion. No extra downloads
+  // or reads; never use another drive's JD or replace an explicit body instruction.
+  const pdfText = getCachedPdfText(email.attachments);
+  if (pdfText) entries.push(...extractRecruitmentVenues('', pdfText).filter(entry => !bodyRounds.has(`${entry.stage}:${entry.audience || ''}`)));
   // The row-locked RPC rechecks current drive numbers, source exclusions and dates.
-  await persistDriveVenues(admin, drive.id, source.id, email.receivedAt.toISOString(), entries);
+  await persistDriveVenues(admin, drive.id, source.id, email.receivedAt.toISOString(), entries.slice(0, 12));
 }

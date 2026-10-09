@@ -3,6 +3,10 @@ import { extractJobDetails } from './events';
 import { cleanLocationString } from './locations';
 
 describe('drive work-location extraction', () => {
+  it.each(['LOCATION AND OTHER REQUIREMENTS\nTest will be conducted in various labs in the college campus',
+    'Candidate should be willing to relocate to any location as required by Infosys.'])('rejects Infosys guidance instead of inventing a work location: %s', body => {
+    expect(extractJobDetails(body).location).toBeNull();
+  });
   it.each([
     ['Work Location: Bangalore', 'Bangalore'],
     ['Location: Bangalore', 'Bangalore'],
@@ -62,6 +66,9 @@ Registration: on or before 30-09-2026
 });
 
 describe('cleanLocationString normalization', () => {
+  it.each(['AND OTHER', 'as required by Infosys', 'any location as required by Infosys'])('hides historical placeholder locations: %s', raw => {
+    expect(cleanLocationString(raw)).toBe('Not Specified');
+  });
   it.each(['Refer', 'Refer JD', 'Refer JD’s', 'See attachment'])('rejects stored JD pointers as work locations: %s', raw => {
     expect(cleanLocationString(raw)).toBe('Not Specified');
   });

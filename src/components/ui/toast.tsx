@@ -432,7 +432,7 @@ export const appToast = {
 
     switch (notif.type) {
       case 'shortlist_match':
-        variant = 'shortlist';
+        variant = notif.title.startsWith('Not Shortlisted:') ? 'warning' : 'shortlist';
         break;
       case 'test_scheduled':
         variant = 'test';

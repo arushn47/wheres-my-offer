@@ -58,6 +58,26 @@ export interface PdfParseResult {
   parseError: string | null;
 }
 
+/** Reuse completed PDF text already present in this circular's attachment cache. */
+export function getCachedPdfText(attachments: Array<CachedPdfAttachment | undefined> | undefined): string {
+  let text = '';
+  for (const attachment of attachments || []) {
+    if (!attachment || !isPdfAttachment(attachment.filename || '')) continue;
+    if (attachment.parseStatus !== 'complete' || !Array.isArray(attachment.extractedRows)) continue;
+    for (const sheet of attachment.extractedRows as Array<{ rows?: unknown[][] }>) {
+      if (!Array.isArray(sheet?.rows)) continue;
+      for (const row of sheet.rows) {
+        if (!Array.isArray(row)) continue;
+        for (const cell of row) {
+          if (typeof cell === 'string' && cell.length) text += `\n${cell}`;
+          if (text.length >= MAX_PDF_TEXT_CHARS) return text.slice(0, MAX_PDF_TEXT_CHARS);
+        }
+      }
+    }
+  }
+  return text;
+}
+
 /** Downloads are handled by the caller; this parses already-fetched PDF bytes. */
 export async function parsePdfAttachment(bytes: Buffer): Promise<PdfParseResult> {
   try {
@@ -93,20 +113,7 @@ export function mergePdfJobDetails<T extends object>(
 ): T {
   if (!attachments?.length) return bodyDetails;
 
-  let pdfText = '';
-  for (const attachment of attachments) {
-    if (!attachment || !isPdfAttachment(attachment.filename || '')) continue;
-    if (attachment.parseStatus !== 'complete' || !Array.isArray(attachment.extractedRows)) continue;
-    for (const sheet of attachment.extractedRows as Array<{ sheetName?: string; rows?: unknown[][] }>) {
-      if (!Array.isArray(sheet?.rows)) continue;
-      for (const row of sheet.rows) {
-        if (!Array.isArray(row)) continue;
-        for (const cell of row) {
-          if (typeof cell === 'string' && cell.length > 0) pdfText += `\n${cell}`;
-        }
-      }
-    }
-  }
+  const pdfText = getCachedPdfText(attachments);
   if (!pdfText.trim()) return bodyDetails;
 
   const merged: Record<string, unknown> = { ...(bodyDetails as Record<string, unknown>) };

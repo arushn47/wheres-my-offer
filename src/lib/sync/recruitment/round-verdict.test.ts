@@ -17,6 +17,10 @@ function email(subject: string, body: string): ParsedEmail {
 }
 
 describe('round-specific shortlist decisions', () => {
+  it.each(['HSBC Additional Selection List', 'Nokia selection list (Additional)', 'Rystad interviews Set-1'])('does not confirm elimination from %s', subject => {
+    const decision = resolveRoundVerdicts([roster('partial', subject, '2026-10-09T10:00:00Z', false)], tokens)[0];
+    expect(decision).toMatchObject({ state: 'verified_absent', finalNegative: false, reason: 'partial_list_absence' });
+  });
   it('does not promote a game-round match to a later test excluded by List 1', () => {
     const verdicts = resolveRoundVerdicts([
       roster('game', 'Shortlist for game round', '2026-10-05T06:00:00Z', true),

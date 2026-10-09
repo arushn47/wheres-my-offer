@@ -13,6 +13,7 @@ import {
   MapPin,
 } from 'lucide-react';
 import { timeAgo, formatStipend } from '@/lib/utils';
+import { formatTotalCtc } from '@/lib/compensation';
 import { StatusChip } from '@/components/ui/status-chip';
 import { DriveModeBadge } from '@/components/ui/drive-mode-badge';
 import { cleanRoleTitle, cleanEventTitle } from '@/lib/sync/extraction/events';
@@ -281,7 +282,7 @@ export default function SearchClient({ data }: SearchClientProps) {
               const roleDisplay = cleanedRole || 'Campus Placement Drive';
               const stipendDisplay = formatStipend(c.stipend);
               const ctcDisplay = c.ctc
-                ? c.ctc.replace(/\*/g, '').trim()
+                ? formatTotalCtc(c.ctc)
                 : stipendDisplay || 'TBA';
               const loc = cleanLocationString(c.location);
               const cleanCategory = c.category ? c.category.replace(/\b(internship|offer|placement|drive)\b/gi, '').replace(/\s*\/\s*/g, ' ').replace(/\s+/g, ' ').trim() : '';

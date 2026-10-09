@@ -38,10 +38,58 @@ function database() {
       } };
     return query;
   });
-  return { admin: { rpc, from } as unknown as Admin, rpc, from, counts: () => ({ reads, updates }) };
+  return { admin: { rpc, from } as unknown as Admin, rpc, from, pending, counts: () => ({ reads, updates }) };
 }
 
 describe('atomic verdict commits and outbox request benchmark', () => {
+  const absent = (overrides: Partial<RoundVerdict> = {}) => verdict({ eligible: false, state: 'verified_absent', finalNegative: true, reason: 'complete_list_absence', evaluations: [{ emailId: 'source', state: 'verified_absent', rosterKey: 'hash' }], ...overrides });
+  it('leaves stale or partial negative payloads dormant instead of delivering the wrong outcome', async () => {
+    const db = database();
+    for (const v of [verdict(), absent({ finalNegative: false })]) {
+      db.pending.push({ id: 'stale', decision_id: 'decision', payload: { userId: 'alice', placementDriveId: 'drive', type: 'shortlist_match', title: 'Not Shortlisted: Company', body: 'Fixture', dedupeKey: 'shortlist_absent:alice:drive' }, round_verdicts: { is_current: true, verdict: v } });
+    }
+    await withOwnedMutationLease('alice', 'run', () => dispatchRoundNotificationOutbox(db.admin, 'alice'));
+    expect(sendNotification).not.toHaveBeenCalled(); expect(db.counts().updates).toBe(0);
+  });
+  it('immediately delivers a confirmed negative after an unchanged drain, once across roster revisions', async () => {
+    const db = database();
+    await withOwnedMutationLease('alice', 'run', async () => {
+      await dispatchRoundNotificationOutbox(db.admin, 'alice');
+      await commitDriveRoundVerdicts(db.admin, 'alice', 'one', 'Company', [absent()], 'not_shortlisted');
+      expect(sendNotification).toHaveBeenCalledTimes(1);
+      expect(sendNotification).toHaveBeenLastCalledWith(expect.objectContaining({ title: 'Not Shortlisted: Company', type: 'shortlist_match', dedupeKey: 'shortlist_absent:alice:one', decisionId: 'decision-one' }));
+      await commitDriveRoundVerdicts(db.admin, 'alice', 'one', 'Company', [absent({ rosterKey: 'revised' })], 'not_shortlisted');
+      expect(sendNotification).toHaveBeenCalledTimes(1);
+      await commitDriveRoundVerdicts(db.admin, 'alice', 'two', 'Company', [absent()], 'not_shortlisted');
+      expect(sendNotification).toHaveBeenCalledTimes(2);
+    });
+  });
+  it.each(['withdrawn', 'declined', 'not_applied', 'registration_open', 'unknown'])('never queues a negative for %s', async status => {
+    const db = database();
+    await withOwnedMutationLease('alice', 'run', () => commitDriveRoundVerdicts(db.admin, 'alice', 'one', 'Company', [absent()], status));
+    expect(db.rpc.mock.calls[0][1].p_notification).toBeNull(); expect(sendNotification).not.toHaveBeenCalled();
+  });
+  it.each([{ finalNegative: false }, { state: 'deferred' as const }, { reason: 'partial_list_absence' as const }, { evaluations: [] }])('does not alert uncertain negative evidence %j', async overrides => {
+    const db = database();
+    await withOwnedMutationLease('alice', 'run', () => commitDriveRoundVerdicts(db.admin, 'alice', 'one', 'Company', [absent(overrides)], 'applied'));
+    expect(db.rpc.mock.calls[0][1].p_notification).toBeNull(); expect(sendNotification).not.toHaveBeenCalled();
+  });
+  it('does not alert suppressed catch-up or old eliminations', async () => {
+    const db = database();
+    await withOwnedMutationLease('alice', 'run', async () => {
+      await commitDriveRoundVerdicts(db.admin, 'alice', 'one', 'Company', [absent()], 'not_shortlisted', true);
+      await commitDriveRoundVerdicts(db.admin, 'alice', 'two', 'Company', [absent({ sourceReceivedAt: '2025-01-01T00:00:00Z' })], 'not_shortlisted');
+    });
+    expect(db.rpc.mock.calls.every(call => call[1].p_notification === null)).toBe(true);
+    expect(sendNotification).not.toHaveBeenCalled();
+  });
+  it('only notifies the current first elimination, not each later absent round', async () => {
+    const db = database(); const time = Date.now()-60000;
+    const rounds = [absent({ sourceReceivedAt: new Date(time).toISOString() }), absent({ roundKey: 'interview:1', sourceReceivedAt: new Date(time+1000).toISOString() })];
+    await withOwnedMutationLease('alice', 'run', () => commitDriveRoundVerdicts(db.admin, 'alice', 'one', 'Company', rounds, 'not_shortlisted'));
+    expect(db.rpc.mock.calls[0][1].p_notification).not.toBeNull(); expect(db.rpc.mock.calls[1][1].p_notification).toBeNull();
+    expect(sendNotification).toHaveBeenCalledTimes(1);
+  });
   it('retains the owned run ID and atomic event payload; lease loss stops before delivery', async () => {
     const db = database(); const events = [{ event_type: 'test', start_time: '2026-10-10T10:00:00Z' }];
     await withOwnedMutationLease('alice', 'owned', () => commitDriveRoundVerdicts(db.admin, 'alice', 'drive', 'Company', [verdict()], 'shortlisted', false, events));

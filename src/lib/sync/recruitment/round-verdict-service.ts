@@ -7,6 +7,7 @@ import { coalesceRoundOutbox, noteRoundOutboxCommit, type OutboxDrainResult } fr
 import { sendNotification, type CreateNotificationParams } from '@/lib/notifications/service';
 import { personalPlacementEvidence, hasPublishedShortlistContext, inlineShortlistRoster, isOpenPptInvitation } from './placement-evidence';
 import { loadCandidateRosters } from '../attachments/roster-lookup';
+import { canNotifyNegativeRound, isConfirmedNegativeRound, negativeRoundNotificationKey } from './round-notification-policy';
 
 type Admin = ReturnType<typeof createAdminClient>;
 export interface VerdictEmail {
@@ -89,11 +90,12 @@ export async function commitDriveRoundVerdicts(supabase: Admin, userId: string, 
   for (const verdict of verdicts) {
     const isCurrent = verdict === current;
     const isRecent = Date.now() - new Date(verdict.sourceReceivedAt).getTime() < 48 * 60 * 60 * 1000;
-    const notification: CreateNotificationParams | null = isCurrent && verdict.eligible && !verdict.openInvitation && !['withdrawn','declined'].includes(status) && isRecent && !suppressNotifications ? {
+    const negative = canNotifyNegativeRound(verdict, status);
+    const notification: CreateNotificationParams | null = isCurrent && (verdict.eligible || negative) && !verdict.openInvitation && !['withdrawn','declined'].includes(status) && isRecent && !suppressNotifications ? {
       userId, placementDriveId: driveId, type: verdict.outcome === 'selected' ? 'status_change' : 'shortlist_match',
-      title: verdict.outcome === 'selected' ? `Selected: ${companyName}` : `Shortlisted: ${companyName} — ${verdict.roundType === 'game' ? 'Game round' : verdict.roundKey}`,
-      body: verdict.outcome === 'selected' ? 'Your personal placement email confirms selection.' : 'Your identifier matched the published list for this round.',
-      dedupeKey: `round:${userId}:${driveId}:${verdict.roundKey}:${verdict.rosterKey}:present`,
+      title: negative ? `Not Shortlisted: ${companyName}` : verdict.outcome === 'selected' ? `Selected: ${companyName}` : `Shortlisted: ${companyName} — ${verdict.roundType === 'game' ? 'Game round' : verdict.roundKey}`,
+      body: negative ? (verdict.outcome === 'rejected' ? 'Your personal placement email confirms you were not selected.' : 'Your identifier was not found in the confirmed complete shortlist for this round.') : verdict.outcome === 'selected' ? 'Your personal placement email confirms selection.' : 'Your identifier matched the published list for this round.',
+      dedupeKey: negative ? negativeRoundNotificationKey(userId, driveId) : `round:${userId}:${driveId}:${verdict.roundKey}:${verdict.rosterKey}:present`,
     } : null;
     const { data: decisionId, error } = await supabase.rpc('commit_round_verdict', {
       p_user_id: userId, p_run_id: lease.runId, p_drive_id: driveId, p_verdict: verdict,
@@ -101,7 +103,7 @@ export async function commitDriveRoundVerdicts(supabase: Admin, userId: string, 
       p_events: isCurrent ? events || null : null,
     });
     if (error) throw error;
-    if (decisionId && isCurrent && verdict.eligible) noteRoundOutboxCommit(userId, decisionId, notification?.dedupeKey);
+    if (decisionId && isCurrent && (verdict.eligible || negative)) noteRoundOutboxCommit(userId, decisionId, notification?.dedupeKey);
   }
   if (!suppressNotifications) await dispatchRoundNotificationOutbox(supabase, userId);
 }
@@ -139,7 +141,8 @@ async function drainRoundNotificationOutbox(supabase: Admin, userId: string): Pr
     const decision = Array.isArray(row.round_verdicts) ? row.round_verdicts[0] : row.round_verdicts;
     // Track only incomplete deliveries. Superseded decisions are rechecked if
     // a later commit makes them current again (below); they never block delivery.
-    if (!decision?.is_current || !decision.verdict?.eligible) { pending.add(row.decision_id); continue; }
+    const negativePayload = row.payload.dedupeKey === negativeRoundNotificationKey(userId, row.payload.placementDriveId);
+    if (!decision?.is_current || (negativePayload ? !isConfirmedNegativeRound(decision.verdict) : !decision.verdict?.eligible)) { pending.add(row.decision_id); continue; }
     const result = await sendNotification({ ...row.payload, decisionId: row.decision_id } as CreateNotificationParams);
     if (result.complete) {
       const { error } = await supabase.from('decision_notification_outbox').update({ delivered_at: new Date().toISOString() }).eq('id', row.id);

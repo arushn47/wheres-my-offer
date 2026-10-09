@@ -4,6 +4,16 @@ import { coalesceRoundOutbox, noteRoundOutboxCommit, type OutboxDrainResult } fr
 const empty = (): OutboxDrainResult => ({ pendingDecisionIds: new Set(), retry: false });
 
 describe('immediate outbox coalescing', () => {
+  it('drains immediately when a pending elimination is repointed to a new current decision', async () => {
+    const drain = vi.fn(async () => empty());
+    await withOwnedMutationLease('alice', 'run', async () => {
+      noteRoundOutboxCommit('alice', 'old', 'shortlist_absent:alice:drive'); await coalesceRoundOutbox('alice', drain);
+      noteRoundOutboxCommit('alice', 'new', 'shortlist_absent:alice:drive'); await coalesceRoundOutbox('alice', drain);
+      expect(drain).toHaveBeenCalledTimes(2);
+      noteRoundOutboxCommit('alice', 'new', 'shortlist_absent:alice:drive'); await coalesceRoundOutbox('alice', drain);
+      expect(drain).toHaveBeenCalledTimes(2);
+    });
+  });
   it('recovers once and skips duplicate completion drains; a new key drains immediately', async () => {
     const drain = vi.fn(async () => empty());
     await withOwnedMutationLease('alice', 'run', async () => {

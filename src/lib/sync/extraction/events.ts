@@ -1,6 +1,8 @@
 import type { ParsedEmail } from '@/lib/gmail/client';
 import { stripQuotedContent, getEvidenceMessageText } from '@/lib/sync/extraction/body';
 import { deriveEventEndTime } from '@/lib/event-duration';
+import { formatTotalCtc } from '@/lib/compensation';
+import { cleanLocationString } from './locations';
 
 export interface ExtractedEvent {
   eventType:
@@ -1288,6 +1290,9 @@ export function extractEligibilityDetails(text: string): ExtractedEligibility {
 export function cleanRoleTitle(rawRole: string | null | undefined): string | null {
   if (!rawRole) return null;
   let role = rawRole.trim();
+  // A confirmed post-conversion title can follow a compensation heading.
+  // Keep the title itself, including when formatting historical stored values.
+  role = role.replace(/^Cost\s+to\s+Company\s+(?:upon|on)\s+Absorption\s+as\s+/i, '');
 
   // 1. Strip all leading punctuation including brackets, parenthesis, colons, bullets, dashes
   role = role.replace(/^[()\[\]{}*,\.\s>\-–—:;_\\/|#?!=+]+/, '').trim();
@@ -1381,7 +1386,7 @@ export function cleanRoleTitle(rawRole: string | null | undefined): string | nul
   // 16.5 Compensation / employment-terms vocabulary never appears in a role title.
   // Catches multiline-capture bleed like "GET / Compensation Detail for GET - 6" or
   // "Systems Engineer Service Agreement: 2 Years".
-  if (/\b(?:compensation|salary|package|stipend|ctc|bonus|insurance|service\s+agreement|qualification|trainee\s+bonus|lpa|lakhs?)\b|₹/i.test(role)) {
+  if (/\b(?:compensation|cost\s+to\s+company|fixed\s+cost|salary|package|stipend|ctc|bonus|insurance|service\s+agreement|qualification|trainee\s+bonus|lpa|lakhs?)\b|₹/i.test(role)) {
     return null;
   }
 
@@ -1510,11 +1515,23 @@ export function extractJobDetails(text: string): ExtractedJobDetails {
 
   // 1. CTC Extraction — handles single LPA, ranges (e.g. "8.5 - 10 LPA", "30 _ 31 LPA"), PPO formulas, and additions ("14+1 LPA")
   const ctcBlockMatch = cleanText.match(/\b(?:CTC|Cost\s+to\s+Company|Salary|Package|Compensation|PPO\s+CTC|Gross\s+CTC|PPO)\b\s*[:\-–—\t]?\s*([\s\S]{1,500}?)(?:\b(?:Last date|Website|Location|Eligible|Eligibility|Stipend|Selection|Process|Registration)\b|$)/i);
-  const relocationCompensationMatch = (ctcBlockMatch?.[1] || cleanText).match(
-    /annual\s+compensation\s+of\s+(?:INR|₹|Rs\.?)?\s*(\d+(?:\.\d+)?)\s*(?:LPA|L\s*PA|Lakhs?|Lacs?|Lac|\bL\b)[\s\S]{0,220}?relocation\s+allowance[^\d]{0,30}(?:up\s+to\s+)?(\d+(?:\.\d+)?)\s*(?:LPA|L\s*PA|Lakhs?|Lacs?|Lac|\bL\b)/i
+  // Include "annual" immediately before a Compensation heading without
+  // scanning other sections for unrelated payments.
+  const compensationContext = ctcBlockMatch ? cleanText.slice(
+    Math.max(0, (ctcBlockMatch.index ?? 0) - 30), (ctcBlockMatch.index ?? 0) + ctcBlockMatch[0].length,
+  ) : cleanText;
+  const relocationCompensationMatch = compensationContext.match(
+    /annual\s+compensation\s+of\s+(?:INR|₹|Rs\.?)?\s*(\d+(?:\.\d+)?)\s*(?:LPA|L\s*PA|Lakhs?|Lacs?|Lac|\bL\b)([\s\S]{0,220}?relocation\s+(allowance|assistance)[^\d]{0,40})(\d+(?:\.\d+)?)\s*(LPA|L\s*PA|Lakhs?|Lacs?|Lac|\bL\b)/i
   );
   if (relocationCompensationMatch) {
-    ctc = `${relocationCompensationMatch[1]} LPA + up to ${relocationCompensationMatch[2]} LPA relocation allowance`;
+    // Store only the package total. Conditions remain in the circular and
+    // extraction provenance, rather than filling the CTC label with prose.
+    const [, annual, componentText, label, amount, unit] = relocationCompensationMatch;
+    const capped = /\bup\s+to\b/i.test(componentText) ? 'up to ' : '';
+    const oneTime = /\bone[\s-]+time\b/i.test(componentText);
+    const component = oneTime ? `₹${amount} lakh one-time`
+      : /^L\s*PA$/i.test(unit) ? `${amount} LPA` : `₹${amount} lakh`;
+    ctc = formatTotalCtc(`${annual} LPA + ${capped}${component} relocation ${label.toLowerCase()}`);
   } else if (ctcBlockMatch && unannouncedPattern.test(ctcBlockMatch[1])) {
     ctc = null;
   } else {
@@ -1937,6 +1954,7 @@ export function extractJobDetails(text: string): ExtractedJobDetails {
       .slice(0, 60);
 
     // A JD pointer is not a city.
+    if (cleanLocationString(rawLoc) === 'Not Specified') continue;
     if (/^(?:refer|see|check)\b/i.test(raw) ||
       /^(?:refer|see|check)\s+(?:the\s+)?(?:attached\s+)?(?:jd(?:['’]s)?|attachment)/i.test(rawLoc)) continue;
     const namedOffice = rawLoc.match(/\b(Bangalore|Bengaluru|Hyderabad|Pune|Mumbai|Chennai|Gurgaon|Gurugram|Noida|Delhi|Kolkata|Ahmedabad)\s+office\b/i);

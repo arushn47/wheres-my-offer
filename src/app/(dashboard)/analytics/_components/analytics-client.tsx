@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import Link from 'next/link';
 import { parseEliminationToken } from '@/lib/sync/recruitment/round-identity';
+import { formatTotalCtc } from '@/lib/compensation';
 
 export interface AnalyticsDrive {
   id: string;
@@ -202,7 +203,7 @@ export default function AnalyticsClient({
       if (s === 'rejected' || s === 'not_shortlisted') rejected++;
 
       // CTC extraction: handles both fixed ("14 LPA") and ranged ("6.25 - 21 LPA")
-      const ctcStr = drive.ctc || '';
+      const ctcStr = formatTotalCtc(drive.ctc);
       const rangeMatch = ctcStr.match(
         /(\d+(?:\.\d+)?)\s*(?:-|to|–|—)\s*(\d+(?:\.\d+)?)\s*(?:lpa|lac|lakh)?/i
       );

@@ -1,4 +1,5 @@
 import { createAdminClient } from '@/lib/supabase/admin';
+import { canNotifyNegativeRound, negativeRoundNotificationKey } from '@/lib/sync/recruitment/round-notification-policy';
 import { sendPushToUser, type PushNotificationPayload } from './push';
 import { getNotificationPreferences } from './preferences';
 
@@ -72,7 +73,15 @@ export async function sendNotification(
   if (params.decisionId) {
     const { data: decision, error } = await supabase.from('round_verdicts').select('is_current,verdict').eq('id', params.decisionId).eq('user_id', userId).maybeSingle();
     if (error) throw error;
-    if (!decision?.is_current || !decision.verdict?.eligible) return { inAppCreated: false, pushSent: false, complete: true };
+    if (!decision?.is_current) return { inAppCreated: false, pushSent: false, complete: true };
+    if (dedupeKey === negativeRoundNotificationKey(userId, placementDriveId || '')) {
+      const { data: application, error: applicationError } = await supabase.from('applications')
+        .select('status,manual_override').eq('user_id', userId).eq('placement_drive_id', placementDriveId).maybeSingle();
+      if (applicationError) throw applicationError;
+      if (!application || !canNotifyNegativeRound(decision.verdict, application.status, application.manual_override)) {
+        return { inAppCreated: false, pushSent: false, complete: true };
+      }
+    } else if (!decision.verdict?.eligible) return { inAppCreated: false, pushSent: false, complete: true };
   }
 
   // 1. Check user preferences
@@ -119,6 +128,16 @@ export async function sendNotification(
     .select('id, push_delivered_at')
     .eq('dedupe_key', dedupeKey)
     .maybeSingle();
+
+  // Retain legacy negative alerts (including dismissed rows) as the elimination
+  // ledger. Positive notification reads and request counts stay unchanged.
+  if (!existingNotif && params.decisionId && dedupeKey === negativeRoundNotificationKey(userId, placementDriveId || '')) {
+    const { data: alreadyNotified, error } = await supabase.rpc('has_negative_round_notification', {
+      p_user_id: userId, p_drive_id: placementDriveId,
+    });
+    if (error) throw error;
+    if (alreadyNotified) return { inAppCreated: false, pushSent: false, complete: true };
+  }
 
   if (existingNotif?.push_delivered_at || (existingNotif && !prefs.browserPushEnabled)) {
     return { inAppCreated: false, pushSent: false, complete: true };
@@ -293,15 +312,20 @@ export async function notifyShortlistAbsent(params: {
   companyName: string;
 }) {
   const { userId, placementDriveId, companyName } = params;
+  const { data: decision, error } = await createAdminClient().from('round_verdicts').select('id,verdict')
+    .eq('user_id', userId).eq('placement_drive_id', placementDriveId).eq('is_current', true).maybeSingle();
+  if (error) throw error;
+  if (!decision) return;
 
   return sendNotification({
     userId,
-    type: 'status_change',
-    title: companyName,
+    type: 'shortlist_match',
+    title: `Not Shortlisted: ${companyName}`,
     body: 'Not shortlisted for the next round.',
     placementDriveId,
+    decisionId: decision.id,
     link: `/companies/${placementDriveId}`,
-    dedupeKey: `shortlist_absent:${userId}:${placementDriveId}`,
+    dedupeKey: negativeRoundNotificationKey(userId, placementDriveId),
   });
 }
 

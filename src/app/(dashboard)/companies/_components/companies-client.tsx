@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import { useSearchParams } from 'next/navigation';
 import { cn, timeAgo, formatDate, formatStipend } from '@/lib/utils';
+import { formatTotalCtc } from '@/lib/compensation';
 import { StatusChip } from '@/components/ui/status-chip';
 import { DriveModeBadge } from '@/components/ui/drive-mode-badge';
 import {
@@ -637,7 +638,7 @@ export default function CompaniesClient({
 
           const stipendFormatted = formatStipend(c.application?.stipend);
           const ctcDisplay = c.application?.ctc
-            ? c.application.ctc.replace(/\*/g, '').trim()
+            ? formatTotalCtc(c.application.ctc)
             : stipendFormatted || 'TBA';
 
           return (
