@@ -1,7 +1,7 @@
 import type { Metadata } from 'next';
 import { requireSession } from '@/lib/auth';
 import { deriveEventEndTime } from '@/lib/event-duration';
-import { isInactiveStatus } from '@/lib/stages';
+import { isInactiveStatus, isAwaitingRegistration } from '@/lib/stages';
 import { createAdminClient } from '@/lib/supabase/admin';
 
 import CalendarClient, { type CalendarEvent } from './_components/calendar-client';
@@ -95,7 +95,7 @@ export default async function CalendarPage() {
       // Keep it in upcoming events/calendar only if the deadline is still in the future and you haven't applied yet
       if (evt.event_type === 'registration_deadline') {
         const isFuture = evt.start_time ? new Date(evt.start_time).getTime() > now : false;
-        const hasApplied = status !== 'not_applied' && status !== 'unknown';
+        const hasApplied = !isAwaitingRegistration(status);
         if (!isFuture || hasApplied) {
           continue;
         }
@@ -147,7 +147,7 @@ export default async function CalendarPage() {
   if (applications) {
     const now = Date.now();
     for (const app of applications as any[]) {
-      if (app.registration_deadline && (!app.status || app.status === 'not_applied' || app.status === 'unknown')) {
+      if (app.registration_deadline && isAwaitingRegistration(app.status)) {
         const isFuture = new Date(app.registration_deadline).getTime() > now;
         if (isFuture) {
           const key = `${app.placement_drive_id}:registration_deadline`;

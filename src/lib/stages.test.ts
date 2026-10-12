@@ -1,5 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { getEffectiveStage, isEliminatedStatus, isInactiveStatus } from './stages';
+import { getEffectiveStage, isEliminatedStatus, isInactiveStatus, isAwaitingRegistration } from './stages';
+
+describe('registration deadline visibility', () => {
+  it.each(['registration_open', 'not_applied', 'unknown', '', null, undefined])('keeps deadlines for %s', (status) => {
+    expect(isAwaitingRegistration(status)).toBe(true);
+  });
+
+  it.each(['applied', 'shortlisted', 'selected', 'not_shortlisted', 'withdrawn', 'declined'])('hides deadlines for %s', (status) => {
+    expect(isAwaitingRegistration(status)).toBe(false);
+  });
+});
 
 describe('active application classification', () => {
   it('excludes a post-PPT shortlist rejection from dashboard active totals', () => {

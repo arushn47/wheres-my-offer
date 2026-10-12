@@ -50,7 +50,7 @@ export function getPipelineStages({
   // through instead of the generic template.
   const announcedRounds = parseAnnouncedProcessToken(notes);
   if (announcedRounds && announcedRounds.length >= 2) {
-    let rounds = [...announcedRounds];
+    const rounds = [...announcedRounds];
     const hasTest = rounds.some(r => r.roundType === 'test');
     const hasInterviewOrGd = rounds.some(r => r.roundType === 'interview' || r.roundType === 'gd');
     if (!hasTest && hasInterviewOrGd) {
@@ -294,6 +294,15 @@ export function StageStepper({
 
   // Dedicated UI Banner for Registration Open
   if (isRegistrationOpen) {
+    const deadlineEvent = allEvents.find((event) =>
+      (event.eventType || event.event_type) === 'registration_deadline' &&
+      Number.isFinite(new Date(event.startTime || event.start_time || '').getTime())
+    );
+    const deadline = deadlineEvent?.startTime || deadlineEvent?.start_time;
+    const deadlineLabel = deadline ? new Date(deadline).toLocaleString('en-IN', {
+      timeZone: 'Asia/Kolkata',
+      day: 'numeric', month: 'long', year: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true,
+    }) : null;
     if (compact) {
       return (
         <div
@@ -328,6 +337,9 @@ export function StageStepper({
         </div>
         <div className="min-w-0 flex-1">
           <h4 className="text-sm font-semibold text-amber-200">Registration Window Open</h4>
+          {deadlineLabel && (
+            <p className="mt-1 text-sm font-semibold text-amber-200">Registration deadline: {deadlineLabel} IST</p>
+          )}
           <p className="mt-0.5 text-xs text-amber-300/90">
             {effective.statusSubtitle} — Complete your registration on the NeoPAT portal before the deadline expires.
           </p>

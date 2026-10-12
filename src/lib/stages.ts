@@ -71,6 +71,11 @@ export interface EventLike {
   round_number?: number | null;
 }
 
+/** These statuses still need registration; registration_open is not an application. */
+export function isAwaitingRegistration(status?: string | null): boolean {
+  return ['', 'not_applied', 'unknown', 'registration_open'].includes((status || '').toLowerCase());
+}
+
 export interface EffectiveStageResult {
   stageIndex: number;
   effectiveStatus: string;

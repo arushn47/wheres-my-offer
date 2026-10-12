@@ -8,7 +8,7 @@ import { knownCampus, resolveDriveMode } from '@/lib/drive-venues';
 import { loadRoundStatusSummaries } from '@/lib/sync/recruitment/round-status-data';
 import { resolveRecruitmentStatus } from '@/lib/sync/recruitment/round-status';
 import { detectCampus, detectBranch } from '@/lib/utils';
-import { getEffectiveStage, isInactiveStatus, isEliminatedStatus } from '@/lib/stages';
+import { getEffectiveStage, isInactiveStatus, isEliminatedStatus, isAwaitingRegistration } from '@/lib/stages';
 import DashboardClient from './_components/dashboard-client';
 
 export const metadata: Metadata = {
@@ -254,7 +254,7 @@ export default async function DashboardPage() {
       // Registration Deadline rule:
       // Keep it in upcoming events only if user hasn't applied yet
       if (event.event_type === 'registration_deadline') {
-        const hasApplied = companyStatus !== 'not_applied' && companyStatus !== 'unknown';
+        const hasApplied = !isAwaitingRegistration(companyStatus);
         if (hasApplied) continue;
       } else {
         // Skip eliminated or opted-out companies
@@ -287,7 +287,7 @@ export default async function DashboardPage() {
   // Also include future registration deadlines stored on applications
   if (applications) {
     for (const a of applications as any[]) {
-      if (a.registration_deadline && a.registration_deadline > nowIso && (a.status === 'not_applied' || a.status === 'unknown')) {
+      if (a.registration_deadline && a.registration_deadline > nowIso && isAwaitingRegistration(a.status)) {
         const key = `${a.placement_drive_id}:registration_deadline`;
         if (!seenEventKeys.has(key)) {
           seenEventKeys.add(key);

@@ -11,6 +11,7 @@ import { extractAnnouncedRoundsFromEmails, buildAnnouncedProcessToken } from '@/
 import { parseScheduledDate } from '@/lib/sync/identity/drive-temporal-boundary';
 import { summarizeRoundDecisions } from '@/lib/sync/recruitment/round-status';
 import { getRoundStatusDisplay } from '@/lib/sync/recruitment/status-display';
+import { isAwaitingRegistration } from '@/lib/stages';
 
 export async function generateMetadata({
   params,
@@ -688,7 +689,7 @@ export default async function CompanyDetailPage(props: {
       const filtered = (events || [])
         .filter((e) => {
           if (e.event_type === 'registration_deadline') {
-            const isRegistered = application && application.status !== 'not_applied' && application.status !== 'unknown';
+            const isRegistered = !isAwaitingRegistration(application?.status);
             const isPast = e.start_time && new Date(e.start_time).getTime() <= nowMs;
             if (isRegistered || isPast) return false;
           }
@@ -705,15 +706,16 @@ export default async function CompanyDetailPage(props: {
         }));
 
       const hasRegEvt = filtered.some((e) => e.eventType === 'registration_deadline');
-      if (!hasRegEvt && application?.registration_deadline) {
-        const regTime = new Date(application.registration_deadline).getTime();
-        const isNotRegistered = !application.status || application.status === 'not_applied' || application.status === 'unknown';
+      const registrationDeadline = application?.registration_deadline || targetDrive?.registration_deadline;
+      if (!hasRegEvt && registrationDeadline) {
+        const regTime = new Date(registrationDeadline).getTime();
+        const isNotRegistered = isAwaitingRegistration(application?.status);
         if (regTime > nowMs && isNotRegistered) {
           filtered.push({
             id: `reg_${company.id}`,
             eventType: 'registration_deadline',
             title: 'Registration Deadline',
-            startTime: application.registration_deadline,
+            startTime: registrationDeadline,
             endTime: null,
             venue: 'NeoPAT Portal / Online Form',
             mode: 'online',

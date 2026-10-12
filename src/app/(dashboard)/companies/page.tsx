@@ -1,4 +1,5 @@
 import type { Metadata } from 'next';
+import { isAwaitingRegistration } from '@/lib/stages';
 import { Suspense } from 'react';
 import { requireSession } from '@/lib/auth';
 import { createAdminClient } from '@/lib/supabase/admin';
@@ -145,7 +146,7 @@ export default async function CompaniesPage() {
       });
       
       for (const ent of matchingEntities) {
-        const isRegistered = ent.app && ent.app.status !== 'not_applied';
+        const isRegistered = !isAwaitingRegistration(ent.app?.status);
         
         // Filter registration deadlines: hide if already registered or in the past
         if (event.event_type === 'registration_deadline' && (isRegistered || isPast)) {
@@ -169,7 +170,7 @@ export default async function CompaniesPage() {
   for (const ent of entities) {
     const regDeadline = ent.app?.registration_deadline || ent.drive?.registration_deadline;
     const status = ent.app?.status || 'not_applied';
-    if (regDeadline && (status === 'not_applied' || status === 'unknown')) {
+    if (regDeadline && isAwaitingRegistration(status)) {
       const isPast = regDeadline < nowIso;
       if (!isPast) {
         const compEvts = allEventsByEntity.get(ent.entityId) || [];
