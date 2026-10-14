@@ -700,7 +700,7 @@ export default function CompaniesClient({
 
                   {/* Compensation, Location (plain text with icon), Drive Mode, and Recency */}
                   <div className="mt-3 flex flex-wrap items-center gap-x-2.5 sm:gap-x-3.5 gap-y-1.5 text-[11px] text-zinc-500 min-w-0">
-                    <span className="font-tabular font-mono text-xs sm:text-sm font-bold text-zinc-100 shrink-0">
+                    <span className="font-tabular font-mono text-xs sm:text-sm font-bold text-zinc-100 shrink-0" title={c.application?.ctc || c.application?.stipend || undefined}>
                       {ctcDisplay}
                     </span>
                     {(() => {
@@ -712,7 +712,7 @@ export default function CompaniesClient({
                           title={`Work Location: ${loc}`}
                         >
                           <MapPin className="h-3.5 w-3.5 shrink-0 text-zinc-400" />
-                          <span className="truncate">{loc}</span>
+                          <span className="truncate">{loc === 'Check documents' ? 'See docs' : loc}</span>
                         </span>
                       );
                     })()}

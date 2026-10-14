@@ -2,6 +2,7 @@ import type { ParsedEmail } from '@/lib/gmail/client';
 import { stripQuotedContent, getEvidenceMessageText } from '@/lib/sync/extraction/body';
 import { deriveEventEndTime } from '@/lib/event-duration';
 import { formatTotalCtc } from '@/lib/compensation';
+import { extractEducationCompensation } from '@/lib/education-compensation';
 import { cleanLocationString } from './locations';
 import type { RegistrationRequirements } from './registration-requirements';
 
@@ -1534,6 +1535,8 @@ export function extractJobDetails(text: string): ExtractedJobDetails {
     const component = oneTime ? `₹${amount} lakh one-time`
       : /^L\s*PA$/i.test(unit) ? `${amount} LPA` : `₹${amount} lakh`;
     ctc = formatTotalCtc(`${annual} LPA + ${capped}${component} relocation ${label.toLowerCase()}`);
+  } else if (ctcBlockMatch && /^(?:check|see|refer(?:\s+to)?|mentioned\s+in)\s+(?:the\s+)?(?:attached|attachments?|documents?|jd)\b/i.test(ctcBlockMatch[1].trim())) {
+    ctc = 'Check documents';
   } else if (ctcBlockMatch && unannouncedPattern.test(ctcBlockMatch[1])) {
     ctc = null;
   } else {
@@ -1764,6 +1767,10 @@ export function extractJobDetails(text: string): ExtractedJobDetails {
     }
   }
 
+  const educationCompensation = extractEducationCompensation(cleanText);
+  if (educationCompensation.ctc) ctc = educationCompensation.ctc;
+  if (educationCompensation.stipend) stipend = educationCompensation.stipend;
+
   // 3. Category & Job Role Extraction (Strictly Separate!)
   let category: string | null = null;
   const categoryMatch = cleanText.match(
@@ -1933,6 +1940,10 @@ export function extractJobDetails(text: string): ExtractedJobDetails {
 
   const validLocations: string[] = [];
   for (const raw of rawCandidateStrings) {
+    if (cleanLocationString(raw) === 'Check documents') {
+      validLocations.push('Check documents');
+      continue;
+    }
     let rawLoc = raw
       .replace(/\s*\((?:as\s+per|based\s+on|depending\s+on)\b.*$/i, '')
       .replace(/\s*(?:(?:\d+\.?\s*)?(?:Start\s+Date|Note|Eligibility|Criteria|Requirements?|Registration|CTC|Stipend|Internship\s+Duration|Joining\s+Date|Joining|Graduation\s+Year|Graduation|Batch|Timeline|Internship|Placement|Offer|Process|Website|Warm|Kind|Selection|Designation|Role|Job|JD|Position|Skills|Service|All\s+the|Work\s+Mode|Economy|On\s+Wed|For\s+more|PPO|About|Mandatory|depending\s+on|Fluent\s+English|Communication|You\s+can|Write\s+from|Forwarded|Queries|LC\s*\d|PRP|SJT|Anna|Lab|Hall|Venue|Whether|Academic\s+gap|Gap\s+allowed|Allowed|Backlog|Standing\s+arrear|History\s+of\s+arrear|Students?|Candidates?|Kindly|Please|Below\s+attachment|Refer\s+attachment|Allocated|Will\s+be\s+allocated|---)|[•*]).*$/i, '')

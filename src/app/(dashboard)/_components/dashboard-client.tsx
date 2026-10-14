@@ -554,7 +554,7 @@ export default function DashboardClient({
                   </div>
 
                   <div className="mt-3 flex flex-wrap items-center gap-x-3 sm:gap-x-4 gap-y-1 text-[11px] text-zinc-500 min-w-0">
-                    <span className="font-tabular font-mono text-xs sm:text-sm font-bold text-zinc-200 shrink-0">
+                    <span className="font-tabular font-mono text-xs sm:text-sm font-bold text-zinc-200 shrink-0" title={c.ctc || c.stipend || undefined}>
                       {formatTotalCtc(c.ctc) || formatStipend(c.stipend) || 'TBA'}
                     </span>
                     {/* Work Location: Neutral/Gray Pin + Text (Only show if specified) */}
@@ -567,7 +567,7 @@ export default function DashboardClient({
                           title={`Work Location: ${loc}`}
                         >
                           <MapPin className="h-3.5 w-3.5 shrink-0 text-zinc-400" />
-                          <span className="truncate">{loc}</span>
+                          <span className="truncate">{loc === 'Check documents' ? 'See docs' : loc}</span>
                         </span>
                       );
                     })()}

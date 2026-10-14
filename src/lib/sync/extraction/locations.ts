@@ -41,6 +41,8 @@ const LOCALITY_HINTS = /\b(?:layout|sector|phase|tech\s*park|technopark|cyber\s*
  */
 export function cleanLocationString(raw: string | null | undefined): string {
   if (!raw) return 'Not Specified';
+  if (/^\s*mentioned\s+in\s*$/i.test(raw)) return 'Check documents';
+  if (/\b(?:check\s+documents|(?:mentioned|specified|given)\s+in\s*(?:the\s*)?(?:attached|attachments?|documents?|jd)|(?:check|see|refer(?:\s+to)?)\s+(?:the\s+)?(?:attached|attachments?|documents?))\b/i.test(raw)) return 'Check documents';
   if (/^\s*(?:(?:and\s+)?other(?:\s+requirements?)?$|(?:any\s+location\s+)?as\s+(?:required|determined|decided)\s+by\b)/i.test(raw)) return 'Not Specified';
   if (/^\s*(?:refer|see|check|view|below)(?:\s|$)/i.test(raw)) return 'Not Specified';
   if (/^\s*(?:remote|work\s+from\s+home|wfh)\s*$/i.test(raw)) return 'Remote';

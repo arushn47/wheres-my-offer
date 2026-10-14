@@ -1353,6 +1353,7 @@ export function normalizeCompanyName(name: string): string {
     mckinsey: 'McKinsey',
     mediatek: 'MediaTek',
     qualcomm: 'Qualcomm',
+    cbre: 'CBRE',
   };
 
   // Title-case: keep all-caps short tokens (abbreviations) and known track acronyms as-is

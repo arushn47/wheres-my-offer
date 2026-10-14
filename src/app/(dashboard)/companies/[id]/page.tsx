@@ -1,5 +1,7 @@
 import type { Metadata } from 'next';
 import { getDriveDisplayName } from '@/lib/drive-display';
+import { inferEducationLevel, selectEducationCompensation } from '@/lib/education-compensation';
+import { getJobDisplayOverrides } from '@/lib/job-display-evidence';
 import { extractRegistrationRequirements, readRegistrationRequirements, type RegistrationRequirements } from '@/lib/sync/extraction/registration-requirements';
 import { notFound, redirect } from 'next/navigation';
 import { requireSession } from '@/lib/auth';
@@ -656,6 +658,9 @@ export default async function CompanyDetailPage(props: {
     accountMap.set(acc.id, acc.email);
   });
   const collegeAccount = (gmailAccounts || []).find((acc) => acc.account_type === 'college');
+  const educationLevel = inferEducationLevel(collegeAccount?.email);
+  const jobOverrides = targetDrive?.source_college_email_id && !excludedEmailIds.has(targetDrive.source_college_email_id)
+    ? getJobDisplayOverrides(canonicalBodyById.get(targetDrive.source_college_email_id) || '') : {};
 
   // Filter candidate matches to only those belonging to this company's emails
   const companyEmailIds = new Set([
@@ -698,9 +703,9 @@ export default async function CompanyDetailPage(props: {
           statusConfidence: application.status_confidence,
           role: application.role || targetDrive?.role || sharedDriveMeta?.role || null,
           category: application.category || targetDrive?.category || sharedDriveMeta?.category || null,
-          ctc: application.ctc || targetDrive?.ctc || sharedDriveMeta?.ctc || null,
-          stipend: application.stipend || targetDrive?.stipend || sharedDriveMeta?.stipend || null,
-          location: application.location || targetDrive?.location || sharedDriveMeta?.location || null,
+          ctc: selectEducationCompensation(jobOverrides.ctc || application.ctc || targetDrive?.ctc || sharedDriveMeta?.ctc, educationLevel),
+          stipend: selectEducationCompensation(jobOverrides.stipend || application.stipend || targetDrive?.stipend || sharedDriveMeta?.stipend, educationLevel),
+          location: jobOverrides.location || application.location || targetDrive?.location || sharedDriveMeta?.location || null,
           eligibility: application.eligibility || targetDrive?.eligibility || sharedDriveMeta?.eligibility || null,
           branches: application.branches || targetDrive?.branches || sharedDriveMeta?.branches || null,
           cgpaRequirement: application.cgpa_requirement || targetDrive?.cgpa_requirement || sharedDriveMeta?.cgpa_requirement || null,

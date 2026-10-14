@@ -105,6 +105,7 @@ export async function parsePdfAttachment(bytes: Buffer): Promise<PdfParseResult>
  * Derives job details from every parsed PDF attachment on an email and merges
  * them into body-derived details. Body values always win; PDFs only fill fields
  * the body left null (the classic "CTC / JD in attached PDF" circular).
+ * Differing package/location values across documents stay unresolved.
  * Generic so full `ExtractedJobDetails` inputs keep their complete shape.
  */
 export function mergePdfJobDetails<T extends object>(
@@ -120,7 +121,16 @@ export function mergePdfJobDetails<T extends object>(
   if (typeof merged.role === 'string') merged.role = cleanRoleTitle(merged.role);
   if (typeof merged.location === 'string' && cleanLocationString(merged.location) === 'Not Specified') merged.location = null;
   const pdfDetails = extractJobDetails(pdfText.slice(0, MAX_PDF_TEXT_CHARS));
+  const documentDetails = attachments
+    .map(attachment => getCachedPdfText([attachment]))
+    .filter(text => text.trim())
+    .map(text => extractJobDetails(text));
   for (const field of ['role', 'ctc', 'stipend', 'location', 'eligibility', 'cgpaRequirement', 'backlogRequirement'] as const) {
+    if ((field === 'ctc' || field === 'location') && !merged[field]) {
+      const values = [...new Set(documentDetails.map(details => details[field]).filter((value): value is string => Boolean(value)))];
+      if (values.length) merged[field] = values.length === 1 ? values[0] : 'Check documents';
+      continue;
+    }
     if (!merged[field] && pdfDetails[field]) {
       merged[field] = pdfDetails[field];
     }

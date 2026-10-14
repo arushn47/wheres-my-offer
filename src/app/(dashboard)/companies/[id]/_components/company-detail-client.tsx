@@ -17,7 +17,7 @@ import {
   Info,
 } from 'lucide-react';
 import { cn, timeAgo } from '@/lib/utils';
-import { formatTotalCtc } from '@/lib/compensation';
+import { formatCompensationLabel, formatTotalCtc } from '@/lib/compensation';
 import { STATUS_META } from '@/components/ui/status-chip';
 import { StageStepper, getStageIndex, getEffectiveStage, isEliminatedStatus } from '@/components/companies/stage-stepper';
 import { cleanLocationString } from '@/lib/sync/extraction/locations';
@@ -442,7 +442,7 @@ export default function CompanyDetailClient({
   // Derive 4 CTC cards like Emergent: Total CTC, Fixed, Bonus, ESOPs
   const rawCtc = company.application?.ctc || '';
   const cleanCtc = formatTotalCtc(rawCtc) || 'TBA';
-  const stipend = company.application?.stipend?.replace(/\*/g, '').trim() || null;
+  const stipend = formatCompensationLabel(company.application?.stipend) || null;
   const cleanStipend = useMemo(() => {
     if (!stipend) return null;
     let s = stipend.trim();
@@ -754,14 +754,14 @@ export default function CompanyDetailClient({
         <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
           <div data-testid="ctc-total" className="rounded-xl border border-zinc-800 bg-zinc-900/50 px-3.5 py-3">
             <div className="font-mono text-[9px] uppercase tracking-widest text-zinc-500">Total CTC</div>
-            <div className="font-tabular mt-1 font-display text-base sm:text-lg font-bold text-emerald-300 truncate" title={cleanCtc}>
+            <div className={cn('font-tabular mt-1 font-display font-bold text-emerald-300', cleanCtc.length > 20 ? 'text-sm leading-snug' : 'text-base sm:text-lg')} title={rawCtc || cleanCtc}>
               {cleanCtc}
             </div>
           </div>
 
           <div data-testid="ctc-stipend" className="rounded-xl border border-zinc-800 bg-zinc-900/50 px-3.5 py-3">
             <div className="font-mono text-[9px] uppercase tracking-widest text-zinc-500">Stipend</div>
-            <div className="font-tabular mt-1 font-display text-base sm:text-lg font-bold text-zinc-200 truncate" title={cleanStipend || (cleanCtc !== 'TBA' ? 'N/A' : 'TBA')}>
+            <div className={cn('font-tabular mt-1 font-display font-bold text-zinc-200', (cleanStipend?.length || 0) > 20 ? 'text-sm leading-snug' : 'text-base sm:text-lg')} title={company.application?.stipend || (cleanCtc !== 'TBA' ? 'N/A' : 'TBA')}>
               {cleanStipend || (cleanCtc !== 'TBA' ? 'N/A' : 'TBA')}
             </div>
           </div>
@@ -780,7 +780,7 @@ export default function CompanyDetailClient({
               )}
               title={displayLocation && displayLocation !== 'Not Specified' ? displayLocation : 'To be announced'}
             >
-              {displayLocation && displayLocation !== 'Not Specified' ? displayLocation : 'TBA'}
+              {displayLocation && displayLocation !== 'Not Specified' ? (displayLocation === 'Check documents' ? 'See docs' : displayLocation) : 'TBA'}
             </div>
             {displayLocation && displayLocation.length > 18 && displayLocation !== 'Not Specified' && (
               <div className="pointer-events-none absolute left-0 bottom-full mb-2 hidden w-max max-w-xs rounded-lg border border-zinc-700/80 bg-zinc-950/95 px-3 py-2 text-xs text-zinc-200 shadow-2xl backdrop-blur-md group-hover:block z-30 transition-all font-sans font-medium leading-relaxed">

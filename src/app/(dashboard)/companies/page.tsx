@@ -1,5 +1,7 @@
 import type { Metadata } from 'next';
 import { getDriveDisplayName } from '@/lib/drive-display';
+import { inferEducationLevel, selectEducationCompensation } from '@/lib/education-compensation';
+import { readJobDisplayOverrides } from '@/lib/job-display-data';
 import { isAwaitingRegistration } from '@/lib/stages';
 import { Suspense } from 'react';
 import { requireSession } from '@/lib/auth';
@@ -43,7 +45,7 @@ export default async function CompaniesPage() {
 
     supabase
       .from('placement_drives')
-      .select('id, company_id, drive_number, normalized_drive_number, drive_name, role, category, ctc, stipend, location, created_at, updated_at, source_college_email_id, source_email_id'),
+      .select('id, company_id, drive_number, normalized_drive_number, drive_name, role, category, ctc, stipend, location, created_at, updated_at, source_college_email_id, source_email_id, excluded_email_ids'),
 
     supabase
       .from('applications')
@@ -79,6 +81,9 @@ export default async function CompaniesPage() {
   }
 
   const collegeAccount = accounts?.find((a) => a.account_type === 'college');
+  const educationLevel = inferEducationLevel(collegeAccount?.email);
+  const jobOverrides = await readJobDisplayOverrides(supabase, (placementDrives || []).filter(drive =>
+    (applications || []).some(app => app.placement_drive_id === drive.id)));
   const userCampus = detectCampus(collegeAccount?.email);
 
   // Maps for efficient lookups
@@ -319,9 +324,9 @@ export default async function CompaniesPage() {
         status: roundDisplay.status,
         role: app.role || drive?.role || shared?.role || null,
         category: app.category || drive?.category || shared?.category || null,
-        ctc: app.ctc || drive?.ctc || shared?.ctc || null,
-        stipend: app.stipend || drive?.stipend || shared?.stipend || null,
-        location: app.location || drive?.location || shared?.location || null,
+        ctc: selectEducationCompensation(jobOverrides.get(drive?.source_college_email_id)?.ctc || app.ctc || drive?.ctc || shared?.ctc, educationLevel),
+        stipend: selectEducationCompensation(jobOverrides.get(drive?.source_college_email_id)?.stipend || app.stipend || drive?.stipend || shared?.stipend, educationLevel),
+        location: jobOverrides.get(drive?.source_college_email_id)?.location || app.location || drive?.location || shared?.location || null,
         notes: app.notes || null,
         manual_override: app.manual_override || false,
         applied_at: app.applied_at || null,
@@ -334,8 +339,8 @@ export default async function CompaniesPage() {
         status: 'not_applied',
         role: drive?.role || shared?.role || null,
         category: drive?.category || shared?.category || null,
-        ctc: drive?.ctc || shared?.ctc || null,
-        stipend: drive?.stipend || shared?.stipend || null,
+        ctc: selectEducationCompensation(drive?.ctc || shared?.ctc, educationLevel),
+        stipend: selectEducationCompensation(drive?.stipend || shared?.stipend, educationLevel),
         location: drive?.location || shared?.location || null,
         notes: null,
         manual_override: false,

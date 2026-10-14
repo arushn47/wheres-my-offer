@@ -3,6 +3,21 @@ import { mergePdfJobDetails, pdfRowsFromText, isPdfAttachment } from './pdf-pars
 import { extractJobDetails } from './events';
 
 describe('pdf-parser', () => {
+  it('does not combine different document packages or pick the first document location', () => {
+    const body = extractJobDetails('Designation: Associate Software Engineer');
+    const merged = mergePdfJobDetails(body, [
+      { filename: 'software-jd.pdf', parseStatus: 'complete', extractedRows: pdfRowsFromText(['CTC: 11.72 LPA\nLocation: Hyderabad']) },
+      { filename: 'data-jd.pdf', parseStatus: 'complete', extractedRows: pdfRowsFromText(['CTC: 12 LPA\nLocation: Bangalore']) },
+    ]);
+    expect(merged.ctc).toBe('Check documents');
+    expect(merged.location).toBe('Check documents');
+  });
+  it('does not turn benefit amounts into a package when the circular says to check attachments', () => {
+    const merged = mergePdfJobDetails(extractJobDetails('CTC: Check attached'), [
+      { filename: 'benefits.pdf', parseStatus: 'complete', extractedRows: pdfRowsFromText(['Insurance coverage 5 LPA to 20 LPA']) },
+    ]);
+    expect(merged.ctc).toBe('Check documents');
+  });
   it('recognizes PDF filenames only', () => {
     expect(isPdfAttachment('JD.pdf')).toBe(true);
     expect(isPdfAttachment('JD.PDF')).toBe(true);

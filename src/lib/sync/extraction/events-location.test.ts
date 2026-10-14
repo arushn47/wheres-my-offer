@@ -69,8 +69,11 @@ describe('cleanLocationString normalization', () => {
   it.each(['AND OTHER', 'as required by Infosys', 'any location as required by Infosys'])('hides historical placeholder locations: %s', raw => {
     expect(cleanLocationString(raw)).toBe('Not Specified');
   });
-  it.each(['Refer', 'Refer JD', 'Refer JD’s', 'See attachment'])('rejects stored JD pointers as work locations: %s', raw => {
+  it.each(['Refer', 'Refer JD', 'Refer JD’s'])('rejects stored JD pointers as work locations: %s', raw => {
     expect(cleanLocationString(raw)).toBe('Not Specified');
+  });
+  it('shows an explicit attachment pointer as a document instruction', () => {
+    expect(cleanLocationString('See attachment')).toBe('Check documents');
   });
   it('formats parallel cities with "/" and preserves hierarchical localities with ","', () => {
     expect(cleanLocationString('Bangalore | Hyderabad')).toBe('Bangalore / Hyderabad');

@@ -1,5 +1,7 @@
 import type { Metadata } from 'next';
 import { getDriveDisplayName } from '@/lib/drive-display';
+import { inferEducationLevel, selectEducationCompensation } from '@/lib/education-compensation';
+import { readJobDisplayOverrides } from '@/lib/job-display-data';
 import { redirect } from 'next/navigation';
 import { requireSession } from '@/lib/auth';
 import { checkIsAdmin } from '@/lib/auth/admin';
@@ -43,7 +45,7 @@ export default async function DashboardPage() {
   ] = await Promise.all([
     supabase
       .from('placement_drives')
-      .select('id, company_id, drive_number, drive_name, role, category, ctc, stipend, location'),
+      .select('id, company_id, drive_number, drive_name, role, category, ctc, stipend, location, source_college_email_id, excluded_email_ids'),
     supabase
       .from('companies')
       .select('id, name'),
@@ -78,6 +80,9 @@ export default async function DashboardPage() {
     ...app,
     status: resolveRecruitmentStatus(app.status || 'not_applied', roundDecisionsByDrive.get(app.placement_drive_id), Boolean(app.manual_override), app.notes || ''),
   }));
+  const educationLevel = inferEducationLevel(accounts?.find(account => account.account_type === 'college')?.email);
+  const jobOverrides = await readJobDisplayOverrides(supabase, (placementDrives || []).filter(drive =>
+    applications.some(app => app.placement_drive_id === drive.id)));
 
   const nowIso = new Date().toISOString();
 
@@ -359,9 +364,9 @@ export default async function DashboardPage() {
       status: effectiveStatus,
       statusSubtitle,
       role: a.role || drive?.role || null,
-      ctc: a.ctc || drive?.ctc || null,
-      stipend: a.stipend || drive?.stipend || null,
-      location: a.location || drive?.location || null,
+      ctc: selectEducationCompensation(jobOverrides.get(drive?.source_college_email_id)?.ctc || a.ctc || drive?.ctc, educationLevel),
+      stipend: selectEducationCompensation(jobOverrides.get(drive?.source_college_email_id)?.stipend || a.stipend || drive?.stipend, educationLevel),
+      location: jobOverrides.get(drive?.source_college_email_id)?.location || a.location || drive?.location || null,
       category: a.category || drive?.category || null,
       notes: a.notes,
       driveMode: venue.label,
