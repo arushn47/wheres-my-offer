@@ -1,4 +1,5 @@
 import type { Metadata } from 'next';
+import { getDriveDisplayName } from '@/lib/drive-display';
 import { Suspense } from 'react';
 import { requireSession } from '@/lib/auth';
 import { createAdminClient } from '@/lib/supabase/admin';
@@ -92,8 +93,7 @@ export default async function SearchPage() {
   // Count drives per company to identify multi-drive companies
   const driveCountMap = new Map<string, number>();
   for (const d of placementDrives || []) {
-    const comp = companyMap.get(d.company_id);
-    const key = (comp?.name || d.drive_name || '').toLowerCase().trim();
+    const key = d.company_id;
     driveCountMap.set(key, (driveCountMap.get(key) || 0) + 1);
   }
 
@@ -119,8 +119,8 @@ export default async function SearchPage() {
       const notes = app?.notes || null;
       const venue = resolveDriveMode(venueMap.get(drive.id), venueCampus);
       const driveMode = venue.label;
-      const compName = comp?.name || drive.drive_name || 'Placement Drive';
-      const isMultiDrive = (driveCountMap.get(compName.toLowerCase().trim()) || 0) > 1;
+      const compName = getDriveDisplayName(drive.drive_name, comp?.name);
+      const isMultiDrive = (driveCountMap.get(drive.company_id) || 0) > 1;
 
       companyItems.push({
         id: comp?.id || drive.company_id,
@@ -193,7 +193,7 @@ export default async function SearchPage() {
       sender: em.sender,
       receivedAt: em.received_at,
       companyId: compId,
-      companyName: comp?.name || drive?.drive_name || null,
+      companyName: drive || comp ? getDriveDisplayName(drive?.drive_name, comp?.name) : null,
       snippet: em.body_snippet,
     };
   });
@@ -216,7 +216,7 @@ export default async function SearchPage() {
       sender: ce.sender_email,
       receivedAt: (ce as any).received_at || ce.created_at,
       companyId: compId,
-      companyName: comp?.name || ce.parsed_company_name || matchedDrive?.drive_name || null,
+      companyName: matchedDrive ? getDriveDisplayName(matchedDrive.drive_name, comp?.name) : ce.parsed_company_name || null,
       snippet: ce.body_text ? ce.body_text.slice(0, 500) : null,
     };
   });
@@ -241,7 +241,7 @@ export default async function SearchPage() {
         venue: ev.venue,
         mode: ev.mode,
         companyId: compId,
-        companyName: comp?.name || drive?.drive_name || 'Placement Drive',
+        companyName: getDriveDisplayName(drive?.drive_name, comp?.name),
       };
     }),
   };

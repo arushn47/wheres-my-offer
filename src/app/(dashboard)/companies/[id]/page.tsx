@@ -1,4 +1,6 @@
 import type { Metadata } from 'next';
+import { getDriveDisplayName } from '@/lib/drive-display';
+import { extractRegistrationRequirements, readRegistrationRequirements, type RegistrationRequirements } from '@/lib/sync/extraction/registration-requirements';
 import { notFound, redirect } from 'next/navigation';
 import { requireSession } from '@/lib/auth';
 import { createAdminClient } from '@/lib/supabase/admin';
@@ -15,34 +17,47 @@ import { isAwaitingRegistration } from '@/lib/stages';
 
 export async function generateMetadata({
   params,
+  searchParams,
 }: {
   params: Promise<{ id: string }>;
+  searchParams?: Promise<{ [key: string]: string | string[] | undefined }>;
 }): Promise<Metadata> {
   const { id } = await params;
+  const query = searchParams ? await searchParams : {};
+  const requestedDriveId = typeof query.driveId === 'string' ? query.driveId : null;
+  let driveName: string | null = null;
   const supabase = createAdminClient();
   let { data: company } = await supabase
     .from('companies')
-    .select('name')
+    .select('id, name')
     .eq('id', id)
     .maybeSingle();
 
   if (!company) {
     const { data: drive } = await supabase
       .from('placement_drives')
-      .select('company_id')
+      .select('company_id, drive_name')
       .eq('id', id)
       .maybeSingle();
     if (drive) {
+      driveName = drive.drive_name;
       const { data: c } = await supabase
         .from('companies')
-        .select('name')
+        .select('id, name')
         .eq('id', drive.company_id)
         .maybeSingle();
       company = c;
     }
   }
 
-  const name = company?.name || 'Company Details';
+  if (company && !driveName) {
+    let driveQuery = supabase.from('placement_drives').select('drive_name')
+      .eq('company_id', company.id).order('created_at', { ascending: false }).limit(1);
+    if (requestedDriveId) driveQuery = driveQuery.eq('id', requestedDriveId);
+    const { data: drive } = await driveQuery.maybeSingle();
+    driveName = drive?.drive_name || null;
+  }
+  const name = getDriveDisplayName(driveName, company?.name);
   return {
     title: name,
     description: `Detailed recruitment drive history, schedule, test rounds, and email updates for ${name} on Where's My Offer?.`,
@@ -93,6 +108,17 @@ export default async function CompanyDetailPage(props: {
   }
 
   if (!company) {
+    // Merged organization IDs remain usable by old links and notifications.
+    const { data: companyRedirect } = await supabase.from('company_identity_redirects')
+      .select('target_company_id,default_drive_id').eq('source_company_id', companyId).maybeSingle();
+    if (companyRedirect) {
+      const sp = new URLSearchParams();
+      for (const [key, value] of Object.entries(searchParams)) {
+        if (typeof value === 'string') sp.set(key, value);
+      }
+      if (!sp.has('driveId') && companyRedirect.default_drive_id) sp.set('driveId', companyRedirect.default_drive_id);
+      redirect(`/companies/${companyRedirect.target_company_id}${sp.size ? `?${sp}` : ''}`);
+    }
     notFound();
   }
 
@@ -100,7 +126,8 @@ export default async function CompanyDetailPage(props: {
   const { data: companyDrives } = await supabase
     .from('placement_drives')
     .select('id, drive_number, normalized_drive_number, drive_name, role, category, ctc, stipend, location, registration_deadline, eligibility, branches, cgpa_requirement, backlog_requirement, source_email_id, source_college_email_id, excluded_email_ids, created_at, aliases')
-    .eq('company_id', company.id);
+    .eq('company_id', company.id)
+    .order('created_at', { ascending: false });
 
   const driveIds = (companyDrives || []).map((d) => d.id);
 
@@ -558,14 +585,18 @@ export default async function CompanyDetailPage(props: {
       .map((em: any) => em.college_email_id || em.canonical_email_id || (em.is_college ? em.id : null))
       .filter((id: unknown): id is string => typeof id === 'string' && id.length > 0)
   ));
+  if (targetDrive?.source_college_email_id && !excludedEmailIds.has(targetDrive.source_college_email_id) && !canonicalIds.includes(targetDrive.source_college_email_id)) {
+    canonicalIds.push(targetDrive.source_college_email_id);
+  }
   const canonicalBodyById = new Map<string, string>();
+  const registrationRequirementsById = new Map<string, RegistrationRequirements>();
   const canonicalMessageIdById = new Map<string, string>();
   const attachmentByCollegeEmailId = new Map<string, string>();
   if (canonicalIds.length > 0) {
     const [canonicalRes, attachmentRes] = await Promise.all([
       supabase
         .from('college_emails')
-        .select('id, body_text, message_id')
+        .select('id, body_text, message_id, subject, registration_requirements:parsed_job_details->registrationRequirements')
         .in('id', canonicalIds),
       supabase
         .from('college_attachments')
@@ -579,6 +610,9 @@ export default async function CompanyDetailPage(props: {
       for (const canonical of canonicalRes.data || []) {
         const body = canonical.body_text || '';
         if (body) canonicalBodyById.set(canonical.id, body);
+        const requirements = readRegistrationRequirements(canonical.registration_requirements)
+          || extractRegistrationRequirements({ subject: canonical.subject || '', bodyPlain: body });
+        if (requirements) registrationRequirementsById.set(canonical.id, requirements);
         if (canonical.message_id) canonicalMessageIdById.set(canonical.id, canonical.message_id);
       }
     }
@@ -642,11 +676,14 @@ export default async function CompanyDetailPage(props: {
     for (const scan of decision.verdict.evaluations || []) rosterStates.set(scan.emailId, scan.state);
   }
   const detail: CompanyDetail = {
+    registrationRequirements: targetDrive?.source_college_email_id
+      ? registrationRequirementsById.get(targetDrive.source_college_email_id) || null : null,
+    registrationDeadline: application?.registration_deadline || targetDrive?.registration_deadline || null,
     venue: resolveDriveMode(venueMap.get(placementDriveId || ''), knownCampus(collegeAccount?.email)),
     id: company.id,
     placementDriveId,
     roundDecisions: displayDecisions,
-    name: company.name,
+    name: getDriveDisplayName(targetDrive?.drive_name, company.name),
     legalName: null,
     aliases: company.aliases,
     driveNumber: targetDrive?.drive_number || null,
@@ -700,7 +737,7 @@ export default async function CompanyDetailPage(props: {
           eventType: e.event_type,
           title: e.title,
           startTime: e.start_time,
-          endTime: e.end_time,
+          endTime: e.event_type === 'registration_deadline' ? null : e.end_time,
           venue: e.venue,
           mode: e.mode,
         }));

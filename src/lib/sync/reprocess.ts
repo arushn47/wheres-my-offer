@@ -8,6 +8,7 @@ import { loadUserCandidateIdentity } from '@/lib/sync/identity/user-identity';
 import { isCompanySubjectMatch as matchesCompanySubject, loadRecalculationScope, loadScopedMetadata, loadScopedCircularMetadata, loadSelectedCanonicalBodies, type RecalculationCircularMetadata } from './recalculation-scope';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { withQueryMetrics } from '@/lib/supabase/query-metrics';
+import { getParentCompanyName, getEyDriveName, isEyCompany } from '@/lib/company-identity';
 import {
   classifyEmail,
   cleanCompanyName,
@@ -2157,7 +2158,7 @@ async function recalculateApplicationStatusesUnlocked(
               event_type: evt.eventType,
               title: `${comp.name} - ${evt.title}`,
               start_time: evt.startTime.toISOString(),
-              end_time: evt.endTime ? evt.endTime.toISOString() : null,
+              end_time: evt.eventType === 'registration_deadline' ? null : evt.endTime ? evt.endTime.toISOString() : null,
               venue: evt.venue,
               mode: evt.mode,
               confidence: evt.confidence,
@@ -2698,7 +2699,7 @@ async function performReprocessUnlocked(
     const fullEmailText = `${subject}\n${bodySnippet}`;
     const driveNumber = extractDriveNumber(fullEmailText);
     const driveNameMatch = fullEmailText.match(/(?:drive\s+name|name\s+of\s+the\s+drive)\s*[:\-*]*\s*([A-Za-z0-9&\s\-\.()]+?)(?:\s+(?:drive\s+number|new\s+drive\s+date|category|date\s+of\s+visit|eligibility|eligible|ctc|role|stipend|company|date|please|if\b|\n|\r|\*|$))/i);
-    const driveName = driveNameMatch ? driveNameMatch[1].trim() : null;
+    let driveName = driveNameMatch ? driveNameMatch[1].trim() : getEyDriveName(`${subject}\n${bodySnippet}`);
 
     const classification = classifyEmail({
       gmailMessageId: email.id,
@@ -2719,7 +2720,7 @@ async function performReprocessUnlocked(
     const isPlacement = !['irrelevant', 'unclassified', 'general'].includes(classification.classification);
 
     if (driveNumber && companyName && isPlacement) {
-      const baseClean = cleanCompanyName(companyName);
+      const baseClean = isEyCompany(companyName) ? 'EY' : cleanCompanyName(companyName);
       if (['Apple', 'Honeywell', 'Zluri', 'EY'].some((b) => b.toLowerCase() === baseClean.toLowerCase())) {
         const resolution = await resolveDriveByTimingCorrelation(
           supabase,
@@ -2731,13 +2732,16 @@ async function performReprocessUnlocked(
         );
         if (resolution) {
           companyName = resolution.resolvedCompanyName;
+          if (!driveName && isEyCompany(companyName) && resolution.confidence !== 'needs_review') {
+            driveName = getEyDriveName(resolution.resolvedCompanyName);
+          }
           driveResolutionsMap.set(driveNumber, resolution.resolvedCompanyName);
         }
       }
     }
 
     if (companyName && isPlacement) {
-      const normalized = normalizeCompanyName(companyName);
+      const normalized = normalizeCompanyName(getParentCompanyName(companyName));
       if (!normalized || isInvalidCompanyName(normalized)) {
         continue;
       }

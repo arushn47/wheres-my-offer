@@ -1,4 +1,5 @@
 import type { ParsedEmail } from '@/lib/gmail/client';
+import { getParentCompanyName } from '@/lib/company-identity';
 import { extractDriveNumber } from '@/lib/sync/extraction/events';
 import { getCanonicalBodyText, getCurrentMessageText, getEvidenceMessageText } from '@/lib/sync/extraction/body';
 
@@ -934,6 +935,13 @@ export function extractCompanyAliases(rawName: string, canonicalName: string, dr
  * Extracts and normalizes a company name from the email subject.
  */
 export function extractCompanyName(
+  ...args: Parameters<typeof extractCompanyLabel>
+): string | null {
+  const label = extractCompanyLabel(...args);
+  return label ? getParentCompanyName(label) : null;
+}
+
+function extractCompanyLabel(
   subject: string,
   _senderEmail: string,
   bodySnippet?: string,
@@ -1119,16 +1127,14 @@ export function extractCompanyName(
   if (isEyEmail) {
     if (
       lowerCleaned.includes('sap') ||
-      lowerBody.includes('ey sap') ||
-      lowerBody.includes('pat-pl-2026-1191')
+      lowerBody.includes('ey sap')
     ) {
       return 'EY SAP';
     }
     if (
       lowerCleaned.includes('gds') ||
       lowerBody.includes('ey gds') ||
-      lowerBody.includes('global delivery') ||
-      lowerBody.includes('pat-pl-2026-1210')
+      lowerBody.includes('global delivery')
     ) {
       return 'EY GDS';
     }
@@ -1334,7 +1340,7 @@ export function normalizeCompanyName(name: string): string {
 
   const corrected = name.replace(/\bunthikable\b/gi, 'Unthinkable');
 
-  const UPPERCASE_TRACKS = new Set(['SDET', 'SRE', 'SAP', 'GDS', 'TCS', 'IBM', 'UBS', 'EY', 'CDC', 'JPMC', 'PWC', 'BAML', 'MUFG', 'LTI', 'LMT', 'CTS', 'HP', 'GS', 'MS']);
+  const UPPERCASE_TRACKS = new Set(['IS&T', 'SDET', 'SRE', 'SAP', 'GDS', 'TCS', 'IBM', 'UBS', 'EY', 'CDC', 'JPMC', 'PWC', 'BAML', 'MUFG', 'LTI', 'LMT', 'CTS', 'HP', 'GS', 'MS']);
 
   const SPECIAL_BRAND_CASINGS: Record<string, string> = {
     ltimindtree: 'LTIMindtree',

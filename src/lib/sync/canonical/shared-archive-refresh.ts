@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { withRegistrationRequirements } from '../extraction/registration-requirements';
 import { randomUUID } from 'node:crypto';
 import { createGmailClient, fetchMessageDetail, type GmailAccount } from '@/lib/gmail/client';
 import { createAdminClient } from '@/lib/supabase/admin';
@@ -317,7 +318,7 @@ export async function refreshSharedCollegeArchive(
 
         const currentEmail = parsed;
         const classification = classifyEmail(currentEmail);
-        const jobDetails = extractJobDetails(bodyText);
+        const jobDetails = withRegistrationRequirements(extractJobDetails(bodyText), currentEmail);
         const events = extractEvents(currentEmail);
         const contentKey = computeCanonicalContentKey(senderEmail, currentEmail.subject, bodyText);
         const normalizedAddress = parsed.senderEmail.toLowerCase().trim();

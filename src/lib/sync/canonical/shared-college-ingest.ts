@@ -11,6 +11,8 @@ import { cleanLocationString } from '@/lib/sync/extraction/locations';
 import { processEmailForEventsAndStatus } from '@/lib/sync/recruitment/status-engine';
 import { hasSharedDriveFanOutEvidence, isShortlistMatchEvidence } from '@/lib/sync/recruitment/participation-evidence';
 import { normalizeDriveNumber } from '@/lib/drive-number';
+import { matchesEyDriveName, isEyCompany } from '@/lib/company-identity';
+import { withRegistrationRequirements } from '../extraction/registration-requirements';
 import {
   classifyUnsupportedAttachment,
   isSupportedWorkbookAttachment,
@@ -80,6 +82,9 @@ async function findDriveCandidateForCircular(
   const name = params.parsedCompanyName.toLowerCase().trim();
   const byCompany = drives.filter((drive) => {
     const company = Array.isArray(drive.companies) ? drive.companies[0] : drive.companies;
+    if (isEyCompany(params.parsedCompanyName) && isEyCompany(company?.name)) {
+      return matchesEyDriveName(drive.drive_name, params.subject || '');
+    }
     const cName = (company?.name || '').toLowerCase().trim();
     const dName = (drive.drive_name || '').toLowerCase().trim();
     if (cName === name || dName === name) return true;
@@ -216,7 +221,7 @@ export async function ingestSharedCollegeCircular(params: {
   const classification = classifyEmail(parsedEmail);
   const normalizedMessageId = normalizeRfcMessageId(parsedEmail.messageId);
   const contentKey = computeCanonicalContentKey(parsedEmail.senderEmail, parsedEmail.subject, bodyText);
-  let jobDetails = mergePdfJobDetails(extractJobDetails(bodyText), parsedEmail.attachments);
+  let jobDetails = withRegistrationRequirements(mergePdfJobDetails(extractJobDetails(bodyText), parsedEmail.attachments), parsedEmail);
   const events = extractEvents(parsedEmail);
   const payload = {
     content_key: contentKey,
@@ -414,7 +419,7 @@ export async function ingestSharedCollegeCircular(params: {
   if (parsedEmail.attachments.some((attachment) =>
     isPdfAttachment(attachment.filename) && attachment.parseStatus === 'complete' && attachment.extractedRows
   )) {
-    const pdfMergedJobDetails = mergePdfJobDetails(extractJobDetails(bodyText), parsedEmail.attachments);
+    const pdfMergedJobDetails = withRegistrationRequirements(mergePdfJobDetails(extractJobDetails(bodyText), parsedEmail.attachments), parsedEmail);
     if (JSON.stringify(pdfMergedJobDetails) !== JSON.stringify(jobDetails)) {
       const { error } = await supabase
         .from('college_emails')

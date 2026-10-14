@@ -29,9 +29,12 @@ import { getCurrentRoundDecision, usesAutomaticRoundStatus, type RoundStatusDeci
 
 import type { DriveModeDisplay } from '@/lib/drive-venues';
 import { DriveModeDetails } from '@/components/ui/drive-mode-details';
-import { DriveVenueRounds } from '@/components/ui/drive-venue-rounds';
+import { CompanyRegistrationReminder } from '@/components/companies/company-registration-reminder';
+import { shouldShowCompanyRegistrationReminder, type RegistrationRequirements } from '@/lib/sync/extraction/registration-requirements';
 
 export interface CompanyDetail {
+  registrationRequirements?: RegistrationRequirements | null;
+  registrationDeadline?: string | null;
   venue?: DriveModeDisplay;
   id: string;
   name: string;
@@ -433,7 +436,8 @@ export default function CompanyDetailClient({
   const rawCategory = company.application?.category || (/1[0-9]\s*lpa|[2-9][0-9]\s*lpa/i.test(company.application?.ctc || '') ? 'Super Dream' : 'Dream');
   const category = rawCategory.replace(/\b(internship|offer|placement|drive)\b/gi, '').replace(/\s*\/\s*/g, ' ').replace(/\s+/g, ' ').trim() || rawCategory.trim();
 
-  const nextUpcomingEvent = company.events.find((e) => e.startTime && new Date(e.startTime).getTime() > Date.now());
+  const nextUpcomingEvent = company.events.find((e) => e.eventType !== 'registration_deadline' && e.startTime && new Date(e.startTime).getTime() > Date.now());
+  const hasCompanyRegistrationReminder = Boolean(company.registrationRequirements && shouldShowCompanyRegistrationReminder(displayStatus, company.registrationDeadline));
 
   // Derive 4 CTC cards like Emergent: Total CTC, Fixed, Bonus, ESOPs
   const rawCtc = company.application?.ctc || '';
@@ -764,7 +768,7 @@ export default function CompanyDetailClient({
 
           <div data-testid="ctc-drive-mode" className="rounded-xl border border-zinc-800 bg-zinc-900/50 px-3.5 py-3">
             <div className="font-mono text-[9px] uppercase tracking-widest text-zinc-500">Drive Mode</div>
-            <DriveModeDetails label={driveModeDisplay} requiresTravel={company.venue?.requiresTravel} />
+            <DriveModeDetails label={driveModeDisplay} requiresTravel={company.venue?.requiresTravel} rounds={company.venue?.rounds || []} />
           </div>
 
           <div data-testid="ctc-location" className="group relative rounded-xl border border-zinc-800 bg-zinc-900/50 px-3.5 py-3 hover:border-zinc-700 transition-colors">
@@ -786,8 +790,6 @@ export default function CompanyDetailClient({
             )}
           </div>
         </div>
-
-        <DriveVenueRounds rounds={company.venue?.rounds || []} />
 
         {/* Eligibility Criteria */}
         {eligibilityList.length > 0 && (
@@ -812,7 +814,7 @@ export default function CompanyDetailClient({
         )}
 
         {/* Venue / Instructions Banner */}
-        {nextUpcomingEvent && (
+        {nextUpcomingEvent && effective.effectiveStatus !== 'registration_open' && (
           <div
             data-testid="venue-banner"
             className="mt-4 flex items-start gap-3 rounded-lg border border-amber-500/25 bg-amber-500/6 px-4 py-3 text-xs text-amber-200/90"
@@ -899,7 +901,14 @@ export default function CompanyDetailClient({
             </span>
           )}
         </div>
-        <StageStepper status={displayStatus} events={company.events} notes={notesStr} manualOverride={isManual} roundDecisions={company.roundDecisions} />
+        <StageStepper
+          status={displayStatus} events={company.events} notes={notesStr} manualOverride={isManual} roundDecisions={company.roundDecisions}
+          registrationInstructions={hasCompanyRegistrationReminder ? 'NeoPAT + company form registration required.' : undefined}
+          registrationDetails={<CompanyRegistrationReminder embedded requirements={company.registrationRequirements} status={displayStatus} deadline={company.registrationDeadline} />}
+        />
+        {effective.effectiveStatus !== 'registration_open' && (
+          <CompanyRegistrationReminder requirements={company.registrationRequirements} status={displayStatus} deadline={company.registrationDeadline} />
+        )}
       </motion.div>
 
       {/* Circular & Email Timeline */}

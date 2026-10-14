@@ -30,6 +30,7 @@ import type { DriveMode } from '@/lib/drive-venues';
 export interface ActiveApplicationItem {
   id: string;
   companyId: string;
+  driveId?: string;
   companyName: string;
   companyLogo: string | null;
   status: string;
@@ -526,7 +527,7 @@ export default function DashboardClient({
               return (
                 <Link
                   key={c.id}
-                  href={`/companies/${c.companyId}`}
+                  href={`/companies/${c.companyId}${c.driveId ? `?driveId=${c.driveId}` : ''}`}
                   className="group block w-full min-w-0 max-w-full overflow-hidden rounded-xl border border-zinc-800 bg-bg-surface p-3.5 sm:p-4 transition-all duration-200 hover:border-zinc-600"
                 >
                   <div className="flex items-start gap-2.5 sm:gap-3 min-w-0">

@@ -77,6 +77,8 @@ export function formatEventTimeRange(
 
   const norm = normalizeEventType(eventType || '');
   const isDeadline = norm === 'deadline';
+  // Ignore historical synthetic end times as well as missing end times.
+  if (isDeadline) return startFormatted;
 
   let end: Date | null = null;
   if (endTime) {
@@ -86,10 +88,8 @@ export function formatEventTimeRange(
     }
   }
 
-  // If no explicit endTime:
-  // For deadlines, it's a point-in-time cutoff (do not fabricate a duration window).
-  // For test, assessment, interview, ppt, assume 2 hours as requested.
-  if (!end && !isDeadline) {
+  // Actual rounds retain their display fallback when no end time was supplied.
+  if (!end) {
     end = new Date(start.getTime() + 2 * 60 * 60 * 1000);
   }
 
@@ -133,7 +133,7 @@ function timeLabel(
   return `${format(d, 'd MMM')} · ${range}`;
 }
 
-function getGcalUrl(
+export function getGcalUrl(
   companyName: string,
   title: string | null,
   label: string,
@@ -147,12 +147,13 @@ function getGcalUrl(
   if (isNaN(start.getTime())) return null;
 
   const isDeadline = label.toLowerCase() === 'deadline' || (eventType && /deadline|registration/i.test(eventType));
+  // Calendar reconciliation excludes deadlines; do not create a timed appointment
+  // through the manual link either, since that would invent a registration window.
+  if (isDeadline) return null;
   let end: Date;
   if (endTime) {
     const parsedEnd = new Date(endTime);
-    end = !isNaN(parsedEnd.getTime()) ? parsedEnd : new Date(start.getTime() + (isDeadline ? 30 * 60 * 1000 : 2 * 60 * 60 * 1000));
-  } else if (isDeadline) {
-    end = new Date(start.getTime() + 30 * 60 * 1000);
+    end = !isNaN(parsedEnd.getTime()) ? parsedEnd : new Date(start.getTime() + 2 * 60 * 60 * 1000);
   } else {
     end = new Date(start.getTime() + 2 * 60 * 60 * 1000); // Assume 2 hours
   }

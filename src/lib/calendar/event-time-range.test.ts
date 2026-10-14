@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatEventTimeRange } from '@/app/(dashboard)/calendar/_components/calendar-client';
+import { formatEventTimeRange, getGcalUrl } from '@/app/(dashboard)/calendar/_components/calendar-client';
 
 describe('formatEventTimeRange', () => {
   it('formats time range when explicit endTime is provided on the same day', () => {
@@ -18,6 +18,13 @@ describe('formatEventTimeRange', () => {
     const deadline = new Date(2026, 9, 6, 13, 0); // 1:00 PM
     expect(formatEventTimeRange(deadline, null, 'registration_deadline')).toBe('1:00 PM');
     expect(formatEventTimeRange(deadline, null, 'deadline')).toBe('1:00 PM');
+  });
+
+  it('ignores an old one-hour end time on a registration deadline', () => {
+    const deadline = new Date(2026, 9, 15, 10, 0);
+    const oldEnd = new Date(2026, 9, 15, 11, 0);
+    expect(formatEventTimeRange(deadline, oldEnd, 'registration_deadline')).toBe('10:00 AM');
+    expect(getGcalUrl('Philips', 'Registration Deadline', 'Deadline', deadline.toISOString(), oldEnd.toISOString(), null, 'registration_deadline')).toBeNull();
   });
 
   it('adds (+1d) marker when event ends past midnight on the next calendar day', () => {

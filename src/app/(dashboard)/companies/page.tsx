@@ -1,4 +1,5 @@
 import type { Metadata } from 'next';
+import { getDriveDisplayName } from '@/lib/drive-display';
 import { isAwaitingRegistration } from '@/lib/stages';
 import { Suspense } from 'react';
 import { requireSession } from '@/lib/auth';
@@ -306,7 +307,7 @@ export default async function CompaniesPage() {
       appId: app ? app.id : undefined,
       driveId: drive ? drive.id : undefined,
       venue: resolveDriveMode(venueMap.get(targetDriveId), venueCampus),
-      name: comp?.name || ent.company?.name || 'Unknown Company',
+      name: getDriveDisplayName(drive?.drive_name, comp?.name || ent.company?.name),
       legal_name: null,
       aliases: comp?.aliases || ent.company?.aliases || null,
       drive_number: drive?.drive_number || null,

@@ -1,4 +1,5 @@
 import type { Metadata } from 'next';
+import { getDriveDisplayName } from '@/lib/drive-display';
 import { requireSession } from '@/lib/auth';
 import { deriveEventEndTime } from '@/lib/event-duration';
 import { isInactiveStatus, isAwaitingRegistration } from '@/lib/stages';
@@ -121,7 +122,7 @@ export default async function CalendarPage() {
       if (!seenCalendarKeys.has(key)) {
         seenCalendarKeys.add(key);
         const drive = driveMap.get(evt.placement_drive_id);
-        const companyName = drive ? companyMap.get(drive.company_id) || 'Placement Drive' : 'Placement Drive';
+        const companyName = getDriveDisplayName(drive?.drive_name, drive ? companyMap.get(drive.company_id) : null);
         const companyId = drive?.company_id || evt.placement_drive_id;
 
         calendarEvents.push({
@@ -132,8 +133,8 @@ export default async function CalendarPage() {
           title: evt.title,
           startTime: evt.start_time,
           endTime:
-            evt.end_time ||
-            (evt.start_time && evt.event_type !== 'registration_deadline'
+            evt.event_type === 'registration_deadline' ? null : evt.end_time ||
+            (evt.start_time
               ? deriveEventEndTime(evt.event_type, evt.title, evt.start_time)?.toISOString() || null
               : null),
           venue: evt.venue,
@@ -154,7 +155,7 @@ export default async function CalendarPage() {
           if (!seenCalendarKeys.has(key)) {
             seenCalendarKeys.add(key);
             const drive = driveMap.get(app.placement_drive_id);
-            const companyName = drive ? companyMap.get(drive.company_id) || 'Placement Drive' : 'Placement Drive';
+            const companyName = getDriveDisplayName(drive?.drive_name, drive ? companyMap.get(drive.company_id) : null);
             const companyId = drive?.company_id || app.placement_drive_id;
 
             calendarEvents.push({

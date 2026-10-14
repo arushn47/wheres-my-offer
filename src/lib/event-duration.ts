@@ -13,6 +13,7 @@ export function classifyEventDurationKind(
   title?: string | null
 ): EventDurationKind {
   const value = `${eventType || ''} ${title || ''}`.toLowerCase();
+  if (/registration|deadline/i.test(eventType || '')) return 'registration';
   if (/ppt|pre[\s-]*placement/.test(value)) return 'ppt';
   if (/registration|deadline/.test(value)) return 'registration';
   if (
@@ -29,13 +30,13 @@ export const EVENT_DURATION_MS: Record<EventDurationKind, number> = {
   ppt: 90 * 60 * 1000, // 1.5 hours
   test: 120 * 60 * 1000, // 2 hours
   interview: 90 * 60 * 1000, // 1.5 hours
-  registration: 60 * 60 * 1000, // 1 hour
+  registration: 0, // A deadline is a cutoff, not a duration.
   other: 60 * 60 * 1000, // 1 hour
 };
 
 /**
  * Returns the canonical fallback end time for an event that has no explicit
- * end time. Returns null when the start time is missing or invalid.
+ * end time. Deadlines have no end time. Returns null for missing/invalid starts.
  */
 export function deriveEventEndTime(
   eventType: string | null | undefined,
@@ -46,5 +47,6 @@ export function deriveEventEndTime(
   const start = startTime instanceof Date ? startTime : new Date(startTime);
   if (Number.isNaN(start.getTime())) return null;
   const kind = classifyEventDurationKind(eventType, title);
+  if (kind === 'registration') return null;
   return new Date(start.getTime() + (EVENT_DURATION_MS[kind] ?? EVENT_DURATION_MS.other));
 }

@@ -1,10 +1,10 @@
 import type { DriveModeRound } from '@/lib/drive-venues';
 import { DriveModeBadge } from './drive-mode-badge';
 
-export function DriveVenueRounds({ rounds }: { rounds: DriveModeRound[] }) {
+export function DriveVenueRounds({ rounds, compact = false }: { rounds: DriveModeRound[]; compact?: boolean }) {
   return (
-    <section aria-label="Round venues" className="mt-5 border-t border-zinc-800/70 pt-4">
-      <h3 className="mb-2.5 font-mono text-[10px] font-semibold uppercase tracking-wider text-zinc-400">Round venues</h3>
+    <section aria-label="Round venues" className={compact ? '' : 'mt-5 border-t border-zinc-800/70 pt-4'}>
+      <h3 className="mb-2.5 pr-6 font-mono text-[10px] font-semibold uppercase tracking-wider text-zinc-400">Round venues</h3>
       {rounds.length ? (
         <table className="w-full text-left text-xs">
           <caption className="sr-only">Recruitment attendance by round</caption>

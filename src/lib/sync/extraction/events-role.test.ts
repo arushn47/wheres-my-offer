@@ -261,6 +261,7 @@ Company's Registration Link - https://campus.lntedutech.com/...`,
     expect(regEvent).toBeDefined();
     expect(regEvent?.hasExplicitTime).toBe(true);
     expect(regEvent?.startTime).toEqual(new Date('2026-09-25T03:30:00.000Z'));
+    expect(regEvent?.endTime).toBeNull();
   });
 
   it('extracts a portal deadline phrased as on or before tomorrow', () => {

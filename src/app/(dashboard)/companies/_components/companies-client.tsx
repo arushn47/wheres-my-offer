@@ -341,7 +341,7 @@ export default function CompaniesClient({
       })
       .filter((c) => {
         if (!q.trim()) return true;
-        const haystack = `${c.name} ${c.application?.role || ''} ${c.application?.ctc || ''} ${c.application?.location || ''}`.toLowerCase();
+        const haystack = `${c.name} ${(c.aliases || []).join(' ')} ${c.application?.role || ''} ${c.application?.ctc || ''} ${c.application?.location || ''}`.toLowerCase();
         return haystack.includes(q.toLowerCase().trim());
       });
 
@@ -536,7 +536,7 @@ export default function CompaniesClient({
   const companyCounts = useMemo(() => {
     const counts = new Map<string, number>();
     for (const c of companies) {
-      const key = c.name.toLowerCase().trim();
+      const key = c.id;
       counts.set(key, (counts.get(key) || 0) + 1);
     }
     return counts;
@@ -632,7 +632,7 @@ export default function CompaniesClient({
           const shortCategory = formatShortCategory(rawCategory);
           const initials = c.name.slice(0, 2).toUpperCase();
           const hue = getHue(c.name);
-          const isMultiDrive = (companyCounts.get(c.name.toLowerCase().trim()) || 0) > 1;
+          const isMultiDrive = (companyCounts.get(c.id) || 0) > 1;
 
           const driveMode = c.venue?.label || 'TBA';
 

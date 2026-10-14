@@ -1,4 +1,5 @@
 import type { Metadata } from 'next';
+import { getDriveDisplayName } from '@/lib/drive-display';
 import { redirect } from 'next/navigation';
 import { requireSession } from '@/lib/auth';
 import { checkIsAdmin } from '@/lib/auth/admin';
@@ -84,7 +85,7 @@ export default async function DashboardPage() {
   const driveMap = new Map((placementDrives || []).map((d: any) => [d.id, d]));
   const companyNameMap = new Map<string, string>();
   for (const d of (placementDrives || []) as any[]) {
-    const cName = companyById.get(d.company_id) || (d.companies as any)?.name;
+    const cName = getDriveDisplayName(d.drive_name, companyById.get(d.company_id) || (d.companies as any)?.name);
     if (cName) {
       companyNameMap.set(d.id, cName);
     }
@@ -346,12 +347,13 @@ export default async function DashboardPage() {
     const { effectiveStatus, statusSubtitle } = getEffectiveStage(a.status, latestEvent, compEvents, a.notes, a.manual_override);
     const drive = driveMap.get(a.placement_drive_id);
     const companyId = drive?.company_id || a.placement_drive_id;
-    const companyName = companyById.get(companyId) || (drive as any)?.companies?.name || 'Company';
+    const companyName = getDriveDisplayName(drive?.drive_name, companyById.get(companyId) || (drive as any)?.companies?.name);
     const venue = resolveDriveMode(venueMap.get(a.placement_drive_id), venueCampus);
 
     return {
       id: a.id,
       companyId,
+      driveId: a.placement_drive_id,
       companyName,
       companyLogo: null,
       status: effectiveStatus,

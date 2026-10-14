@@ -1,4 +1,5 @@
 import type { Metadata } from 'next';
+import { getDriveDisplayName } from '@/lib/drive-display';
 import { requireSession } from '@/lib/auth';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { loadRoundStatusSummaries } from '@/lib/sync/recruitment/round-status-data';
@@ -79,10 +80,7 @@ export default async function AnalyticsPage() {
   const unifiedDrives = (placementDrives || []).flatMap((drive) => {
     const app = appMap.get(drive.id);
     if (!app) return [];
-    const companyName =
-      compMap.get(drive.company_id) ||
-      drive.drive_name ||
-      'Placement Drive';
+    const companyName = getDriveDisplayName(drive.drive_name, compMap.get(drive.company_id));
 
     return [{
       id: app?.id || drive.id,

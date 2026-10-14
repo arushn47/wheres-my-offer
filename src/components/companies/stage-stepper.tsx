@@ -1,5 +1,6 @@
 'use client';
 
+import type { ReactNode } from 'react';
 import { Ban, FileX2, Clock } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -25,6 +26,8 @@ export interface StageStepperProps {
   roundDecisions?: RoundStatusDecision[];
   compact?: boolean;
   className?: string;
+  registrationInstructions?: string;
+  registrationDetails?: ReactNode;
 }
 
 export function getPipelineStages({
@@ -145,6 +148,8 @@ export function StageStepper({
   roundDecisions,
   compact = false,
   className,
+  registrationInstructions,
+  registrationDetails,
 }: StageStepperProps) {
   const effective = getEffectiveStage(status, latestEvent, events, notes, manualOverride);
   const currentStage = stageProp ?? effective.stageIndex;
@@ -328,21 +333,25 @@ export function StageStepper({
       <div
         data-testid="stage-stepper-registration-open"
         className={cn(
-          'flex items-center gap-3.5 rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 select-none',
+          'flex items-start gap-3 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3.5 py-3',
           className
         )}
       >
-        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-amber-500/40 bg-amber-500/20 text-amber-400">
+        <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-amber-500/40 bg-amber-500/20 text-amber-400">
           <Clock className="h-4 w-4 animate-pulse" />
         </div>
         <div className="min-w-0 flex-1">
-          <h4 className="text-sm font-semibold text-amber-200">Registration Window Open</h4>
+          <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-0.5">
+            <h4 className="text-sm font-semibold text-amber-200">Registration Window Open</h4>
+            <span className="text-xs font-medium text-amber-300/90">{effective.statusSubtitle}</span>
+          </div>
           {deadlineLabel && (
-            <p className="mt-1 text-sm font-semibold text-amber-200">Registration deadline: {deadlineLabel} IST</p>
+            <p className="mt-0.5 text-sm font-semibold text-amber-200">Registration deadline: {deadlineLabel} IST</p>
           )}
           <p className="mt-0.5 text-xs text-amber-300/90">
-            {effective.statusSubtitle} — Complete your registration on the NeoPAT portal before the deadline expires.
+            {registrationInstructions || 'Register on NeoPAT before the deadline.'}
           </p>
+          {registrationDetails}
         </div>
       </div>
     );

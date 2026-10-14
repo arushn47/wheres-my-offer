@@ -3,6 +3,7 @@ import { stripQuotedContent, getEvidenceMessageText } from '@/lib/sync/extractio
 import { deriveEventEndTime } from '@/lib/event-duration';
 import { formatTotalCtc } from '@/lib/compensation';
 import { cleanLocationString } from './locations';
+import type { RegistrationRequirements } from './registration-requirements';
 
 export interface ExtractedEvent {
   eventType:
@@ -26,6 +27,7 @@ export interface ExtractedEvent {
 }
 
 export interface ExtractedJobDetails {
+  registrationRequirements?: RegistrationRequirements;
   role: string | null;
   category: string | null;
   ctc: string | null;
@@ -506,7 +508,7 @@ export function extractEvents(email: ParsedEmail): ExtractedEvent[] {
       eventType: 'registration_deadline',
       title: isLocPref ? 'Location Preference Deadline' : isGForm ? 'Google Form Submission Deadline' : 'Registration Deadline',
       startTime: regDeadline.date,
-      endTime: deriveEventEndTime('registration_deadline', 'Registration Deadline', regDeadline.date),
+      endTime: null,
       venue: isGForm || isLocPref ? 'Google Form / NeoPAT' : 'NeoPAT Portal / Online Form',
       mode: 'online',
       confidence: 'high',

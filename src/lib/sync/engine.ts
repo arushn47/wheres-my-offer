@@ -1,3 +1,5 @@
+import { getParentCompanyName, getEyDriveName, isEyCompany } from '@/lib/company-identity';
+import { withRegistrationRequirements } from './extraction/registration-requirements';
 import {
   createGmailClient,
   fetchMessageIds,
@@ -156,7 +158,7 @@ async function shadowWriteCanonical(
       return {
         ...event,
         startTime,
-        endTime,
+        endTime: event.eventType === 'registration_deadline' ? null : endTime,
       };
     });
 
@@ -203,7 +205,7 @@ async function shadowWriteCanonical(
                 : null,
         parsed_company_name: companyName || null,
         parsed_drive_numbers: extractAllDriveNumbers(`${parsedEmail.subject}\n${bodyText}`),
-        parsed_job_details: { ...extractJobDetails(bodyText), recruitmentVenues: extractRecruitmentVenues(parsedEmail.subject, getEvidenceMessageText(parsedEmail)) },
+        parsed_job_details: { ...withRegistrationRequirements(extractJobDetails(bodyText), parsedEmail), recruitmentVenues: extractRecruitmentVenues(parsedEmail.subject, getEvidenceMessageText(parsedEmail)) },
         parsed_events: canonicalEvents,
         processing_status: 'complete' as const,
         received_at: parsedEmail.receivedAt
@@ -256,7 +258,7 @@ async function shadowWriteCanonical(
             .from('college_emails')
             .update({
               body_text: bodyText,
-              parsed_job_details: { ...extractJobDetails(bodyText), recruitmentVenues: extractRecruitmentVenues(parsedEmail.subject, getEvidenceMessageText(parsedEmail)) },
+              parsed_job_details: { ...withRegistrationRequirements(extractJobDetails(bodyText), parsedEmail), recruitmentVenues: extractRecruitmentVenues(parsedEmail.subject, getEvidenceMessageText(parsedEmail)) },
               parsed_events: canonicalEvents,
               parsed_drive_numbers: extractAllDriveNumbers(`${parsedEmail.subject}\n${bodyText}`),
               identity_version: CANONICAL_IDENTITY_VERSION,
@@ -729,7 +731,7 @@ async function processSingleMessage(
     const driveNameMatch = currentEmailText.match(
       /(?:drive\s+name|name\s+of\s+the\s+drive)\s*[:\-*]*\s*([A-Za-z0-9&\s\-\.()]+?)(?:\s+(?:drive\s+number|new\s+drive\s+date|category|date\s+of\s+visit|eligibility|eligible|ctc|role|stipend|company|date|please|if\b|\n|\r|\*|$))/i
     );
-    const driveName = driveNameMatch ? driveNameMatch[1].trim() : null;
+    let driveName = driveNameMatch ? driveNameMatch[1].trim() : getEyDriveName(currentEmailText);
 
     // Stage 3: Classify
     const classification = parsedEmail.cachedClassification || classifyEmail(parsedEmail, deps.driveResolutionsMap);
@@ -738,7 +740,7 @@ async function processSingleMessage(
 
     // Timing correlation
     if (isPersonal && driveNumber && companyName) {
-      const baseClean = cleanCompanyName(companyName);
+      const baseClean = isEyCompany(companyName) ? 'EY' : cleanCompanyName(companyName);
       if (['Apple', 'Honeywell', 'Zluri', 'EY'].some((b) => b.toLowerCase() === baseClean.toLowerCase())) {
         const resolution = await resolveDriveByTimingCorrelation(
           supabase,
@@ -750,6 +752,9 @@ async function processSingleMessage(
         );
         if (resolution) {
           companyName = resolution.resolvedCompanyName;
+          if (!driveName && isEyCompany(companyName) && resolution.confidence !== 'needs_review') {
+            driveName = getEyDriveName(resolution.resolvedCompanyName);
+          }
           deps.driveResolutionsMap.set(driveNumber, resolution.resolvedCompanyName);
         }
       }
@@ -2850,7 +2855,7 @@ async function doUpsertCompany(
   allowCreate: boolean = true,
   driveName?: string | null
 ): Promise<string | null> {
-  const normalized = normalizeCompanyName(companyName);
+  const normalized = normalizeCompanyName(getParentCompanyName(companyName));
 
   if (!normalized || normalized.length < 2) return null;
 
@@ -2876,7 +2881,7 @@ async function doUpsertCompany(
     .map((m) => normalizeCompanyName(m[1].trim()))
     .filter((p) => p.length >= 2);
   const outsideParen = normalizeCompanyName(companyName.replace(/\([^)]*\)/g, ' ').replace(/\s+/g, ' ').trim());
-  const candidateNames = Array.from(new Set([
+  const candidateNames = isEyCompany(companyName) ? [normalized] : Array.from(new Set([
     normalized,
     ...parenMatches,
     ...(outsideParen && outsideParen.length >= 2 ? [outsideParen] : []),
@@ -2898,7 +2903,7 @@ async function doUpsertCompany(
   }
 
   // 2. Check aliases match across candidate names
-  for (const cand of candidateNames) {
+  for (const cand of isEyCompany(companyName) ? [] : candidateNames) {
     const { data: aliasMatch } = await supabase
       .from('companies')
       .select('id, aliases')
@@ -2917,6 +2922,8 @@ async function doUpsertCompany(
 
   if (existingCompanies && existingCompanies.length > 0) {
     for (const comp of existingCompanies) {
+      // A legacy track row's generic EY alias must not become the parent company.
+      if (isEyCompany(companyName) && comp.name !== normalized) continue;
       const isMatched = candidateNames.some((cand) => {
         const aliasMatch = (comp.aliases || []).some((a: string) => isFuzzyCompanyMatch(a, cand));
         return isFuzzyCompanyMatch(comp.name, cand) || aliasMatch;
