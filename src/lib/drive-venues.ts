@@ -214,6 +214,16 @@ export function extractRecruitmentVenues(subject: string, body: string): VenueEn
       }
     }
   }
+  // Explicit host/other-campus routing in a registration schedule, including
+  // Gmail's wrapped "others campus it will be Virtual" wording.
+  const visitSchedule = body.replace(/[*_]/g, '').match(/Date\s+of\s+Visit\s*:\s*([\s\S]*?)(?=Eligible\s+Branches|Eligibility\s+Criteria|\bCTC\b|$)/i)?.[1];
+  const campusSplit = visitSchedule?.match(/(?:on\s*campus\s+)?interviews?[^\n]{0,100}?\bat\s+(?:VIT\s+)?(Vellore|Chennai|Bhopal|AP)\s+for\s+(?:VIT\s+)?\1\s+campus\s+students\s+others?\s+campus(?:es)?\s+(?:it\s+)?(?:will\s+be\s+)?virtual/i);
+  if (campusSplit) {
+    const host = `VIT ${campuses.find(c => c.toLowerCase() === campusSplit[1].toLowerCase())}`;
+    const quote = campusSplit[0].replace(/\s+/g, ' ').slice(0, 220);
+    for (const campus of campuses.map(c => `VIT ${c}`)) entries.push({ stage: 'Interviews',
+      kind: campus === host ? 'campus' : 'online', name: campus === host ? host : 'Online', audience: campus, quote });
+  }
   // Conflicting instructions for one stage/audience stay unknown rather than guessing.
   const grouped = new Map<string, VenueEntry[]>();
   const routesCampus = (entry: VenueEntry) => entry.kind==='respective' || Boolean(entry.audience && entry.kind==='online');

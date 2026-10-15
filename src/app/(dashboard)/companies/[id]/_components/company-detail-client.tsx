@@ -434,7 +434,7 @@ export default function CompanyDetailClient({
   const displayRole = cleanRoleTitle(company.application?.role) || 'Campus Placement Drive';
 
   const rawCategory = company.application?.category || (/1[0-9]\s*lpa|[2-9][0-9]\s*lpa/i.test(company.application?.ctc || '') ? 'Super Dream' : 'Dream');
-  const category = rawCategory.replace(/\b(internship|offer|placement|drive)\b/gi, '').replace(/\s*\/\s*/g, ' ').replace(/\s+/g, ' ').trim() || rawCategory.trim();
+  const category = rawCategory.replace(/\b(internship|offer|placement|drive)\b/gi, '').replace(/\s*\/\s*/g, ' / ').replace(/\s+/g, ' ').trim() || rawCategory.trim();
 
   const nextUpcomingEvent = company.events.find((e) => e.eventType !== 'registration_deadline' && e.startTime && new Date(e.startTime).getTime() > Date.now());
   const hasCompanyRegistrationReminder = Boolean(company.registrationRequirements && shouldShowCompanyRegistrationReminder(displayStatus, company.registrationDeadline));

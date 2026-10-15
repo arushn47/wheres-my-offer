@@ -504,6 +504,14 @@ export function StageStepper({
         const rawIsCompleted = !isEliminated && (isPassed || i <= activeFurthestPassed);
         const isCompleted = verifiedPipeline ? isPassed : rawIsCompleted && !(isInterviewRound && isEliminatedBeforeInterview);
 
+        // A verified shortlist confirms inclusion in a round, not completion.
+        const currentRoundCompleted = s.id.startsWith('ppt') || announcedRound?.roundType === 'ppt'
+          ? effective.isPptCompleted
+          : s.id.startsWith('test') || announcedRound?.roundType === 'test'
+            ? effective.isTestCompleted
+            : isInterviewRound ? effective.isInterviewCompleted : false;
+        const isCurrentRoundPending = isCurrent && !['applied', 'offer'].includes(s.id) && !currentRoundCompleted;
+
         // ── Display label for this stage ───────────────────────────────────────
         let displayLabel = compact ? s.shortLabel : s.label;
         
@@ -616,21 +624,23 @@ export function StageStepper({
                   <span
                     className={cn(
                       'absolute -inset-1 rounded-full animate-ping pointer-events-none opacity-40',
-                      activeStyle.ripple
+                      isCurrentRoundPending ? 'bg-sky-400/30' : activeStyle.ripple
                     )}
                     style={{ animationDuration: '2.5s' }}
                   />
                 )}
                 <div
                   data-stage-id={s.id}
-                  data-stage-state={isEliminated ? 'absent' : isPassed ? 'verified' : 'unverified'}
+                  data-stage-state={isEliminated ? 'absent' : isCurrentRoundPending ? 'active' : isPassed ? 'verified' : 'unverified'}
                   className={cn(
                     'relative z-10 flex items-center justify-center rounded-full border font-mono font-bold transition-all shrink-0',
                     compact ? 'h-6 w-6 text-[9px]' : 'h-7 w-7 text-[10px]',
                     isEliminated
                       ? 'border-rose-400 bg-rose-500/25 text-rose-300 ring-2 ring-rose-500/50 shadow-[0_0_12px_rgba(244,63,94,0.45)]'
                       : isCurrent
-                        ? activeStyle.circle
+                        ? isCurrentRoundPending
+                          ? 'border-sky-400 bg-sky-500/15 text-sky-300 ring-2 ring-sky-500/30'
+                          : activeStyle.circle
                         : isPassed || isHistoricalPassed
                           ? 'border-emerald-500/35 bg-emerald-500/10 text-emerald-400/80'
                           : isWithdrawn && i <= activeFurthestPassed
@@ -638,7 +648,9 @@ export function StageStepper({
                             : 'border-zinc-700 bg-[#141418] text-zinc-400'
                   )}
                 >
-                  {isEliminated ? '✕' : (isPassed || isCompleted || isHistoricalPassed) ? '✓' : i + 1}
+                  {isEliminated ? '✕' : isCurrentRoundPending
+                    ? <Clock className={compact ? 'h-3 w-3' : 'h-3.5 w-3.5'} aria-label="Round pending completion" />
+                    : (isPassed || isCompleted || isHistoricalPassed) ? '✓' : i + 1}
                 </div>
               </div>
               <span
@@ -649,7 +661,7 @@ export function StageStepper({
                   isEliminated
                     ? 'text-rose-300 font-bold'
                     : isCurrent
-                      ? activeStyle.text
+                      ? isCurrentRoundPending ? 'text-sky-300 font-semibold' : activeStyle.text
                       : isPassed || isHistoricalPassed
                         ? 'text-emerald-400/75 font-medium'
                         : 'text-zinc-400 font-medium'
@@ -669,7 +681,7 @@ export function StageStepper({
                       : i < activeEliminatedStage - 1
                         ? 'bg-emerald-500/45'
                         : 'bg-zinc-700/70'
-                    : (isPassed || i < activeCurrentStage)
+                    : (!isCurrentRoundPending && isPassed || i < activeCurrentStage)
                       ? 'bg-emerald-500/45'
                       : 'bg-zinc-700/70'
                 )}

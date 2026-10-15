@@ -519,7 +519,7 @@ export default function DashboardClient({
             {spotlightDrives.map((c) => {
               const visibleStatus = getVisibleApplicationStatus(c.status, isSyncing, false, statusUpdatesPending);
               const rawCategory = c.category || (/1[0-9]\s*lpa|[2-9][0-9]\s*lpa/i.test(c.ctc || '') ? 'Super Dream' : 'Dream');
-              const category = rawCategory.replace(/\b(internship|offer|placement|drive)\b/gi, '').replace(/\s*\/\s*/g, ' ').replace(/\s+/g, ' ').trim() || rawCategory.trim();
+              const category = rawCategory.replace(/\b(internship|offer|placement|drive)\b/gi, '').replace(/\s*\/\s*/g, ' / ').replace(/\s+/g, ' ').trim() || rawCategory.trim();
               const initials = c.companyName.slice(0, 2).toUpperCase();
               const hue = getHue(c.companyName);
               const driveMode = c.driveMode || 'TBA';

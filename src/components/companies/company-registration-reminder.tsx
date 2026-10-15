@@ -14,7 +14,9 @@ export function CompanyRegistrationReminder({ requirements, status, deadline, em
     <aside aria-label={requirements ? 'Company registration reminder' : 'Registration links'} className={embedded ? 'mt-2 flex flex-wrap items-center gap-x-3 gap-y-2' : 'mt-3 rounded-xl border border-amber-500/30 bg-amber-500/10 p-3.5'}>
       {!embedded && <p className="text-sm font-semibold text-amber-200">NeoPAT + company registration required</p>}
       {requirements && companyLinks.length === 0 && (
-        <p className="basis-full text-xs leading-relaxed text-amber-300/90">Find the company form link in the registration email below.</p>
+        <p className="basis-full text-xs leading-relaxed text-amber-300/90">{requirements.companyFormLocation === 'neopat_drive_description'
+          ? 'Company form: NeoPAT → Drive Description.'
+          : 'Find the company form link in the registration email below.'}</p>
       )}
       <div className={embedded ? 'ml-auto flex flex-wrap justify-end gap-2' : 'mt-3 flex flex-wrap justify-end gap-2'}>
         {companyLinks.map((link, index) => (

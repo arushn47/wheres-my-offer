@@ -3,6 +3,7 @@ import { stripQuotedContent, getEvidenceMessageText } from '@/lib/sync/extractio
 import { deriveEventEndTime } from '@/lib/event-duration';
 import { formatTotalCtc } from '@/lib/compensation';
 import { extractEducationCompensation } from '@/lib/education-compensation';
+import { extractRoleCompensation } from './role-compensation';
 import { cleanLocationString } from './locations';
 import type { RegistrationRequirements } from './registration-requirements';
 
@@ -1098,6 +1099,7 @@ export function extractEligibilityDetails(text: string): ExtractedEligibility {
 
   if (branchBlockMatch && branchBlockMatch[1]) {
     const rawBranchLines = branchBlockMatch[1]
+      .replace(/(\([^\)\n]*)\r?\n\s*(?!B\.?\s*Tech\b)([^\n]*\))/gi, '$1 $2')
       .split(/\r?\n/)
       .map((l) => l.replace(/^[*_`>#Ø•·\-\t\s]+/, '').replace(/[*_`>#\t\s]+$/, '').trim())
       .filter((l) => l.length > 2 && !/^(?:nil|none|na|n\/a|eligible\s+branches|branches?)$/i.test(l));
@@ -1779,7 +1781,7 @@ export function extractJobDetails(text: string): ExtractedJobDetails {
   if (categoryMatch) {
     let rawCat = categoryMatch[1].replace(/^[*,\.\s>\-]+/, '').replace(/[*,\.\s>\-]+$/, '').trim();
     // Normalize e.g. "Super Dream Internship Registration - 2027 Batch" -> "Super Dream Internship"
-    rawCat = rawCat.replace(/\s*(?:Registration|Drive|Batch|\d{4}).*$/i, '').trim();
+    rawCat = rawCat.replace(/\s*(?:Registration|Drive|Batch|\d{4}).*$/i, '').replace(/[\s-–—/]+$/, '').trim();
     if (rawCat && rawCat.length >= 3 && !/will be|tba|tbd/i.test(rawCat)) {
       category = rawCat;
     }
@@ -2038,6 +2040,13 @@ export function extractJobDetails(text: string): ExtractedJobDetails {
   }
 
   const eligDetails = extractEligibilityDetails(noHtml);
+
+  const roleCompensation = extractRoleCompensation(cleanWithLines);
+  if (roleCompensation) {
+    role = roleCompensation.role;
+    ctc = roleCompensation.ctc;
+    stipend = roleCompensation.stipend;
+  }
 
   return {
     role,

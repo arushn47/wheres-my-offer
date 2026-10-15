@@ -1893,7 +1893,9 @@ async function recalculateApplicationStatusesUnlocked(
         let finalCategory = extractedJob.category || null;
         const finalCtc = existingApp?.manual_override ? existingApp.ctc : (extractedJob.ctc || null);
         const finalStipend = existingApp?.manual_override ? existingApp.stipend : (extractedJob.stipend || null);
-        if (finalCtc) {
+        // The circular's declared category may span role-specific brackets.
+        // Infer from pay only when no category was announced.
+        if (!finalCategory && finalCtc) {
           const matches = [...finalCtc.matchAll(/(\d+(?:\.\d+)?)/g)].map((m) => parseFloat(m[1]));
           if (matches.length > 0) {
             const maxCtc = Math.max(...matches);

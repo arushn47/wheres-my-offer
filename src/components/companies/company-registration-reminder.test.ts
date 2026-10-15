@@ -38,6 +38,11 @@ it('adds no banner without an explicit requirement and removes expired reminders
   expect(render(null)).toBe('');
   expect(render(requirements, '2026-10-14T04:30:00Z')).toBe('');
 });
+it('points to NeoPAT Drive Description when the company form is hosted there', () => {
+  const html = render({ ...requirements, companyLinks: [], companyFormLocation: 'neopat_drive_description' });
+  expect(html).toContain('Company form: NeoPAT → Drive Description.');
+  expect(html).not.toContain('registration email below');
+});
 
 it('offers NeoPAT for an open registration without implying a company form is required', () => {
   vi.useFakeTimers();

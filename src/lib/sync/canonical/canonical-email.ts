@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { htmlToCanonicalText } from '@/lib/sync/extraction/body';
 
 export const CANONICAL_IDENTITY_VERSION = 2;
-export const CANONICAL_PARSER_VERSION = 4;
+export const CANONICAL_PARSER_VERSION = 5;
 export const APPROVED_COLLEGE_SENDER = 'vitlions2027@vitbhopal.ac.in';
 
 /**

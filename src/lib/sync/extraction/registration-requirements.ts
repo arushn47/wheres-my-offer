@@ -5,6 +5,7 @@ export interface RegistrationRequirements {
   companyFormRequired: true;
   companyLinks: RegistrationLink[];
   sourceQuote: string;
+  companyFormLocation?: 'neopat_drive_description';
 }
 interface RegistrationEmail { subject?: string; bodyPlain?: string; bodyHtml?: string; bodySnippet?: string }
 
@@ -61,7 +62,10 @@ export function extractRegistrationRequirements(email: RegistrationEmail): Regis
   }
   candidates.sort((a, b) => b.score - a.score);
   const best = candidates[0];
-  return { companyFormRequired: true, companyLinks: best ? [{ url: best.url, label: best.label }] : [], sourceQuote: instruction.trim().slice(0, 500) };
+  const companyFormLocation = /company\s+registration\s+form.{0,100}drive\s+description.{0,80}neo\s*pat/i.test(text)
+    ? 'neopat_drive_description' as const : undefined;
+  return { companyFormRequired: true, companyLinks: best ? [{ url: best.url, label: best.label }] : [], sourceQuote: instruction.trim().slice(0, 500),
+    ...(companyFormLocation ? { companyFormLocation } : {}) };
 }
 
 /** JSON metadata is revalidated before rendering external links. */
@@ -74,7 +78,8 @@ export function readRegistrationRequirements(value: unknown): RegistrationRequir
     const url = safeLink(candidate.url);
     if (url) links.push({ url, label: typeof candidate.label === 'string' ? candidate.label : 'Company registration form' });
   }
-  return { companyFormRequired: true, companyLinks: links.slice(0, 3), sourceQuote: typeof record.sourceQuote === 'string' ? record.sourceQuote : '' };
+  return { companyFormRequired: true, companyLinks: links.slice(0, 3), sourceQuote: typeof record.sourceQuote === 'string' ? record.sourceQuote : '',
+    ...(record.companyFormLocation === 'neopat_drive_description' ? { companyFormLocation: record.companyFormLocation } : {}) };
 }
 
 export function withRegistrationRequirements<T extends object>(details: T, email: RegistrationEmail): T & { registrationRequirements?: RegistrationRequirements } {

@@ -257,7 +257,7 @@ function formatShortCategory(cat?: string | null): string {
   if (!cat) return '';
   const cleaned = cat
     .replace(/\b(internship|offer|placement|drive)\b/gi, '')
-    .replace(/\s*\/\s*/g, ' ')   // collapse " / " separators
+    .replace(/\s*\/\s*/g, ' / ')
     .replace(/\s+/g, ' ')
     .trim();
   return cleaned || cat.trim();
