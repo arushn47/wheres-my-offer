@@ -50,7 +50,7 @@ describe('multi-role registration circular', () => {
     expect(formatCompensationLabel(details.ctc)).toBe('6 - 16 LPA');
     expect(formatCompensationLabel(details.stipend)).toBe('₹25,000 - ₹40,000/month');
     expect(details.category).toBe('Super Dream / Dream Internship');
-    expect(details.location).toBe('Bengaluru - Indiranagar');
+    expect(details.location).toBe('Bengaluru, Indiranagar');
     expect(details.branches).toHaveLength(2);
     expect(details.branches?.[1]).toContain('(Artificial Intelligence and Machine Learning)');
   });

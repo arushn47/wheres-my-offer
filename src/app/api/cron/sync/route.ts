@@ -48,6 +48,11 @@ async function executeBackgroundSync(userIds: string[], includeSharedCollege = f
       .from('notifications')
       .delete()
       .lt('created_at', ninetyDaysAgo);
+
+    // Replaced roster versions can leave unreferenced derived payloads. The RPC
+    // shares publication locks and never deletes a currently referenced version.
+    const { error: rosterCleanupError } = await supabase.rpc('prune_roster_lookup_payloads', { p_limit: 100 });
+    if (rosterCleanupError) throw rosterCleanupError;
   } catch (cleanErr) {
     console.warn('[Cron Sync] Stale data cleanup non-fatal error:', cleanErr);
   }

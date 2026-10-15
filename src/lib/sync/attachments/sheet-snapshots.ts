@@ -5,7 +5,9 @@ import { cacheStoredRoster } from './roster-lookup';
 /** Record the exact mutable sheet version inspected, including successfully parsed absence. */
 export async function persistSheetSnapshot(supabase: ReturnType<typeof createAdminClient>, emailId: string, sourceUrl: string, scan: GSheetMatchResult | null): Promise<void> {
   if (scan?.contentHash && scan.extractedRows) {
-    const { error } = await supabase.from('college_sheet_snapshots').upsert({ content_hash: scan.contentHash, source_url: sourceUrl, fetched_at: scan.fetchedAt || new Date().toISOString(), extracted_rows: scan.extractedRows }, { onConflict: 'content_hash' });
+    // Snapshots are immutable by content hash. The source row below records each
+    // check; repeatedly rewriting an identical large snapshot only creates WAL.
+    const { error } = await supabase.from('college_sheet_snapshots').upsert({ content_hash: scan.contentHash, source_url: sourceUrl, fetched_at: scan.fetchedAt || new Date().toISOString(), extracted_rows: scan.extractedRows }, { onConflict: 'content_hash', ignoreDuplicates: true });
     if (error) throw error;
     await cacheStoredRoster(supabase,{kind:'sheet',emailId,contentHash:scan.contentHash,filename:'Google Sheet shortlist.csv',rows:scan.extractedRows,parseStatus:'complete'});
   }

@@ -5,6 +5,7 @@ vi.mock('@/lib/gmail/client',()=>({createGmailClient:mocks.gmail}));
 vi.mock('@/lib/gmail/history',()=>({fetchHistoryChanges:vi.fn(),getProfileHistoryId:vi.fn()}));
 vi.mock('@/lib/sync/canonical/shared-college-ingest',()=>({ingestSharedCollegeCircular:mocks.ingest,fanOutSharedCollegeArchiveToUser:mocks.fanout}));
 import { runSharedCollegeSync } from './shared-college-sync';
+import { fetchHistoryChanges } from '@/lib/gmail/history';
 beforeEach(()=>{
  vi.resetAllMocks();vi.stubEnv('SHARED_COLLEGE_EMAIL','');
  mocks.rpc.mockResolvedValue({data:true,error:null});mocks.gmail.mockResolvedValue({gmail:{}});
@@ -36,4 +37,21 @@ it('retains the message offset until recipients with active user leases can be r
  expect(mocks.ingest).toHaveBeenCalledOnce();
  const checkpoints=mocks.rpc.mock.calls.filter(call=>call[0]==='checkpoint_shared_college_sync');
  expect(checkpoints.at(-1)?.[1]).toMatchObject({p_pending_message_ids:['first','second'],p_pending_offset:0,p_pending_history_id:'history'});
+});
+it('advances label-only history without re-ingesting circulars',async()=>{
+ const original=mocks.from.getMockImplementation()!;
+ const update=vi.fn().mockReturnThis();
+ mocks.from.mockImplementation((table:string)=>{
+  const query=original(table);
+  if(table==='shared_college_sync_state') query.single=async()=>({data:{initial_scan_complete:true,pending_message_ids:[],pending_offset:0,next_page_token:null,pending_next_page_token:null,pending_history_id:null},error:null});
+  if(table==='gmail_accounts') Object.assign(query,{update});
+  return query;
+ });
+ vi.mocked(fetchHistoryChanges).mockResolvedValue({messageIds:[],deletedMessageIds:[],latestHistoryId:'new-history',historyExpired:false});
+ const result=await runSharedCollegeSync();
+ expect(fetchHistoryChanges).toHaveBeenCalledWith({},'history',{addedOnly:true});
+ expect(result).toMatchObject({hasMore:false,ingested:0,failed:0});
+ expect(mocks.ingest).not.toHaveBeenCalled();
+ expect(update).toHaveBeenCalledWith(expect.objectContaining({last_history_id:'new-history'}));
+ expect(mocks.rpc.mock.calls.at(-1)?.[0]).toBe('release_shared_college_sync_lease');
 });

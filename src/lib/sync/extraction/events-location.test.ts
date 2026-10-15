@@ -35,12 +35,12 @@ Registration:
 No Manual Registration & extension will be entertained.
     `;
     const details = extractJobDetails(email);
-    expect(details.location).toBe('Gurgaon & Bangalore');
+    expect(details.location).toBe('Gurgaon / Bangalore');
   });
 
   it('extracts Natwest job location even when on a single flattened line with footnote notes', () => {
     const singleLine = 'Job location: Gurgaon & Bangalore **Students clearing the interview process will be allocated any of the two. Kindly inform this to all the eligible students so they can apply wisely and only interested ones come forward.';
-    expect(extractJobDetails(singleLine).location).toBe('Gurgaon & Bangalore');
+    expect(extractJobDetails(singleLine).location).toBe('Gurgaon / Bangalore');
   });
 
   it('does not infer a location from a company name or headquarters', () => {

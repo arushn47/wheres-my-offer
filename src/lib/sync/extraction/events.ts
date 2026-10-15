@@ -2004,7 +2004,7 @@ export function extractJobDetails(text: string): ExtractedJobDetails {
 
     if (/remote/i.test(rawLoc)) validLocations.push('Remote');
     else if (/pan\s+india/i.test(rawLoc)) validLocations.push('Pan India');
-    else validLocations.push(rawLoc);
+    else validLocations.push(cleanLocationString(rawLoc));
   }
 
   if (validLocations.length > 0) {

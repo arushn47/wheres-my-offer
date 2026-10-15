@@ -228,7 +228,9 @@ export async function scanGoogleSheetForCandidate(
           const resObj: GSheetMatchResult = {
             extractedRows,
             sourceUrl: pubhtmlUrl,
-            contentHash: createHash('sha256').update(sheetHtml).digest('hex'),
+            // Hash the exact cached rows, including all inspected tabs. The
+            // published tab-list HTML can stay unchanged when roster rows change.
+            contentHash: createHash('sha256').update(JSON.stringify(extractedRows)).digest('hex'),
             fetchedAt: new Date().toISOString(),
             rowNumber: rows.indexOf(userRow) + 1,
             matched: true,
@@ -245,7 +247,7 @@ export async function scanGoogleSheetForCandidate(
     }
 
     if (incomplete || !parsedTable) return null;
-    const noMatch: GSheetMatchResult = { extractedRows, matched: false, sheetName: '', details: '', matchedValue: '', sourceUrl: pubhtmlUrl, contentHash: createHash('sha256').update(html).digest('hex'), fetchedAt: new Date().toISOString() };
+    const noMatch: GSheetMatchResult = { extractedRows, matched: false, sheetName: '', details: '', matchedValue: '', sourceUrl: pubhtmlUrl, contentHash: createHash('sha256').update(JSON.stringify(extractedRows)).digest('hex'), fetchedAt: new Date().toISOString() };
     cacheResult(noMatch);
     return noMatch;
   } catch (err) {

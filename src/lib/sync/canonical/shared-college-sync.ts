@@ -184,7 +184,9 @@ export async function runSharedCollegeSync(options: { limit?: number; globalDead
       state.pending_offset = 0;
       state.pending_next_page_token = listed.data.nextPageToken || null;
     } else if (state.pending_message_ids.length === 0 && state.initial_scan_complete && account.last_history_id) {
-      const history = await fetchHistoryChanges(gmail, account.last_history_id);
+      // Read/unread and label changes do not change a circular's content. Only
+      // new/deleted messages require ingestion; the history cursor still advances.
+      const history = await fetchHistoryChanges(gmail, account.last_history_id, { addedOnly: true });
       if (history.historyExpired) {
         // Mailbox history expired: do NOT reset to July 1st! Catch up from latest canonical email with 2-day buffer
         state.pending_history_id = await getProfileHistoryId(gmail);

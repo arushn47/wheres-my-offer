@@ -70,6 +70,7 @@ export function cleanLocationString(raw: string | null | undefined): string {
 
   // Normalize multi-city separators: "|", "/", "&", and "and" (between words) to clean commas
   cleaned = cleaned
+    .replace(/\s+[-–—]\s+/g, ', ')
     .replace(/\s+(?:&|and)\s+/gi, ', ')
     .replace(/\s*(?:\||\/)\s*/g, ', ')
     .replace(/\s*,\s*/g, ', ')

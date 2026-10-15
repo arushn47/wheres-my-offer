@@ -1,0 +1,20 @@
+import { afterEach, expect, it, vi } from 'vitest';
+import { scanGoogleSheetForCandidate } from './gsheet-parser';
+afterEach(()=>vi.unstubAllGlobals());
+it('versions changed tab contents even when the published tab list stays identical',async()=>{
+ const url='https://docs.google.com/spreadsheets/d/snapshot-version-test/pubhtml';
+ const tab=url+'?gid=0';
+ const wrapper=`items.push({name:"Test shortlist",pageUrl:"${tab}",gid:"0"});`;
+ let registration='23BCE10001';
+ vi.stubGlobal('fetch',vi.fn(async(source:string)=>new Response(source===url?wrapper:`<table><tr><th>Registration</th></tr><tr><td>${registration}</td></tr></table>`)));
+ const first=await scanGoogleSheetForCandidate(url,'first@example.test',null);
+ registration='23BCE10002';
+ const second=await scanGoogleSheetForCandidate(url,'second@example.test',null);
+ const same=await scanGoogleSheetForCandidate(url,'third@example.test',null);
+ expect(first?.matched).toBe(false);
+ expect(second?.matched).toBe(false);
+ expect(first?.contentHash).toBeTruthy();
+ expect(first?.contentHash).not.toBe(second?.contentHash);
+ expect(same?.contentHash).toBe(second?.contentHash);
+ expect(second?.extractedRows?.[0].rows[1]).toEqual(['23BCE10002']);
+});
