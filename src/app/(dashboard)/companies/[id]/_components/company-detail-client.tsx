@@ -6,7 +6,6 @@ import { AnimatePresence, motion } from 'framer-motion';
 import {
   ArrowLeft,
   FileSpreadsheet,
-  FileText,
   Mail,
   ChevronDown,
   AlertTriangle,
@@ -30,6 +29,7 @@ import { getCurrentRoundDecision, usesAutomaticRoundStatus, type RoundStatusDeci
 import type { DriveModeDisplay } from '@/lib/drive-venues';
 import { DriveModeDetails } from '@/components/ui/drive-mode-details';
 import { CompanyRegistrationReminder } from '@/components/companies/company-registration-reminder';
+import { EmailAttachments } from '@/components/companies/email-attachments';
 import { shouldShowCompanyRegistrationReminder, type RegistrationRequirements } from '@/lib/sync/extraction/registration-requirements';
 
 export interface CompanyDetail {
@@ -89,6 +89,7 @@ export interface CompanyDetail {
     rfcMessageId?: string | null;
     accountEmail?: string | null;
     attachmentName?: string | null;
+    attachmentNames?: string[];
   }[];
   candidateMatches: {
     id: string;
@@ -1084,14 +1085,6 @@ export default function CompanyDetailClient({
                               const matchInfo = matchedCandidate
                                 ? parseCandidateMatchDetails(matchedCandidate.matchedValue, matchedCandidate.neoId || company.candidateRegId)
                                 : null;
-                              const isAttachmentAlreadyShown = Boolean(
-                                matchInfo &&
-                                email.attachmentName &&
-                                (matchInfo.filename.toLowerCase() === email.attachmentName.toLowerCase() ||
-                                  email.attachmentName.toLowerCase().includes(matchInfo.filename.toLowerCase()) ||
-                                  matchInfo.filename.toLowerCase().includes(email.attachmentName.toLowerCase()) ||
-                                  /\.(xlsx|xls|csv)$/i.test(email.attachmentName))
-                              );
 
                               return (
                                 <>
@@ -1137,21 +1130,13 @@ export default function CompanyDetailClient({
                                         * For companies with multiple roles/profiles, shortlists may only cover specific candidate batches.
                                       </p>
                                     </div>
-                                  ) : (email.attachmentName && !isAttachmentAlreadyShown) ? (
-                                    <div
-                                      data-testid={`attachment-doc-${idx}`}
-                                      className="mt-2 flex min-w-0 items-center gap-2 rounded-lg border border-zinc-800/80 bg-zinc-900/40 px-2.5 py-2 text-[10px] text-zinc-400"
-                                    >
-                                      {/\.(xlsx|xls|csv)$/i.test(email.attachmentName) ? (
-                                        <FileSpreadsheet className="h-3.5 w-3.5 shrink-0 text-zinc-400" />
-                                      ) : (
-                                        <FileText className="h-3.5 w-3.5 shrink-0 text-zinc-400" />
-                                      )}
-                                      <span className="truncate text-zinc-300" title={email.attachmentName}>
-                                        {email.attachmentName}
-                                      </span>
-                                    </div>
                                   ) : null}
+                                  <EmailAttachments
+                                    names={email.attachmentNames || (email.attachmentName ? [email.attachmentName] : [])}
+                                    alreadyShownName={matchedCandidate && matchInfo ? matchInfo.filename
+                                      : isNotShortlisted && email.attachmentName && (isRosterWorkbook(email.attachmentName) || isShortlistRosterAttachment(email.attachmentName)) ? email.attachmentName : null}
+                                    testId={`attachment-doc-${idx}`}
+                                  />
                                 </>
                               );
                             })()}

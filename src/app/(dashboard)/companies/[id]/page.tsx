@@ -16,6 +16,7 @@ import { parseScheduledDate } from '@/lib/sync/identity/drive-temporal-boundary'
 import { summarizeRoundDecisions } from '@/lib/sync/recruitment/round-status';
 import { getRoundStatusDisplay } from '@/lib/sync/recruitment/status-display';
 import { isAwaitingRegistration } from '@/lib/stages';
+import { groupEmailAttachmentNames } from '@/lib/email-attachments';
 
 export async function generateMetadata({
   params,
@@ -593,7 +594,7 @@ export default async function CompanyDetailPage(props: {
   const canonicalBodyById = new Map<string, string>();
   const registrationRequirementsById = new Map<string, RegistrationRequirements>();
   const canonicalMessageIdById = new Map<string, string>();
-  const attachmentByCollegeEmailId = new Map<string, string>();
+  let attachmentByCollegeEmailId = new Map<string, string[]>();
   if (canonicalIds.length > 0) {
     const [canonicalRes, attachmentRes] = await Promise.all([
       supabase
@@ -603,7 +604,8 @@ export default async function CompanyDetailPage(props: {
       supabase
         .from('college_attachments')
         .select('college_email_id, filename')
-        .in('college_email_id', canonicalIds),
+        .in('college_email_id', canonicalIds)
+        .order('filename'),
     ]);
 
     if (canonicalRes.error) {
@@ -619,13 +621,7 @@ export default async function CompanyDetailPage(props: {
       }
     }
 
-    if (attachmentRes.data) {
-      for (const att of attachmentRes.data) {
-        if (att.college_email_id && att.filename) {
-          attachmentByCollegeEmailId.set(att.college_email_id, att.filename);
-        }
-      }
-    }
+    attachmentByCollegeEmailId = groupEmailAttachmentNames(attachmentRes.data || []);
 
     // Also pull attachment filenames from candidate_matches across all users for these canonical emails
     const { data: globalMatches } = await supabase
@@ -638,7 +634,7 @@ export default async function CompanyDetailPage(props: {
       if (gm.college_email_id && !attachmentByCollegeEmailId.has(gm.college_email_id)) {
         const m = gm.matched_value?.match(/Matched in (.+?)\s*\(/i);
         if (m && m[1]) {
-          attachmentByCollegeEmailId.set(gm.college_email_id, m[1].trim());
+          attachmentByCollegeEmailId.set(gm.college_email_id, [m[1].trim()]);
         }
       }
     }
@@ -786,7 +782,8 @@ export default async function CompanyDetailPage(props: {
           : colId
             ? collegeAccount?.email || null
             : null,
-        attachmentName: colId ? attachmentByCollegeEmailId.get(colId) || null : null,
+        attachmentNames: colId ? attachmentByCollegeEmailId.get(colId) || [] : [],
+        attachmentName: colId ? attachmentByCollegeEmailId.get(colId)?.[0] || null : null,
       };
     }),
     candidateMatches: companyCandidateMatches.map((cm: any) => ({
