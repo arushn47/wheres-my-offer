@@ -73,15 +73,6 @@ export async function PATCH(
     }
 
     const driveIds = matchedDrives.map((d) => d.id);
-    const companyIds = Array.from(new Set(matchedDrives.map((d) => d.company_id).filter(Boolean)));
-    // Alias edits must apply ONLY to the company of the drive group the admin edited.
-    // matchedDrives can include sibling drive rows that share a company_id (e.g. two
-    // "Deloitte" drive numbers under one company); writing aliases to the shared
-    // company row silently "links" sibling drives by giving them the same alias set.
-    const primaryDrive = matchedDrives[0];
-    const editScopeCompanyIds = Array.from(new Set([primaryDrive.company_id].filter(Boolean)));
-    // companyName rename keeps the broader scope: it is a brand correction across the org.
-    const renameScopeCompanyIds = companyIds;
 
     // Prepare update payload for placement_drives
     const driveUpdate: Record<string, any> = {
@@ -113,18 +104,7 @@ export async function PATCH(
       return NextResponse.json({ error: updateErr.message }, { status: 500 });
     }
 
-    // 3. If companyName is updated, update company names for linked companies
-    if (companyName && renameScopeCompanyIds.length > 0) {
-      await supabase
-        .from('companies')
-        .update({
-          name: companyName.trim(),
-          updated_at: new Date().toISOString(),
-        })
-        .in('id', renameScopeCompanyIds);
-    }
-
-    // 3b. Aliases are DRIVE-SCOPED — each drive_number gets its own alias list.
+    // 3. Names and aliases are drive-scoped; the parent employer is shared by siblings.
     //
     // Storage: a single `drive_resolutions` row (resolved_via='manual_review') per
     // drive_number, with aliases encoded as JSON in the `notes` field:

@@ -962,7 +962,7 @@ export default function DrivesClient() {
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-xs font-semibold text-zinc-300 mb-1.5">
-                    Company Name <span className="text-red-400">*</span>
+                    Drive Name <span className="text-red-400">*</span>
                   </label>
                   <input
                     type="text"

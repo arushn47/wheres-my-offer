@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { requireAdmin } from '@/lib/auth/admin';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { normalizeDriveNumber } from '@/lib/drive-number';
+import { getDriveDisplayName } from '@/lib/drive-display';
 
 export const dynamic = 'force-dynamic';
 
@@ -143,7 +144,7 @@ export async function GET() {
 
     for (const d of drives) {
       const normNumber = normalizeDriveNumber(d.drive_number || d.normalized_drive_number);
-      const companyName = (d.company_id ? companyMap.get(d.company_id) : null) || d.drive_name || 'Unknown Drive';
+      const companyName = getDriveDisplayName(d.drive_name, d.company_id ? companyMap.get(d.company_id) : null);
       const key = normNumber ? `drive:${normNumber}` : `name:${companyName.toLowerCase().trim()}`;
 
       const emailStats = emailsPerDrive.get(d.id) || { count: 0, latestDate: null };
