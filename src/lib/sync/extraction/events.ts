@@ -614,7 +614,8 @@ export function extractEvents(email: ParsedEmail): ExtractedEvent[] {
   // GUARDS against false assessment creation:
   // 1. Post-test / Already completed emails (e.g. "shortlisted based on the test", "already completed the assessment", "completes the test")
   const hasAssessmentAlreadyCompleted =
-    /already\s+completed\s+(?:the\s+)?(?:assessment|test)|completes?\s+(?:the\s+)?(?:assessment|test)|shortlisted\s+based\s+on\s+(?:the\s+)?test|not\s+(?:the\s+)?shortlist\s+for\s+(?:the\s+)?(?:further|next)\s+(?:selection\s+process|round)|not\s+to\s+consider\s+the\s+attached\s+list\s+as\s+(?:the\s+)?shortlist/i.test(cleanNormalizedText);
+    !subjectMentionsTest &&
+    (/already\s+completed\s+(?:the\s+)?(?:assessment|test)|till\s+(?:the\s+)?last\s+person\s+completes\s+(?:the\s+)?test|\bcompletes\s+(?:the\s+)?(?:assessment|test)\b|shortlisted\s+based\s+on\s+(?:the\s+)?test|not\s+(?:the\s+)?shortlist\s+for\s+(?:the\s+)?(?:further|next)\s+(?:selection\s+process|round)|not\s+to\s+consider\s+the\s+attached\s+list\s+as\s+(?:the\s+)?shortlist/i.test(cleanNormalizedText));
 
   // 2. Google Form / Location Preference submission emails
   const isFormOrPreferenceOnly =

@@ -64,3 +64,6 @@ supabase/.temp/
 supabase/migrations/
 tools/
 docs/
+
+brag-promo/
+brag-output/

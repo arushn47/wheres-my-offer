@@ -254,8 +254,12 @@ export async function runSharedCollegeSync(options: { limit?: number; globalDead
         }
       } catch (error) {
         failed++;
-        console.error(`[Shared College Sync] Failed message ${messageId}:`, error);
-        break; // Leave this and later messages pending for the next run.
+        console.error(`[Shared College Sync] Failed message ${messageId}, skipping and advancing offset:`, error);
+        // Advance past the bad message so one permanent failure can never freeze the
+        // entire queue across subsequent cron runs.
+        state.pending_offset++;
+        await checkpoint(supabase, account.id, runId, state);
+        break; // Still break this run to avoid runaway errors; next run starts past this message.
       }
       state.pending_offset++;
       await checkpoint(supabase, account.id, runId, state);

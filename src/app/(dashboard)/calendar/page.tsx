@@ -28,7 +28,7 @@ export default async function CalendarPage() {
   ] = await Promise.all([
     supabase
       .from('events')
-      .select('id, placement_drive_id, event_type, title, start_time, end_time, venue, mode, manual_override')
+      .select('id, placement_drive_id, event_type, title, start_time, end_time, venue, mode, manual_override, round_number')
       .eq('user_id', session.userId)
       .order('start_time', { ascending: true }),
 
@@ -117,8 +117,10 @@ export default async function CalendarPage() {
         }
       }
 
-      // Deduplicate: 1 single timing per company stage (e.g. 1 PPT, 1 Assessment)
-      const key = `${evt.placement_drive_id}:${evt.event_type}`;
+      // Deduplicate: same company, event type, date, and round (preserves distinct interview rounds/dates)
+      const eventDate = evt.start_time ? new Date(evt.start_time).toISOString().slice(0, 10) : 'nodate';
+      const roundKey = (evt as any).round_number ? `:r${(evt as any).round_number}` : '';
+      const key = `${evt.placement_drive_id}:${evt.event_type}:${eventDate}${roundKey}`;
       if (!seenCalendarKeys.has(key)) {
         seenCalendarKeys.add(key);
         const drive = driveMap.get(evt.placement_drive_id);

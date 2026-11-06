@@ -251,4 +251,29 @@ placementoffice@vitbhopal.ac.in> wrote:
     // Should NOT extract a bogus test event from "completes the test" or quoted 12:45 PM
     expect(events.filter((e) => ['online_test', 'coding_test'].includes(e.eventType)).length).toBe(0);
   });
+
+  it('extracts AI Technical Interview event scheduled from 28th October 2026', async () => {
+    const interviewEmail = {
+      gmailMessageId: 'ltm-interview-1',
+      threadId: 'th-ltm-int',
+      sender: 'Placement Office <placementoffice@vitbhopal.ac.in>',
+      senderEmail: 'placementoffice@vitbhopal.ac.in',
+      subject: 'LTM next round of selection process (AI Technical Interview) is scheduled from 28th October 2026 from 8 AM onwards - Virtual mode @ Own location',
+      bodyPlain: 'LTM next round of selection process (AI Technical Interview) is scheduled from 28th October 2026 from 8 AM onwards - Virtual mode @ Own location',
+      bodyHtml: '',
+      bodySnippet: 'LTM next round of selection process (AI Technical Interview) is scheduled from 28th October 2026 from 8 AM onwards - Virtual mode @ Own location',
+      receivedAt: new Date('2026-10-15T13:00:55.000Z'),
+      hasAttachments: true,
+      attachments: [],
+      labels: [],
+    };
+
+    const events = extractEvents(interviewEmail as any);
+    expect(events.length).toBeGreaterThan(0);
+
+    const { extractScopedEvents } = await import('./scoped-events');
+    const scoped = extractScopedEvents(interviewEmail as any, 'LTM', ['TCS', 'Infosys']);
+    expect(scoped.length).toBeGreaterThan(0);
+    expect(scoped[0].eventType).toBe('technical_interview');
+  });
 });

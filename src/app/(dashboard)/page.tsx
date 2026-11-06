@@ -278,8 +278,9 @@ export default async function DashboardPage() {
         }
       }
 
-      // Deduplicate: 1 single timing per event stage
-      const key = `${event.placement_drive_id}:${event.event_type}`;
+      // Deduplicate: same company, event type, and date
+      const eventDate = event.start_time ? new Date(event.start_time).toISOString().slice(0, 10) : 'nodate';
+      const key = `${event.placement_drive_id}:${event.event_type}:${eventDate}`;
       if (!seenEventKeys.has(key)) {
         seenEventKeys.add(key);
         uniqueUpcomingEvents.push(event);
