@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { appToast } from '@/components/ui/toast';
 import { createClient } from '@/lib/supabase/client';
 import { getStatusUpdatePhase } from '@/lib/sync/recruitment/status-display';
+import { getUpdatesPollDelay, getFallbackSyncPollDelay } from '@/lib/sync/progress/adaptive-poll';
 
 export interface SyncProgress {
   phase: 'initializing' | 'fetching' | 'processing' | 'complete' | 'error';
@@ -103,6 +104,7 @@ export function SyncProvider({
   const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const hasMountedAutoSyncRef = useRef(false);
   const activeAbortControllerRef = useRef<AbortController | null>(null);
+  const handleSyncRef = useRef<((silent?: boolean, isChained?: boolean) => Promise<void>) | null>(null);
 
   useEffect(() => {
     if (initialLastSyncAt) {
@@ -113,14 +115,17 @@ export function SyncProvider({
 
   const stopPolling = useCallback(() => {
     if (pollIntervalRef.current) {
-      clearInterval(pollIntervalRef.current);
+      clearTimeout(pollIntervalRef.current);
       pollIntervalRef.current = null;
     }
   }, []);
 
-  // Fallback polling (60s) used ONLY when an external/background sync is active and SSE is NOT streaming
+  // Fallback polling used ONLY when an external/background sync is active and SSE is NOT streaming
   const startPolling = useCallback((immediate: boolean = false) => {
     if (pollIntervalRef.current || isSseActiveRef.current) return;
+
+    let consecutiveUnchanged = 0;
+    let lastProgressDigest = '';
 
     const poll = async () => {
       // Do not poll if tab is hidden or SSE stream has taken over
@@ -142,6 +147,16 @@ export function SyncProvider({
           if (data.progress) {
             setSyncProgress(data.progress);
           }
+          const digest = `${data.progress?.phase || ''}|${data.progress?.processedMessages || 0}|${data.progress?.newEmails || 0}`;
+          if (digest === lastProgressDigest) {
+            consecutiveUnchanged++;
+          } else {
+            consecutiveUnchanged = 0;
+            lastProgressDigest = digest;
+          }
+          const nextDelay = getFallbackSyncPollDelay(true, consecutiveUnchanged) ?? 5000;
+          if (pollIntervalRef.current) clearTimeout(pollIntervalRef.current);
+          pollIntervalRef.current = setTimeout(poll, nextDelay);
         } else {
           if (data.phase === 'paused' || data.progress?.paused) {
             stopPolling();
@@ -155,7 +170,7 @@ export function SyncProvider({
           // If pending, a batch just finished and more pages are queued — resume immediately
           if (data.phase === 'pending') {
             stopPolling();
-            handleSync(false, true);
+            handleSyncRef.current?.(false, true);
             return;
           }
 
@@ -190,15 +205,17 @@ export function SyncProvider({
           }
         }
       } catch {
-        // Ignore polling errors
+        // Retry with backoff if error
+        if (pollIntervalRef.current) clearTimeout(pollIntervalRef.current);
+        pollIntervalRef.current = setTimeout(poll, 10000);
       }
     };
 
     if (immediate) {
-      poll();
+      void poll();
+    } else {
+      pollIntervalRef.current = setTimeout(poll, 5000);
     }
-    // Dynamic 2.5-second polling interval while sync is active to instantly reflect completion
-    pollIntervalRef.current = setInterval(poll, 2500);
   }, [router, stopPolling]);
 
   // Clean up polling interval, chained timeouts, and active fetch on unmount
@@ -607,6 +624,7 @@ export function SyncProvider({
       })
       .catch(() => {});
   }, [startPolling]);
+  handleSyncRef.current = handleSync;
 
   // Page Visibility guard: pause polling when tab is hidden, check once when visible
   useEffect(() => {
@@ -616,6 +634,10 @@ export function SyncProvider({
         stopPolling();
       } else if (document.visibilityState === 'visible') {
         if (isSseActiveRef.current) return;
+        // If this client is not actively syncing or waiting on a fallback poll,
+        // let the adaptive /api/sync/updates poller passively discover background syncs
+        // without issuing redundant /api/sync/status queries on every tab focus.
+        if (!isSyncingRef.current && !pollIntervalRef.current) return;
 
         try {
           const res = await fetch('/api/sync/status');
@@ -669,9 +691,22 @@ export function SyncProvider({
     let timer: ReturnType<typeof setTimeout> | null = null;
     let controller: AbortController | null = null;
     let version: string | null | undefined;
+    let lastActivityTime = Date.now();
+
+    const scheduleNext = () => {
+      if (disposed || document.visibilityState !== 'visible') return;
+      const idleMs = Date.now() - lastActivityTime;
+      const delay = getUpdatesPollDelay(idleMs);
+      if (delay !== null) {
+        timer = setTimeout(() => void poll(), delay);
+      } else {
+        timer = null; // Stopped due to >= 15m idle; resumes on user activity or tab focus
+      }
+    };
+
     const poll = async () => {
       if (disposed) return;
-      if (document.visibilityState==='visible' && !isSseActiveRef.current && !isSyncingRef.current) {
+      if (document.visibilityState === 'visible' && !isSseActiveRef.current && !isSyncingRef.current) {
         controller = new AbortController();
         try {
           const response = await fetch('/api/sync/updates', { cache: 'no-store', signal: controller.signal });
@@ -692,20 +727,43 @@ export function SyncProvider({
         } catch { /* Retry the passive check without starting a sync. */ }
         finally { controller = null; }
       }
-      if (!disposed) timer = setTimeout(() => void poll(), 10_000);
+      scheduleNext();
     };
+
+    const handleActivity = () => {
+      const wasStopped = timer === null;
+      lastActivityTime = Date.now();
+      if (wasStopped && !disposed && document.visibilityState === 'visible' && !controller) {
+        void poll();
+      }
+    };
+
     const visible = () => {
-      if (document.visibilityState !== 'visible' || controller) return;
+      if (document.visibilityState !== 'visible') {
+        if (timer) clearTimeout(timer);
+        timer = null;
+        controller?.abort();
+        return;
+      }
+      lastActivityTime = Date.now();
       if (timer) clearTimeout(timer);
       void poll();
     };
+
     void poll();
-    document.addEventListener('visibilitychange',visible);
+    document.addEventListener('visibilitychange', visible);
+    window.addEventListener('pointerdown', handleActivity, { passive: true });
+    window.addEventListener('keydown', handleActivity, { passive: true });
+    window.addEventListener('scroll', handleActivity, { passive: true });
+
     return () => {
       disposed = true;
       if (timer) clearTimeout(timer);
       controller?.abort();
-      document.removeEventListener('visibilitychange',visible);
+      document.removeEventListener('visibilitychange', visible);
+      window.removeEventListener('pointerdown', handleActivity);
+      window.removeEventListener('keydown', handleActivity);
+      window.removeEventListener('scroll', handleActivity);
     };
   }, [router, startPolling]);
 

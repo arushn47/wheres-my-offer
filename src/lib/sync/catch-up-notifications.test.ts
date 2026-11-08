@@ -183,6 +183,25 @@ describe('notification catch-up pairing',()=>{
     const db=await assertEquivalent(fixture(),[]);
     expect(db.requests).toHaveLength(0);
   });
+  it('scopes incremental catch-up to deduplicated touched drives without scanning unrelated drives', async () => {
+    const data = fixture(5);
+    data.personal_emails = [
+      announcement('p-0', 'drive-0', iso(-1)),
+      announcement('p-1', 'drive-1', iso(-1)),
+      announcement('p-2', 'drive-2', iso(-1)),
+    ];
+    data.college_emails = [
+      circular('college-0', iso(-1)),
+      circular('college-1', iso(-1)),
+      circular('college-2', iso(-1)),
+    ];
+    const rawUnion = ['drive-0', 'drive-0', 'drive-1', ''];
+    const deduplicatedUnion = Array.from(new Set(rawUnion.filter(Boolean)));
+    const db = await assertEquivalent(data, deduplicatedUnion);
+    const appQuery = db.requests.find(r => r.table === 'applications');
+    expect(appQuery?.filters).toContainEqual(['in', 'placement_drive_id', ['drive-0', 'drive-1']]);
+    expect(notifyNewDrive).toHaveBeenCalledTimes(2);
+  });
   it('retains the no-applications early return',async()=>{
     const db=database(fixture(0));
     expect(await catchUpMissingNotifications(db,USER)).toEqual({newDrivesNotified:0,eventsNotified:0,shortlistsNotified:0});

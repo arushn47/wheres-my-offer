@@ -64,6 +64,9 @@ supabase/.temp/
 supabase/migrations/
 tools/
 docs/
+!docs/
+docs/*
+!docs/architecture-change-plan.md
 
 brag-promo/
 brag-output/

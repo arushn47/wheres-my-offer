@@ -62,4 +62,21 @@ describe('targeted shared shortlist scan',()=>{
   expect(writes).toEqual([]);
   expect(fixture.lookup.mock.calls[0][1]).toEqual([]);
  });
+
+ it('never merges multiple sibling drives based on company name alone and isolates drive evidence', async () => {
+  fixture.emails = [
+   { id: 'email-a', subject: 'Apple test shortlist', classification: 'shortlist', parsed_company_name: 'Apple', parsed_drive_numbers: ['101'], received_at: '2026-10-05T00:00:00Z' },
+   { id: 'email-ambiguous', subject: 'Apple general shortlist', classification: 'shortlist', parsed_company_name: 'Apple', parsed_drive_numbers: [], received_at: '2026-10-05T00:00:00Z' },
+  ];
+  fixture.lookup.mockReset().mockImplementation(async () => [
+   { sourceKind: 'attachment', sourceKey: 'attachment-a', collegeEmailId: 'email-a', filename: 'shortlist.xlsx', parseStatus: 'complete', indexedSummary: { usable: true, match: { sheetIndex: 0, sheetName: 'Candidates', rowNumber: 2 } } },
+  ]);
+  writes.length = 0;
+  expect(await scan(['b'])).toBe(0);
+  expect(writes).toEqual([]);
+  expect(await scan(['a'])).toBe(1);
+  expect(writes).toHaveLength(1);
+  expect(writes[0].placement_drive_id).toBe('a');
+  expect(writes[0].college_email_id).toBe('email-a');
+ });
 });

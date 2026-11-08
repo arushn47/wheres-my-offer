@@ -1,6 +1,9 @@
 import type { createAdminClient } from '@/lib/supabase/admin';
 import type { runSync } from './engine';
 
+export const PERSONAL_PUSH_MAX_DURATION_MS = 45_000;
+export const PERSONAL_PUSH_MAX_RUNS = 3;
+
 /** Acknowledge a push only once the saved queue and its history boundary are covered. */
 export async function drainPersonalPush(params: {
   admin: ReturnType<typeof createAdminClient>;
@@ -8,10 +11,14 @@ export async function drainPersonalPush(params: {
   userId: string;
   accountId: string;
   historyId?: string;
+  maxDurationMs?: number;
+  maxRuns?: number;
 }) {
-  const globalDeadline = Date.now() + 240_000;
+  const duration = params.maxDurationMs ?? PERSONAL_PUSH_MAX_DURATION_MS;
+  const maxRuns = params.maxRuns ?? PERSONAL_PUSH_MAX_RUNS;
+  const globalDeadline = Date.now() + duration;
   let previousCursor: string | null = null;
-  for (let runs = 0; runs < 20 && Date.now() < globalDeadline - 5000; runs++) {
+  for (let runs = 0; runs < maxRuns && Date.now() < globalDeadline - 5000; runs++) {
     const result = await params.sync(params.userId, undefined, { isBackgroundCron: true, globalDeadline });
     if (result.alreadyRunning) throw new Error('Personal sync is already running; retry this push');
     if (result.paused) throw new Error('Personal sync paused at a saved checkpoint; retry this push');

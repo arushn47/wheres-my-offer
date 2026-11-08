@@ -2680,12 +2680,15 @@ async function runSyncMeasured(
               currentSubject: 'Updating drive statuses…',
             };
             notifyProgress(statusProgress, true);
-            const { recalculateApplicationStatuses } = await import('@/lib/sync/reprocess');
-            await recalculateApplicationStatuses(userId, undefined, postSyncTargets
-              ? { targetPlacementDriveIds: postSyncTargets }
+            const touchedDrivesUnion = Array.from(new Set([
+              ...(postSyncTargets || []),
+              ...(currentMutationLease()?.touchedDriveIds || []),
+            ].filter(Boolean)));
+            const { recalculateApplicationStatuses, catchUpMissingNotifications } = await import('@/lib/sync/reprocess');
+            await recalculateApplicationStatuses(userId, undefined, touchedDrivesUnion.length
+              ? { targetPlacementDriveIds: touchedDrivesUnion }
               : undefined);
-            const { catchUpMissingNotifications } = await import('@/lib/sync/reprocess');
-            await catchUpMissingNotifications(supabase, userId, hadCompletedInitialPages ? undefined : [...(currentMutationLease()?.touchedDriveIds || [])]);
+            await catchUpMissingNotifications(supabase, userId, touchedDrivesUnion);
             result.statusUpdatesPending = false;
             result.statusUpdatesCompleted = true;
             notifyProgress({

@@ -166,12 +166,12 @@ export async function POST(req: NextRequest) {
         if (isSharedCollegeSource) {
           let result: Awaited<ReturnType<typeof runSharedCollegeSync>>;
           let runs = 0;
-          const globalDeadline = Date.now() + 240_000;
+          const globalDeadline = Date.now() + 45_000;
           do {
             result = await runSharedCollegeSync({ limit: 100, globalDeadline });
             runs++;
             if (result.alreadyRunning || result.userWorkPending || result.failed > 0 || !result.hasMore) break;
-          } while (runs < 20 && Date.now() < globalDeadline - 5000);
+          } while (runs < 3 && Date.now() < globalDeadline - 5000);
           if (result.alreadyRunning || result.failed > 0 || result.hasMore) throw new Error('Shared College sync has saved work remaining; retry this push');
           const { data: checkpoint, error: checkpointError } = await supabase.from('gmail_accounts')
             .select('last_history_id').eq('id', account.id).maybeSingle();
