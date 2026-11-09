@@ -85,7 +85,6 @@ export default function AnalyticsClient({
     withdrawnCount,
     notAppliedCount,
     shortlistedCount,
-    clearedAssessmentCount,
     interviewCount,
     offerCount,
     rejectedCount,
@@ -102,7 +101,6 @@ export default function AnalyticsClient({
     let withdrawn = 0;
     let notApplied = 0;
     let shortlisted = 0;
-    let clearedAssessment = 0;
     let interviewed = 0;
     let selected = 0;
     let rejected = 0;
@@ -146,10 +144,14 @@ export default function AnalyticsClient({
       applied++;
 
       const compEvents = eventsByDrive.get(driveId) || [];
-      const hasTestEvent = compEvents.some((e) =>
+
+      // Only use event-based detection when user was actually shortlisted
+      // (broadcast circulars create events for all users, inflating counts)
+      const isNotShortlisted = ['not_shortlisted', 'not_shortlisted_post_ppt', 'not_applied'].includes(s);
+      const hasTestEvent = !isNotShortlisted && compEvents.some((e) =>
         /test|coding|assessment|hackerearth|mettl|shl/i.test(`${e.event_type || ''}`)
       );
-      const hasInterviewEvent = compEvents.some((e) =>
+      const hasInterviewEvent = !isNotShortlisted && compEvents.some((e) =>
         /interview/i.test(`${e.event_type || ''}`)
       );
 
@@ -159,7 +161,8 @@ export default function AnalyticsClient({
       // Offers Won:
       const isSelected = ['selected', 'offer', 'offer_received'].includes(s);
 
-      // Interviews Reached: Candidate progressed to or scheduled for interview rounds
+      // Interviews Reached: candidate actually reached interview stage
+      // Status-based only — don't use hasInterviewEvent (too noisy from broadcast circulars)
       const isInterviewed =
         [
           'interview',
@@ -169,15 +172,8 @@ export default function AnalyticsClient({
           'rejected_interview',
           'interview_eliminated',
         ].includes(s) ||
-        hasInterviewEvent ||
         elimCtx.roundType === 'interview' ||
         elimCtx.roundType === 'interview_r2' ||
-        isSelected;
-
-      // Assessments Cleared: Candidate cleared test/OA and reached interview, GD, or direct selection
-      const isAssessmentCleared =
-        isInterviewed ||
-        elimCtx.roundType === 'gd' ||
         isSelected;
 
       // Shortlisted for OA / Test:
@@ -194,10 +190,9 @@ export default function AnalyticsClient({
         elimCtx.roundType === 'test' ||
         elimCtx.roundType === 'test_r2' ||
         ['rejected_test', 'test_eliminated'].includes(s) ||
-        isAssessmentCleared;
+        isInterviewed;
 
       if (isShortlistedForOA) shortlisted++;
-      if (isAssessmentCleared) clearedAssessment++;
       if (isInterviewed) interviewed++;
       if (isSelected) selected++;
       if (s === 'rejected' || s === 'not_shortlisted') rejected++;
@@ -246,16 +241,14 @@ export default function AnalyticsClient({
 
     // Monotonic clamping: downstream stages can never exceed upstream stages
     const finalShortlisted = Math.min(shortlisted, applied);
-    const finalClearedAssessment = Math.min(clearedAssessment, finalShortlisted);
-    const finalInterviewed = Math.min(interviewed, finalClearedAssessment);
-    const finalSelected = Math.min(selected, finalInterviewed);
+    const finalInterviewed = Math.min(interviewed, finalShortlisted);
+    const finalSelected = Math.min(selected, finalInterviewed || selected);
 
     return {
       appliedCount: applied,
       withdrawnCount: withdrawn,
       notAppliedCount: notApplied,
       shortlistedCount: finalShortlisted,
-      clearedAssessmentCount: finalClearedAssessment,
       interviewCount: finalInterviewed,
       offerCount: finalSelected,
       rejectedCount: rejected,
@@ -280,12 +273,6 @@ export default function AnalyticsClient({
       count: shortlistedCount,
       pct: appliedCount > 0 ? Math.round((shortlistedCount / appliedCount) * 100) : 0,
       color: 'bg-violet-500',
-    },
-    {
-      label: 'Assessments Cleared',
-      count: clearedAssessmentCount,
-      pct: appliedCount > 0 ? Math.round((clearedAssessmentCount / appliedCount) * 100) : 0,
-      color: 'bg-amber-500',
     },
     {
       label: 'Interviews Reached',

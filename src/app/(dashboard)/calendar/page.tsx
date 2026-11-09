@@ -65,16 +65,22 @@ export default async function CalendarPage() {
     not_applied: 0,        // not registered — only future registration deadlines (handled separately)
     applied: 2,            // can see PPT and scheduled test events
     ppt_scheduled: 2,      // can see PPT and scheduled test events
+    ppt_ongoing: 2,        // PPT in progress — can see test events
     ppt_completed: 2,      // PPT done — still show test events
     shortlisted: 2,        // shortlisted for test
     test_scheduled: 2,     // can see test events
+    test_ongoing: 2,       // test in progress — still show test events
     test_completed: 3,     // test done — show interview events too
     interview_scheduled: 3, // can see interview events
-    interview_completed: 4,
+    interview_ongoing: 3,  // interview in progress
+    interview_completed: 3, // interview done — keep at 3 (not 4); no offer yet
     selected: 5,
     offer_received: 5,
     rejected: 0,
+    rejected_test: 0,
+    rejected_interview: 0,
     not_shortlisted: 0,
+    not_shortlisted_post_ppt: 0,
     declined: 0,
     withdrawn: 0,
   };

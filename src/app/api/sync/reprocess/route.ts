@@ -186,7 +186,7 @@ export async function POST(req: Request) {
         }, 2000);
 
         try {
-          sendEvent('start', { message: 'Analyzing placement archive & re-indexing drivesâ€¦' });
+          sendEvent('start', { message: 'Analyzing placement archive & re-indexing drives...' });
 
           const statusResult = await performReprocess(userId!, (progress) => {
             sendEvent('progress', progress);

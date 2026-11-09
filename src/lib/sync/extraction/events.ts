@@ -710,11 +710,32 @@ export function extractEvents(email: ParsedEmail): ExtractedEvent[] {
       /(?:interview|personal\s+discussion|next\s+round\s+of\s+(?:the\s+)?(?:selection\s+process|selection|process)|physical\s+selection\s+process|selection\s+process)\s*(?:is\s+scheduled)?\s*[:\-–—]?\s*(?:from|on)?\s*\(?(.{1,120})/i
     );
     const snippetForInterview = interviewMatch ? interviewMatch[0] : cleanNormalizedText;
-    const parsed = parseDateTimeWithConfidence(snippetForInterview, refDate, email.establishedRoundDate);
+    let parsed = parseDateTimeWithConfidence(snippetForInterview, refDate, email.establishedRoundDate);
+    // Fallback: if the 120-char snippet cut off the date/time (common when the interview
+    // keyword appears in the subject and the actual date is in the body), re-parse
+    // the full normalized text so we do not miss dates like "November 12, 2026".
+    if (!parsed.date && snippetForInterview !== cleanNormalizedText) {
+      const fallbackParsed = parseDateTimeWithConfidence(cleanNormalizedText, refDate, email.establishedRoundDate);
+      if (fallbackParsed.date) parsed = fallbackParsed;
+    }
 
+    // hasExplicitDateInText: true when we have strong evidence of a concrete date.
+    // Extended to also match "Month Day[, Year]" format (e.g. "November 12, 2026")
+    // which parseDateTimeWithConfidence supports but the old guard missed.
+    const MONTH_ABBR = 'jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec';
+    const MONTH_FULL_SUFFIX = '(?:uary|ruary|ch|il|e|y|ust|tember|ober|ember)?';
+    const DAY_ORDINAL = '\\d{1,2}(?:st|nd|rd|th)?';
     const hasExplicitDateInText =
       parsed.hasExplicitTime ||
-      /\b(?:\d{1,2}(?:st|nd|rd|th)?\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)|\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}|tomm|tomorrow|tmrw)\b/i.test(snippetForInterview);
+      new RegExp(
+        `\\b(?:${DAY_ORDINAL}\\s+(?:${MONTH_ABBR})|(?:${MONTH_ABBR})${MONTH_FULL_SUFFIX}\\s+${DAY_ORDINAL}(?:,?\\s*\\d{4})?|\\d{1,2}[\\/\\-\\.]\\d{1,2}[\\/\\-\\.]\\d{2,4}|tomm|tomorrow|tmrw)\\b`,
+        'i'
+      ).test(snippetForInterview) ||
+      // Also test the full text in case the snippet was truncated before the date
+      new RegExp(
+        `\\b(?:${DAY_ORDINAL}\\s+(?:${MONTH_ABBR})|(?:${MONTH_ABBR})${MONTH_FULL_SUFFIX}\\s+${DAY_ORDINAL}(?:,?\\s*\\d{4})?|\\d{1,2}[\\/\\-\\.]\\d{1,2}[\\/\\-\\.]\\d{2,4})\\b`,
+        'i'
+      ).test(cleanNormalizedText);
     const isExplicitlyScheduled = /(?:interview|selection\s+process|next\s+round)\s+(?:is\s+)?scheduled/i.test(cleanNormalizedText);
 
     if (parsed.date && (hasExplicitDateInText || isExplicitlyScheduled)) {

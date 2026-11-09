@@ -162,13 +162,15 @@ export default function DashboardClient({
       const isScheduled =
         s.includes('scheduled') ||
         s.includes('ongoing') ||
+        s.includes('shortlisted') ||
+        s === 'shortlisted' ||
         ['interview', 'test', 'ppt'].includes(s) ||
         hasUpcomingEvt;
       if (isScheduled) return 2;
 
       if (s.includes('completed')) return 3;
 
-      return 4; // applied / shortlisted
+      return 4; // applied
     };
 
     return [...active]
@@ -190,10 +192,10 @@ export default function DashboardClient({
           if (nextA !== null) return -1;
           if (nextB !== null) return 1;
 
-          // Subscore for scheduled: interview > test > ppt
+          // Subscore for scheduled / shortlisted: interview > test / shortlisted > ppt
           const sA = (a.status || '').toLowerCase();
           const sB = (b.status || '').toLowerCase();
-          const rank = (st: string) => (st.includes('interview') ? 3 : st.includes('test') ? 2 : 1);
+          const rank = (st: string) => (st.includes('interview') ? 3 : (st.includes('test') || st.includes('shortlisted') || st === 'shortlisted') ? 2 : 1);
           const diff = rank(sB) - rank(sA);
           if (diff !== 0) return diff;
         }

@@ -185,8 +185,10 @@ const CLASSIFICATION_RULES: ClassificationRule[] = [
       ((/(online\s+test|coding\s+test|online\s+assessment|aptitude\s+test|test\s+schedule|test\s+link|assessment\s+(?:test|link|scheduled|window)|test\s+time|revised\s+test\s+time|thanks\s+for\s+taking\s+(?:the\s+)?assessment)/i.test(s) ||
         (/\bapplied\s+(?:students?|candidates?)\b/i.test(s) && /(?:online\s+assessment|\boa\b|online\s+test|coding\s+test|assessment\s+link|attend\s+the\s+test|attempt\s+the\s+test|fresh\s+link|test\s+link|test\s+today|test\s*\d*\s*[:\-]|tests?\.mettl\.com|hackerrank\.com|codility\.com|shl\.com|amcat\.in|cocubes\.com)/i.test(b)) ||
         (/(?:tests?\.mettl\.com|hackerrank\.com|codility\.com)\/authenticateKey|test\s*\d*\s*:\s*\d{1,2}:\d{2}\s*(?:am|pm)/i.test(b))) &&
-      !/(?:ppt|pre[\s-]*placement\s*talk).*(?:online\s+test|coding\s+test|assessment)/i.test(s)),
-    reason: 'Subject or applied candidates notice mentions online test or assessment',
+      !/(?:ppt|pre[\s-]*placement\s*talk).*(?:online\s+test|coding\s+test|assessment)/i.test(s) &&
+      // Do NOT classify completion/past-tense subjects as an active test invitation
+      !/\b(?:complet(?:ed?|ion)|concluded?|finished|ended|done)\b/i.test(s)),
+    reason: 'Subject or applied candidates notice mentions online test or assessment (not a completion notice)',
   },
   {
     classification: 'ppt',

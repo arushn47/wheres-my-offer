@@ -56,7 +56,7 @@ import {
  * companies of a user by loading ALL their emails at once and doing holistic analysis.
  *
  * This is the same computation that happens at the end of performReprocess but runs
- * standalone â€” called from the sync engine after all pages complete to correct any
+ * standalone — called from the sync engine after all pages complete to correct any
  * status errors from incremental per-email processing.
  */
 export async function recalculateApplicationStatuses(...args: Parameters<typeof recalculateApplicationStatusesUnlocked>) {
@@ -85,7 +85,7 @@ async function recalculateApplicationStatusesUnlocked(
   onProgress?.({
     step: 5,
     totalSteps: 5,
-    message: `Recalculating application stages, CTCs & calendar events for official drivesâ€¦`,
+    message: `Recalculating application stages, CTCs & calendar events for official drives...`,
   });
 
   const candidateIdentity = await loadUserCandidateIdentity(supabase, userId);
@@ -541,7 +541,7 @@ async function recalculateApplicationStatusesUnlocked(
     }
   }
 
-  const DRIVE_BATCH_SIZE = 8;
+  const DRIVE_BATCH_SIZE = 4;
   for (let bIdx = 0; bIdx < drivesToProcess.length; bIdx += DRIVE_BATCH_SIZE) {
     const driveBatch = drivesToProcess.slice(bIdx, bIdx + DRIVE_BATCH_SIZE);
     onProgress?.({
@@ -554,6 +554,7 @@ async function recalculateApplicationStatusesUnlocked(
       driveBatch.map(async (drive) => {
         const comp = companyMap.get(drive.company_id);
         if (!comp) return;
+        try {
 
         const driveMinAllowedTime = driveMinAllowedTimeMap.get(drive.id) || 0;
         const driveEmails = (emailsByDriveId.get(drive.id) || []).filter((e) => {
@@ -955,14 +956,14 @@ async function recalculateApplicationStatusesUnlocked(
           driveStartDate = personalDate || circularDate || null;
         }
 
-        // Find if there is a next drive for this company to avoid date bleed
+        // Find if there is a next drive for this company to avoid date bleed (only from separate NeoPAT announcements >= 24h later)
         let nextDriveStartDate: Date | null = null;
         if (driveStartDate && siblingDrives.length > 0) {
           for (const sib of siblingDrives) {
             const sibEmails = emailsByDriveId.get(sib.id) || [];
             const sibPersonal = sibEmails.filter(isPersonalNeoPatEmail);
-            const sibStart = sibPersonal[0]?.received_at ? new Date(sibPersonal[0].received_at) : (sib.created_at ? new Date(sib.created_at) : null);
-            if (sibStart && sibStart.getTime() > driveStartDate.getTime()) {
+            const sibStart = sibPersonal[0]?.received_at ? new Date(sibPersonal[0].received_at) : null;
+            if (sibStart && sibStart.getTime() > driveStartDate.getTime() + 24 * 60 * 60 * 1000) {
               if (!nextDriveStartDate || sibStart.getTime() < nextDriveStartDate.getTime()) {
                 nextDriveStartDate = sibStart;
               }
@@ -973,11 +974,19 @@ async function recalculateApplicationStatusesUnlocked(
         // Active emails for this drive: strictly scoped to this drive's emails, respecting start date and next drive boundary
         const activeDriveEmails = chronologicalCompanyEmails.filter((e) => {
           const eTime = new Date(e.received_at || 0).getTime();
-          // Allow circulars that arrived up to 24h before the drive announcement
-          if (driveStartDate && eTime < driveStartDate.getTime() - 24 * 60 * 60 * 1000) return false;
-          if (driveMinAllowedTime > 0 && eTime < driveMinAllowedTime) return false;
-          if (!isCircularAllowedByScheduledDate(e.subject, driveMinAllowedTime, 7, (e as any).body_text || e.body_snippet)) return false;
-          if (nextDriveStartDate && eTime >= nextDriveStartDate.getTime() - 5 * 60 * 1000) return false;
+          // If the email explicitly references this drive's number, always keep it
+          const eDriveNums = ((e as any).parsed_drive_numbers || [])
+            .map((n: string) => normalizeDriveNumber(n))
+            .filter((n: string | null | undefined): n is string => Boolean(n));
+          const explicitlyMatchesThisDrive = eDriveNums.length > 0 && eDriveNums.some((n: string) => thisDriveNumbers.includes(n));
+
+          if (!explicitlyMatchesThisDrive) {
+            // Allow circulars that arrived up to 24h before the drive announcement
+            if (driveStartDate && eTime < driveStartDate.getTime() - 24 * 60 * 60 * 1000) return false;
+            if (driveMinAllowedTime > 0 && eTime < driveMinAllowedTime) return false;
+            if (!isCircularAllowedByScheduledDate(e.subject, driveMinAllowedTime, 7, (e as any).body_text || e.body_snippet)) return false;
+            if (nextDriveStartDate && eTime >= nextDriveStartDate.getTime() - 5 * 60 * 1000) return false;
+          }
           return true;
         });
 
@@ -1162,7 +1171,7 @@ async function recalculateApplicationStatusesUnlocked(
           const full = `${subj} ${body}`;
 
           // If subject explicitly announces an online test/assessment (e.g. "WorkIndia online test and selection process is scheduled"),
-          // and does NOT explicitly say "interview", it is a test round email â€” NOT a next round / interview email!
+          // and does NOT explicitly say "interview", it is a test round email — NOT a next round / interview email!
           if (/(?:online\s+)?test|assessment|coding\s+test|\bexam\b/i.test(subj) && !/interview/i.test(subj)) {
             return false;
           }
@@ -1276,7 +1285,7 @@ async function recalculateApplicationStatusesUnlocked(
           // 3. Merely describing duration (e.g. "Online Test: 45-60 minutes") in interview process without scheduling a date
           if (
             /(?:interview|selection|evaluation|recruitment)\s+process/i.test(full) &&
-            /online\s+test\s*[:\-â€“â€”]?\s*\d+\s*(?:mins?|minutes?)/i.test(full) &&
+            /online\s+test\s*[:\-–—]?\s*\d+\s*(?:mins?|minutes?)/i.test(full) &&
             !/(?:test|assessment)\s+(?:is\s+)?scheduled\s+(?:on|for)|\bon\s+\d{1,2}[-/.]\d{1,2}/i.test(full)
           ) {
             return false;
@@ -1284,7 +1293,7 @@ async function recalculateApplicationStatusesUnlocked(
 
           // 4. If email explicitly states date will be informed later and has no test date
           if (
-            /date\s+of\s+visit\s*[:\-â€“â€”]?\s*will\s+be\s+informed|will\s+be\s+informed\s+later/i.test(full) &&
+            /date\s+of\s+visit\s*[:\-–—]?\s*will\s+be\s+informed|will\s+be\s+informed\s+later/i.test(full) &&
             !/(?:test|assessment)\s+(?:is\s+)?scheduled\s+(?:on|for)|\bon\s+\d{1,2}[-/.]\d{1,2}/i.test(full)
           ) {
             return false;
@@ -1295,7 +1304,7 @@ async function recalculateApplicationStatusesUnlocked(
             /(?:online\s+)?(?:test|assessment|exam)\s+(?:is\s+)?scheduled\s+(?:on|for)/i.test(b) ||
             /(?:online\s+)?(?:test|assessment|exam)\s+on\s+\d{1,2}[-/.]\d{1,2}/i.test(b) ||
             /test\s+will\s+be\s+conducted\s+on\s+\d{1,2}/i.test(b) ||
-            /test\s+link\s*[:\-â€“â€”]|assessment\s+link\s*[:\-â€“â€”]|login\s+window|test\s+window\s*[:\-â€“â€”]|test\s+credentials/i.test(b) ||
+            /test\s+link\s*[:\-–—]|assessment\s+link\s*[:\-–—]|login\s+window|test\s+window\s*[:\-–—]|test\s+credentials/i.test(b) ||
             /(?:codility|hackerrank|mettl)\s+(?:test|assessment|link)/i.test(full);
 
           return hasBodySchedule;
@@ -1520,9 +1529,9 @@ async function recalculateApplicationStatusesUnlocked(
           (latestPositiveMatchTime > latestWithdrawalTime || hasDirectPersonalTestInvitation);
 
         // Track why the candidate got 'rejected' so getEffectiveStage can distinguish:
-        // - 'rejected' + 'Eliminated in Test Round' note  â†’ rejected_test (wrote test, failed)
-        // - 'rejected' + 'Interviewed Â· Not Selected' note â†’ rejected_interview (interviewed, not selected)
-        // - 'not_shortlisted'                              â†’ not shortlisted for test (pre-test screening)
+        // - 'rejected' + 'Eliminated in Test Round' note   -> rejected_test (wrote test, failed)
+        // - 'rejected' + 'Interviewed · Not Selected' note -> rejected_interview (interviewed, not selected)
+        // - 'not_shortlisted'                               -> not shortlisted for test (pre-test screening)
         let computedRejectionNote: string | null = null;
 
         if (isWithdrawn && !genuinePositiveMatchAfterWithdrawal) {
@@ -1572,7 +1581,7 @@ async function recalculateApplicationStatusesUnlocked(
             // selection list came out afterwards without them → Interviewed · Not Selected
             computedRejectionNote = 'Interviewed · Not Selected';
           } else if (!hasUpcomingInterviewEvent && interviewTime > 0 && interviewTime < Date.now()) {
-            computedStatus = 'shortlisted';
+            computedStatus = 'interview_completed';
           } else {
             computedStatus = 'interview_scheduled';
           }
@@ -1582,6 +1591,7 @@ async function recalculateApplicationStatusesUnlocked(
             (e) => ['online_test', 'coding_test'].includes(e.eventType) && e.startTime
           );
           const hasUpcomingTestEvent = testEvents.some((e) => Boolean(e.startTime && e.startTime.getTime() > Date.now()));
+          const hasElapsedTestEvent = testEvents.some((e) => Boolean(e.startTime && e.startTime.getTime() < Date.now()));
           const latestTestEventTime = testEvents.reduce(
             (max, e) => Math.max(max, e.startTime ? e.startTime.getTime() : 0),
             0
@@ -1613,12 +1623,15 @@ async function recalculateApplicationStatusesUnlocked(
             Boolean(e.received_at && new Date(e.received_at).getTime() > referenceTestTime + 30 * 60 * 1000))) {
             computedStatus = 'rejected';
             computedRejectionNote = 'Eliminated in Test Round';
-          } else if (!hasUpcomingTestEvent && testTime > 0 && testTime < Date.now()) {
+          } else if (hasElapsedTestEvent) {
             // A completed test is not a rejection. Only an explicit result or a
             // later shortlist/selection round can establish elimination.
             computedStatus = 'test_completed';
-          } else {
+          } else if (hasUpcomingTestEvent) {
             computedStatus = 'test_scheduled';
+          } else {
+            // Shortlisted for test without scheduled event date yet
+            computedStatus = 'shortlisted';
           }
         } else if (hasConfirmedRegistration) {
           if (preTestShortlistEmails.length > 0) {
@@ -2047,7 +2060,11 @@ async function recalculateApplicationStatusesUnlocked(
             }, comp.name, (remainingCompanies || []).map((company) => company.name));
 
             for (const rawEvt of evts) {
-              if (/test|interview|ppt|group_discussion/.test(rawEvt.eventType) && !isRoundEventEligible(sourceVerdict, rawEvt.eventType)) continue;
+              const isVerifiedAbsentInEmail = roundVerdicts.some((verdict) =>
+                verdict.evaluations.some((scan) => scan.emailId === sourceRef && scan.state === 'verified_absent')
+              );
+              if (isVerifiedAbsentInEmail) continue;
+              if (sourceVerdict && !isRoundEventEligible(sourceVerdict, rawEvt.eventType)) continue;
               const evt = {
                 ...rawEvt,
                 _sourceReceivedAt: e.received_at || null,
@@ -2193,6 +2210,9 @@ async function recalculateApplicationStatusesUnlocked(
           role: finalRole,
           ctc: extractedJob.ctc,
         });
+        } catch (driveErr) {
+          console.error(`[recalculateApplicationStatuses] Error processing drive ${drive.id} (${comp.name}):`, driveErr);
+        }
       })
     );
   }
@@ -2420,7 +2440,7 @@ async function performReprocessUnlocked(
   onProgress?.({
     step: 1,
     totalSteps: 5,
-    message: 'Cleaning recipient matches & fetching stored circularsâ€¦',
+    message: 'Cleaning recipient matches & fetching stored circulars...',
   });
 
   // Fetch user details
@@ -2629,7 +2649,7 @@ async function performReprocessUnlocked(
   onProgress?.({
     step: 2,
     totalSteps: 5,
-    message: `Analyzing ${neoPatEmails.length} official NeoPAT drives & resolving track numbersâ€¦`,
+    message: `Analyzing ${neoPatEmails.length} official NeoPAT drives & resolving track numbers...`,
   });
 
   // Pre-load all existing global companies and drives into memory to avoid thousands of slow DB roundtrips
@@ -2690,7 +2710,7 @@ async function performReprocessUnlocked(
       onProgress?.({
         step: 2,
         totalSteps: 5,
-        message: `Analyzing official NeoPAT drives (${idx + 1}/${neoPatEmails.length})â€¦`,
+        message: `Analyzing official NeoPAT drives (${idx + 1}/${neoPatEmails.length})...`,
       });
     }
 
@@ -2953,7 +2973,7 @@ async function performReprocessUnlocked(
   onProgress?.({
     step: 3,
     totalSteps: 5,
-    message: `Verified ${validDriveIdSet.size} official NeoPAT drives across ${validCompanyIdSet.size} companies. Purging unverified entriesâ€¦`,
+    message: `Verified ${validDriveIdSet.size} official NeoPAT drives across ${validCompanyIdSet.size} companies. Purging unverified entries...`,
   });
 
   const { data: userApps } = await supabase

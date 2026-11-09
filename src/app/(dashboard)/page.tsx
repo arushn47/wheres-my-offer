@@ -235,13 +235,22 @@ export default async function DashboardPage() {
   const STATUS_MAX_STAGE: Record<string, number> = {
     applied: 1,            // only PPT/intro events (cannot see tests until shortlisted!)
     ppt_scheduled: 1,      // only PPT
+    ppt_ongoing: 1,        // PPT in progress
+    ppt_completed: 2,      // PPT done — show test events
     shortlisted: 2,        // shortlisted for test
     test_scheduled: 2,     // can see test events, not interviews
+    test_ongoing: 2,       // test in progress
+    test_completed: 3,     // test done — show interview events
     interview_scheduled: 3, // can see interview events
+    interview_ongoing: 3,  // interview in progress
+    interview_completed: 3, // interview done — keep at 3
     selected: 5,
     offer_received: 5,
     rejected: 0,
+    rejected_test: 0,
+    rejected_interview: 0,
     not_shortlisted: 0,
+    not_shortlisted_post_ppt: 0,
     not_applied: 0,
     declined: 0,
     withdrawn: 0,

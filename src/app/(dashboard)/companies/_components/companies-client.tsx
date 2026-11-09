@@ -365,7 +365,7 @@ export default function CompaniesClient({
           // Offer / Selected celebration
           if (['selected', 'offer', 'offer_received'].includes(s)) return 0;
 
-          // 2. Scheduled stuff (interview, test, ppt, ongoing, or future round event)
+          // 2. Scheduled & Shortlisted rounds (interview, test, ppt, ongoing, shortlisted, or future round event)
           const compEvents = comp.events || (comp.latestEvent ? [comp.latestEvent] : []);
           const hasUpcomingRound = compEvents.some((e) => {
             const isRound = /interview|test|coding|assessment|ppt|pre-placement/i.test(
@@ -377,6 +377,8 @@ export default function CompaniesClient({
           const isScheduled =
             s.includes('scheduled') ||
             s.includes('ongoing') ||
+            s.includes('shortlisted') ||
+            s === 'shortlisted' ||
             ['interview', 'test', 'ppt'].includes(s) ||
             hasUpcomingRound;
           if (isScheduled) return 2;
@@ -384,7 +386,7 @@ export default function CompaniesClient({
           // 3. Completed stuff (interview_completed, test_completed, ppt_completed)
           if (s.includes('completed')) return 3;
 
-          // 4. Applied (applied, shortlisted)
+          // 4. Applied
           return 4;
         };
 
@@ -426,12 +428,12 @@ export default function CompaniesClient({
           if (nextA !== null) return -1;
           if (nextB !== null) return 1;
 
-          // Subscore for scheduled rounds: interview > test > ppt
+          // Subscore for scheduled rounds: interview > test / shortlisted > ppt
           const getScheduledRank = (comp: CompanyWithDetails) => {
             const eff = getEffectiveStage(comp.application?.status || '', comp.latestEvent, comp.events, comp.application?.notes, comp.application?.manual_override);
             const s = eff.effectiveStatus.toLowerCase();
             if (s.includes('interview')) return 3;
-            if (s.includes('test')) return 2;
+            if (s.includes('test') || s.includes('shortlisted') || s === 'shortlisted') return 2;
             return 1;
           };
           const diff = getScheduledRank(b) - getScheduledRank(a);

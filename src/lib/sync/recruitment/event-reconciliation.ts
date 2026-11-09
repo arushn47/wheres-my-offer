@@ -88,7 +88,10 @@ async function reconcileElapsedEventStatusesUnlocked(
         ['test_scheduled', 'test_ongoing'].includes(app.status) &&
         effStatus === 'test_completed'
       ) {
-        targetStatus = 'shortlisted';
+        // Test window has elapsed. Mark as test_completed so the UI can show
+        // "Test Completed · Awaiting Results" rather than "Test Scheduled".
+        // The candidate has not been shortlisted yet — that requires a roster match.
+        targetStatus = 'test_completed';
       } else if (
         ['ppt_scheduled', 'ppt_ongoing'].includes(app.status) &&
         effStatus === 'ppt_completed'
@@ -98,7 +101,13 @@ async function reconcileElapsedEventStatusesUnlocked(
         ['interview_scheduled', 'interview_ongoing'].includes(app.status) &&
         effStatus === 'interview_completed'
       ) {
-        targetStatus = 'shortlisted';
+        // Interview window has elapsed. Mark as interview_completed so the UI
+        // shows "Interview Completed · Results Awaited" rather than
+        // "Interview Scheduled". The candidate has NOT been selected yet —
+        // that requires explicit confirmation (offer/selection email).
+        // Previously this was incorrectly set to 'shortlisted', which would
+        // demote the candidate from interview stage back to test stage.
+        targetStatus = 'interview_completed';
       }
 
       if (targetStatus && targetStatus !== app.status) {

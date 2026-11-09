@@ -162,6 +162,7 @@ const ALL_STATUSES = [
   { value: 'test_scheduled', label: 'Test Scheduled' },
   { value: 'test_completed', label: 'Test Completed (Awaiting Results)' },
   { value: 'interview_scheduled', label: 'Interview Scheduled' },
+  { value: 'interview_completed', label: 'Interview Completed (Awaiting Results)' },
   { value: 'selected', label: 'Selected / Offer 🎉' },
   { value: 'not_shortlisted', label: 'Not Shortlisted for Test (Screening)' },
   { value: 'not_shortlisted_post_ppt', label: 'Not Shortlisted (Post PPT)' },
@@ -312,6 +313,7 @@ export default function CompanyDetailClient({
       return 'not_shortlisted';
     }
     if (eff.effectiveStatus === 'test_completed') return 'test_completed';
+    if (eff.effectiveStatus === 'interview_completed') return 'interview_completed';
 
     if (rawStatus === 'rejected') {
       // Use the same note patterns that getEffectiveStage uses

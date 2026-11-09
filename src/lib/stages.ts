@@ -177,7 +177,13 @@ export function getEffectiveStage(
   // Past event awareness: true only if scheduled events have completely elapsed
   const isPptCompleted = hasPpt && pptEvents.every(isEventPast);
   const isTestCompleted = ['test_completed','interview_scheduled','interview_ongoing','interview_completed','selected','offer','offer_received'].includes(s);
-  const isInterviewCompleted = ['interview_completed','selected','offer','offer_received'].includes(s);
+  // isInterviewCompleted: either the stored status is a post-interview state,
+  // OR all scheduled interview events have passed their end time (elapsed).
+  // The elapsed-event check lets a drive stuck at 'interview_scheduled' surface
+  // as 'interview_completed' in the UI without fabricating a result.
+  const isInterviewCompleted =
+    ['interview_completed','selected','offer','offer_received'].includes(s) ||
+    (hasInterview && intEvents.every(isEventPast));
 
   const notesText = notes || '';
   const isNotesInterview =
@@ -439,6 +445,26 @@ export function getEffectiveStage(
     }
 
     if (['interview_scheduled', 'interview', 'interview_ongoing'].includes(s)) {
+      // Even when manually set to interview_scheduled, if ALL interview events have
+      // elapsed we surface interview_completed so the UI shows the correct state.
+      // This does NOT fabricate a result — it only reflects that the interview window passed.
+      if (isInterviewCompleted && !isInterviewOngoing) {
+        return {
+          stageIndex: 3,
+          effectiveStatus: 'interview_completed',
+          eliminatedStage: -1,
+          furthestPassedStage: 3,
+          statusSubtitle: 'Interview Completed · Results Awaited',
+          hasPpt,
+          hasTest,
+          hasInterview,
+          isTestCompleted,
+          isPptCompleted,
+          isInterviewCompleted: true,
+          eliminatedStageId: null,
+          eliminationLabel: null,
+        };
+      }
       return {
         stageIndex: 3,
         effectiveStatus: isInterviewOngoing ? 'interview_ongoing' : 'interview_scheduled',
